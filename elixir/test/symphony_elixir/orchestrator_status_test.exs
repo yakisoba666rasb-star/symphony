@@ -51,6 +51,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       identifier: issue.identifier,
       issue: issue,
       session_id: nil,
+      codex_app_server_pid: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
       turn_count: 0,
       last_codex_message: nil,
       last_codex_timestamp: nil,
@@ -1188,6 +1195,161 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_receive {:memory_tracker_comment, ^issue_id, comment}
     assert comment =~ "Symphony blocked MT-MAX"
     assert comment =~ "agent.max_turns reached while Linear issue stayed active"
+  end
+
+  test "orchestrator snapshot includes branch_name for running entries" do
+    issue_id = "issue-branch-snapshot-running"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-BR-RUN",
+      branch_name: "feature/branch-snapshot-running",
+      title: "Running snapshot branch name",
+      description: "Expose branch name in running snapshot",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-BR-RUN"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :BranchSnapshotRunningOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      codex_app_server_pid: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      turn_count: 0,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.branch_name == "feature/branch-snapshot-running"
+  end
+
+  test "orchestrator snapshot includes branch_name for blocked entries" do
+    issue_id = "issue-branch-snapshot-blocked"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-BR-BLK",
+      branch_name: "feature/branch-snapshot-blocked",
+      title: "Blocked snapshot branch name",
+      description: "Expose branch name in blocked snapshot",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-BR-BLK"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :BranchSnapshotBlockedOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "thread-branch-block",
+      turn_count: 0,
+      last_codex_message: %{
+        event: :turn_input_required,
+        message: %{method: "thread/inputRequired"},
+        timestamp: DateTime.utc_now()
+      },
+      last_codex_timestamp: DateTime.utc_now(),
+      last_codex_event: :turn_input_required,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+
+    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+    assert %{blocked: [snapshot_entry]} = snapshot
+    assert snapshot_entry.branch_name == "feature/branch-snapshot-blocked"
+  end
+
+  test "orchestrator snapshot supports blocked entries without issue payload" do
+    issue_id = "issue-branch-missing-issue-blocked"
+
+    orchestrator_name = Module.concat(__MODULE__, :BranchSnapshotBlockedNoIssueOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    blocked_entry = %{
+      identifier: "MT-BR-NO",
+      error: "manual regression",
+      worker_host: "dm-dev2",
+      workspace_path: "/workspaces/MT-BR-NO",
+      session_id: "thread-no-issue",
+      blocked_at: DateTime.utc_now(),
+      last_codex_timestamp: DateTime.utc_now(),
+      last_codex_message: %{
+        event: :notification,
+        message: %{method: "thread/inputRequired"},
+        timestamp: DateTime.utc_now()
+      },
+      last_codex_event: :turn_input_required
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:blocked, %{issue_id => blocked_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+    assert %{blocked: [snapshot_entry]} = snapshot
+    assert snapshot_entry.issue_id == issue_id
+    assert snapshot_entry.identifier == "MT-BR-NO"
+    assert snapshot_entry.branch_name == nil
   end
 
   test "status dashboard renders offline marker to terminal" do
