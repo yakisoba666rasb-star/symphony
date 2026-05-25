@@ -249,7 +249,9 @@ defmodule SymphonyElixir.Orchestrator do
          workspace_path
        ) do
     case lookup_pr_for_branch(workspace_path, branch_name) do
-      {:ok, %{} = _pr} ->
+      {:ok, pr} when is_map(pr) ->
+        pr_number = pr["number"] || pr[:number]
+        pr_url = pr["url"] || pr[:url]
         Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
         state
@@ -258,7 +260,9 @@ defmodule SymphonyElixir.Orchestrator do
           identifier: running_entry.identifier,
           delay_type: :continuation,
           worker_host: Map.get(running_entry, :worker_host),
-          workspace_path: Map.get(running_entry, :workspace_path)
+          workspace_path: Map.get(running_entry, :workspace_path),
+          pr_number: pr_number,
+          pr_url: pr_url
         })
 
       {:ok, nil} ->
@@ -1172,6 +1176,8 @@ defmodule SymphonyElixir.Orchestrator do
     error = pick_retry_error(previous_retry, metadata)
     worker_host = pick_retry_worker_host(previous_retry, metadata)
     workspace_path = pick_retry_workspace_path(previous_retry, metadata)
+    pr_number = pick_retry_pr_number(previous_retry, metadata)
+    pr_url = pick_retry_pr_url(previous_retry, metadata)
 
     if is_reference(old_timer) do
       Process.cancel_timer(old_timer)
@@ -1193,6 +1199,8 @@ defmodule SymphonyElixir.Orchestrator do
             due_at_ms: due_at_ms,
             identifier: identifier,
             error: error,
+            pr_number: pr_number,
+            pr_url: pr_url,
             worker_host: worker_host,
             workspace_path: workspace_path
           })
@@ -1206,7 +1214,9 @@ defmodule SymphonyElixir.Orchestrator do
           identifier: Map.get(retry_entry, :identifier),
           error: Map.get(retry_entry, :error),
           worker_host: Map.get(retry_entry, :worker_host),
-          workspace_path: Map.get(retry_entry, :workspace_path)
+          workspace_path: Map.get(retry_entry, :workspace_path),
+          pr_number: Map.get(retry_entry, :pr_number),
+          pr_url: Map.get(retry_entry, :pr_url)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -1363,6 +1373,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp pick_retry_workspace_path(previous_retry, metadata) do
     metadata[:workspace_path] || Map.get(previous_retry, :workspace_path)
+  end
+
+  defp pick_retry_pr_number(previous_retry, metadata) do
+    metadata[:pr_number] || Map.get(previous_retry, :pr_number)
+  end
+
+  defp pick_retry_pr_url(previous_retry, metadata) do
+    metadata[:pr_url] || Map.get(previous_retry, :pr_url)
   end
 
   defp maybe_put_runtime_value(running_entry, _key, nil), do: running_entry
@@ -1538,7 +1556,9 @@ defmodule SymphonyElixir.Orchestrator do
           identifier: Map.get(retry, :identifier),
           error: Map.get(retry, :error),
           worker_host: Map.get(retry, :worker_host),
-          workspace_path: Map.get(retry, :workspace_path)
+          workspace_path: Map.get(retry, :workspace_path),
+          pr_number: Map.get(retry, :pr_number),
+          pr_url: Map.get(retry, :pr_url)
         }
       end)
 
