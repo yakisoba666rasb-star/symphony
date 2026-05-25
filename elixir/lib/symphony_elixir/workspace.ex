@@ -34,7 +34,9 @@ defmodule SymphonyElixir.Workspace do
   defp ensure_workspace(workspace, nil) do
     cond do
       File.dir?(workspace) ->
-        {:ok, workspace, false}
+        with :ok <- ensure_reusable_workspace(workspace) do
+          {:ok, workspace, false}
+        end
 
       File.exists?(workspace) ->
         File.rm_rf!(workspace)
@@ -82,6 +84,18 @@ defmodule SymphonyElixir.Workspace do
     File.rm_rf!(workspace)
     File.mkdir_p!(workspace)
     {:ok, workspace, true}
+  end
+
+  defp ensure_reusable_workspace(workspace) do
+    if File.dir?(Path.join(workspace, ".git")) do
+      case System.cmd("git", ["-C", workspace, "status", "--porcelain"], stderr_to_stdout: true) do
+        {"", 0} -> :ok
+        {output, 0} -> {:error, {:dirty_workspace, workspace, output}}
+        {output, status} -> {:error, {:workspace_git_status_failed, workspace, status, output}}
+      end
+    else
+      :ok
+    end
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}

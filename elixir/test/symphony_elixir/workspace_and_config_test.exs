@@ -92,6 +92,31 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace blocks existing git workspace with uncommitted changes" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-dirty-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git init -b main && git config user.name Test && git config user.email test@example.com && echo first > README.md && git add README.md && git commit -m initial"
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-DIRTY")
+      File.write!(Path.join(workspace, "README.md"), "changed\n")
+      File.write!(Path.join(workspace, "local-progress.txt"), "untracked\n")
+
+      assert {:error, {:dirty_workspace, ^workspace, status}} = Workspace.create_for_issue("MT-DIRTY")
+      assert status =~ "README.md"
+      assert status =~ "local-progress.txt"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace replaces stale non-directory paths" do
     workspace_root =
       Path.join(
