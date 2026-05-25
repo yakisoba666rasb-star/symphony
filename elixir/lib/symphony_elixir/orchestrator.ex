@@ -213,16 +213,22 @@ defmodule SymphonyElixir.Orchestrator do
           )
 
         :missing ->
-          Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+          if has_workspace_path?(running_entry) do
+            error = "no branch name available for GitHub PR lookup"
+            Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+            block_issue_from_entry(state, issue_id, running_entry, error)
+          else
+            Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
-          state
-          |> complete_issue(issue_id)
-          |> schedule_issue_retry(issue_id, 1, %{
-            identifier: running_entry.identifier,
-            delay_type: :continuation,
-            worker_host: Map.get(running_entry, :worker_host),
-            workspace_path: Map.get(running_entry, :workspace_path)
-          })
+            state
+            |> complete_issue(issue_id)
+            |> schedule_issue_retry(issue_id, 1, %{
+              identifier: running_entry.identifier,
+              delay_type: :continuation,
+              worker_host: Map.get(running_entry, :worker_host),
+              workspace_path: Map.get(running_entry, :workspace_path)
+            })
+          end
       end
     end
   end
@@ -303,6 +309,12 @@ defmodule SymphonyElixir.Orchestrator do
        do: {:ok, branch_name, workspace_path}
 
   defp branch_name_and_workspace(_running_entry), do: :missing
+
+  defp has_workspace_path?(%{workspace_path: workspace_path}) when is_binary(workspace_path) do
+    String.trim(workspace_path) != ""
+  end
+
+  defp has_workspace_path?(_running_entry), do: false
 
   defp lookup_pr_for_branch(workspace_path, branch_name)
        when is_binary(workspace_path) and is_binary(branch_name) do
