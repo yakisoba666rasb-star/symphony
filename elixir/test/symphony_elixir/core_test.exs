@@ -15,6 +15,7 @@ defmodule SymphonyElixir.CoreTest do
     assert config.polling.interval_ms == 30_000
     assert config.tracker.active_states == ["Todo", "In Progress"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
+    assert config.tracker.review_state == "In Review"
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
 
@@ -30,6 +31,8 @@ defmodule SymphonyElixir.CoreTest do
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 45_000)
     assert Config.settings!().polling.interval_ms == 45_000
 
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_review_state: "Review")
+    assert Config.settings!().tracker.review_state == "Review"
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 0)
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "agent.max_turns"

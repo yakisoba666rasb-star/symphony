@@ -253,20 +253,22 @@ defmodule SymphonyElixir.Orchestrator do
         _pr_number = pr["number"] || pr[:number]
         _pr_url = pr["url"] || pr[:url]
 
-        case tracker_module().update_issue_state(issue_id, "In Review") do
+        target_state = Config.settings!().tracker.review_state
+
+        case tracker_module().update_issue_state(issue_id, target_state) do
           :ok ->
-            Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; issue moved to In Review")
+            Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; issue moved to #{target_state}")
 
             state
             |> complete_issue(issue_id)
 
           {:error, reason} ->
-            error = "failed to move issue to In Review after PR discovery: #{inspect(reason)}"
+            error = "failed to move issue to #{target_state} after PR discovery: #{inspect(reason)}"
             Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
             block_issue_from_entry(state, issue_id, running_entry, error)
 
           other ->
-            error = "failed to move issue to In Review after PR discovery: #{inspect(other)}"
+            error = "failed to move issue to #{target_state} after PR discovery: #{inspect(other)}"
             Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
             block_issue_from_entry(state, issue_id, running_entry, error)
         end

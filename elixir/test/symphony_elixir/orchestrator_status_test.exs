@@ -1341,6 +1341,94 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert state.blocked == %{}
   end
 
+  test "orchestrator moves to configured review state when tracker state is customized" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil, tracker_review_state: "Review")
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+
+    previous_tracker_state_update_recipient =
+      Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+
+      if is_nil(previous_tracker_state_update_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_state_update_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_state_update_recipient,
+          previous_tracker_state_update_recipient
+        )
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupFound)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+
+    issue_id = "issue-normal-pr-found-custom-state"
+    orchestrator_name = Module.concat(__MODULE__, :NormalPrFoundCustomStateOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PR-FOUND-CUSTOM",
+      branch_name: "feature/pr-found",
+      state: "In Progress"
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      workspace_path: "/tmp/mt-pr-found-custom",
+      session_id: "thread-pr-found-custom",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert_receive {:tracker_state_update_called, ^issue_id, "Review"}, 200
+
+    assert MapSet.member?(state.completed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert state.blocked == %{}
+  end
+
   test "orchestrator blocks normal exits when PR state transition to In Review fails" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
 
