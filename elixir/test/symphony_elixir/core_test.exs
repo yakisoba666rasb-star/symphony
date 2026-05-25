@@ -1451,7 +1451,8 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert catch_exit(AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)) ==
+               {:max_turns_reached_active_issue, "issue-max-turns"}
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1
