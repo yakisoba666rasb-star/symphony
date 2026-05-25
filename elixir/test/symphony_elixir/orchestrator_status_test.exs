@@ -1253,7 +1253,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.blocked[issue_id]
   end
 
-  test "orchestrator retries normal exit with discoverable PR" do
+  test "orchestrator moves to In Review and does not retry on normal exit with discoverable PR" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
 
     previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
@@ -1337,8 +1337,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 200
 
     assert MapSet.member?(state.completed, issue_id)
-    assert Map.has_key?(state.retry_attempts, issue_id)
-    assert %{pr_number: 123, pr_url: "https://example.org/pull/123"} = state.retry_attempts[issue_id]
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert state.blocked == %{}
   end
 
   test "orchestrator blocks normal exits when PR state transition to In Review fails" do

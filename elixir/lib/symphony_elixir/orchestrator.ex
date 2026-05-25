@@ -250,23 +250,15 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     case lookup_pr_for_branch(workspace_path, branch_name) do
       {:ok, pr} when is_map(pr) ->
-        pr_number = pr["number"] || pr[:number]
-        pr_url = pr["url"] || pr[:url]
+        _pr_number = pr["number"] || pr[:number]
+        _pr_url = pr["url"] || pr[:url]
 
         case tracker_module().update_issue_state(issue_id, "In Review") do
           :ok ->
-            Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+            Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; issue moved to In Review")
 
             state
             |> complete_issue(issue_id)
-            |> schedule_issue_retry(issue_id, 1, %{
-              identifier: running_entry.identifier,
-              delay_type: :continuation,
-              worker_host: Map.get(running_entry, :worker_host),
-              workspace_path: Map.get(running_entry, :workspace_path),
-              pr_number: pr_number,
-              pr_url: pr_url
-            })
 
           {:error, reason} ->
             error = "failed to move issue to In Review after PR discovery: #{inspect(reason)}"
