@@ -215,11 +215,27 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
-    if input_required_blocker?(running_entry) do
-      block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
-    else
-      retry_agent_down(state, issue_id, running_entry, session_id, reason)
+    cond do
+      max_turns_reached_active_issue?(reason) ->
+        block_max_turns_agent_down(state, issue_id, running_entry, session_id)
+
+      input_required_blocker?(running_entry) ->
+        block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
+
+      true ->
+        retry_agent_down(state, issue_id, running_entry, session_id, reason)
     end
+  end
+
+  defp max_turns_reached_active_issue?({:max_turns_reached_active_issue, _issue_id}), do: true
+  defp max_turns_reached_active_issue?(_reason), do: false
+
+  defp block_max_turns_agent_down(state, issue_id, running_entry, session_id) do
+    error = "agent.max_turns reached while Linear issue stayed active"
+
+    Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+
+    block_issue_from_entry(state, issue_id, running_entry, error)
   end
 
   defp block_input_required_agent_down(state, issue_id, running_entry, session_id, reason) do
