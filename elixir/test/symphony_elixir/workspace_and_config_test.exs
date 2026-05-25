@@ -584,6 +584,54 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert skipped_issue.blocked_by == [%{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}]
   end
 
+  test "claiming a Todo issue transitions it to In Progress before dispatch" do
+    issue = %Issue{
+      id: "claim-1",
+      identifier: "MT-CLAIM",
+      title: "Claim before work",
+      state: "Todo"
+    }
+
+    parent = self()
+
+    updater = fn issue_id, state_name ->
+      send(parent, {:claim_update, issue_id, state_name})
+      :ok
+    end
+
+    assert {:ok, %Issue{state: "In Progress"}} =
+             Orchestrator.claim_issue_for_dispatch_for_test(issue, updater)
+
+    assert_receive {:claim_update, "claim-1", "In Progress"}
+  end
+
+  test "claim failure is returned before worker dispatch can start" do
+    issue = %Issue{
+      id: "claim-fails-1",
+      identifier: "MT-CLAIM-FAIL",
+      title: "Claim failure",
+      state: "Todo"
+    }
+
+    updater = fn "claim-fails-1", "In Progress" -> {:error, :linear_down} end
+
+    assert {:error, {:claim_issue_failed, :linear_down}} =
+             Orchestrator.claim_issue_for_dispatch_for_test(issue, updater)
+  end
+
+  test "claiming an already active non-Todo issue does not update Linear" do
+    issue = %Issue{
+      id: "claim-in-progress-1",
+      identifier: "MT-CLAIM-IP",
+      title: "Already claimed",
+      state: "In Progress"
+    }
+
+    updater = fn _issue_id, _state_name -> flunk("unexpected state update") end
+
+    assert {:ok, ^issue} = Orchestrator.claim_issue_for_dispatch_for_test(issue, updater)
+  end
+
   test "workspace remove returns error information for missing directory" do
     random_path =
       Path.join(

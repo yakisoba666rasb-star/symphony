@@ -387,6 +387,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec claim_issue_for_dispatch_for_test(Issue.t(), (String.t(), String.t() -> term())) ::
+          {:ok, Issue.t()} | {:error, term()}
+  def claim_issue_for_dispatch_for_test(%Issue{} = issue, state_updater)
+      when is_function(state_updater, 2) do
+    claim_issue_for_dispatch(issue, state_updater)
+  end
+
+  @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
@@ -935,8 +943,45 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+        case claim_issue_for_dispatch(issue, &Tracker.update_issue_state/2) do
+          {:ok, claimed_issue} ->
+            spawn_issue_on_worker_host(state, claimed_issue, attempt, recipient, worker_host)
+
+          {:error, reason} ->
+            Logger.warning("Skipping dispatch after claim failure for #{issue_context(issue)}: #{inspect(reason)}")
+            block_issue_before_dispatch(state, issue, "failed to claim issue before dispatch: #{inspect(reason)}")
+        end
     end
+  end
+
+  defp claim_issue_for_dispatch(%Issue{state: state_name} = issue, state_updater)
+       when is_function(state_updater, 2) do
+    if normalize_issue_state(state_name) == "todo" do
+      case state_updater.(issue.id, "In Progress") do
+        :ok -> {:ok, %{issue | state: "In Progress"}}
+        {:error, reason} -> {:error, {:claim_issue_failed, reason}}
+      end
+    else
+      {:ok, issue}
+    end
+  end
+
+  defp block_issue_before_dispatch(%State{} = state, %Issue{} = issue, error) do
+    block_issue_from_entry(
+      state,
+      issue.id,
+      %{
+        identifier: issue.identifier,
+        issue: issue,
+        worker_host: nil,
+        workspace_path: nil,
+        session_id: nil,
+        last_codex_message: nil,
+        last_codex_event: nil,
+        last_codex_timestamp: nil
+      },
+      error
+    )
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
