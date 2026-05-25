@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Workspace do
   alias SymphonyElixir.{Config, PathSafety, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
+  @remote_dirty_workspace_marker "__SYMPHONY_DIRTY_WORKSPACE__"
 
   @type worker_host :: String.t() | nil
 
@@ -54,6 +55,15 @@ defmodule SymphonyElixir.Workspace do
         remote_shell_assign("workspace", workspace),
         "if [ -d \"$workspace\" ]; then",
         "  created=0",
+        "  cd \"$workspace\"",
+        "  if [ -d .git ]; then",
+        "    dirty_status=$(git status --porcelain)",
+        "    if [ -n \"$dirty_status\" ]; then",
+        "      escaped_dirty_status=$(printf '%s' \"$dirty_status\" | sed ':a;N;$!ba;s/\\n/\\\\n/g')",
+        "      printf '%s\\t%s\\t%s\\n' '#{@remote_dirty_workspace_marker}' \"$(pwd -P)\" \"$escaped_dirty_status\"",
+        "      exit 72",
+        "    fi",
+        "  fi",
         "elif [ -e \"$workspace\" ]; then",
         "  rm -rf \"$workspace\"",
         "  mkdir -p \"$workspace\"",
@@ -73,7 +83,13 @@ defmodule SymphonyElixir.Workspace do
         parse_remote_workspace_output(output)
 
       {:ok, {output, status}} ->
-        {:error, {:workspace_prepare_failed, worker_host, status, output}}
+        case parse_remote_dirty_workspace_output(output) do
+          {:ok, workspace, dirty_status} ->
+            {:error, {:dirty_workspace, workspace, dirty_status}}
+
+          :error ->
+            {:error, {:workspace_prepare_failed, worker_host, status, output}}
+        end
 
       {:error, reason} ->
         {:error, reason}
@@ -421,6 +437,21 @@ defmodule SymphonyElixir.Workspace do
       "esac"
     ]
     |> Enum.join("\n")
+  end
+
+  defp parse_remote_dirty_workspace_output(output) do
+    output
+    |> IO.iodata_to_binary()
+    |> String.split("\n", trim: true)
+    |> Enum.find_value(:error, fn line ->
+      case String.split(line, "\t", parts: 3) do
+        [@remote_dirty_workspace_marker, path, dirty_status] when path != "" ->
+          {:ok, path, String.replace(dirty_status, "\\n", "\n")}
+
+        _ ->
+          nil
+      end
+    end)
   end
 
   defp parse_remote_workspace_output(output) do
