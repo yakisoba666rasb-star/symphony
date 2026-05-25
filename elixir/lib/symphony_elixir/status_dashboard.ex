@@ -662,6 +662,7 @@ defmodule SymphonyElixir.StatusDashboard do
     attempt = retry_entry.attempt || 0
     due_in_ms = retry_entry.due_in_ms || 0
     error = format_retry_error(retry_entry.error)
+    pr_reference = format_retry_pr_reference(Map.get(retry_entry, :pr_number), Map.get(retry_entry, :pr_url))
 
     "│  #{colorize("↻", @ansi_orange)} " <>
       colorize("#{identifier}", @ansi_red) <>
@@ -669,8 +670,44 @@ defmodule SymphonyElixir.StatusDashboard do
       colorize("attempt=#{attempt}", @ansi_yellow) <>
       colorize(" in ", @ansi_dim) <>
       colorize(next_in_words(due_in_ms), @ansi_cyan) <>
+      pr_reference <>
       error
   end
+
+  defp format_retry_pr_reference(nil, nil), do: ""
+
+  defp format_retry_pr_reference(nil, pr_url) when is_binary(pr_url) and pr_url != "" do
+    " " <> colorize(pr_url, @ansi_blue)
+  end
+
+  defp format_retry_pr_reference(pr_number, nil), do: format_retry_pr_reference(pr_number, "")
+
+  defp format_retry_pr_reference(pr_number, pr_url) when is_binary(pr_url) and pr_url != "" do
+    label = format_pr_label(pr_number)
+
+    if label == "" do
+      " " <> colorize(pr_url, @ansi_blue)
+    else
+      label <> " " <> colorize(pr_url, @ansi_blue)
+    end
+  end
+
+  defp format_retry_pr_reference(pr_number, _), do: format_pr_label(pr_number)
+
+  defp format_pr_label(nil), do: ""
+
+  defp format_pr_label(pr_number) when is_integer(pr_number) and pr_number > 0 do
+    " " <> colorize("PR ##{pr_number}", @ansi_magenta)
+  end
+
+  defp format_pr_label(pr_number) when is_binary(pr_number) do
+    case String.trim(pr_number) do
+      "" -> ""
+      trimmed -> " " <> colorize("PR ##{trimmed}", @ansi_magenta)
+    end
+  end
+
+  defp format_pr_label(_), do: ""
 
   defp next_in_words(due_in_ms) when is_integer(due_in_ms) do
     secs = div(due_in_ms, 1000)

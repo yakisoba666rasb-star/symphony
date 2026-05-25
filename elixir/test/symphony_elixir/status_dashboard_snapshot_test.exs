@@ -166,6 +166,64 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
     refute backoff_line =~ "\\n"
   end
 
+  test "snapshot backoff row includes PR metadata when provided" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [
+           retry_entry(%{
+             identifier: "MT-900",
+             attempt: 3,
+             due_in_ms: 900,
+             error: "rate limit exhausted",
+             pr_number: 123,
+             pr_url: "https://example.org/pull/123"
+           })
+         ],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = render_snapshot(snapshot_data, 0.0)
+    backoff_lines = rendered |> String.split("\n") |> Enum.filter(&String.contains?(&1, "MT-900"))
+
+    assert length(backoff_lines) == 1
+    [backoff_line] = backoff_lines
+
+    assert backoff_line =~ "attempt=3"
+    assert backoff_line =~ "PR #123"
+    assert backoff_line =~ "https://example.org/pull/123"
+  end
+
+  test "snapshot backoff row without PR metadata keeps legacy output" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [
+           retry_entry(%{
+             identifier: "MT-901",
+             attempt: 1,
+             due_in_ms: 1_000,
+             error: "temporary transport issue"
+           })
+         ],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = render_snapshot(snapshot_data, 0.0)
+    backoff_lines = rendered |> String.split("\n") |> Enum.filter(&String.contains?(&1, "MT-901"))
+
+    assert length(backoff_lines) == 1
+    [backoff_line] = backoff_lines
+
+    refute backoff_line =~ "PR #"
+    assert backoff_line =~ "attempt=1"
+    assert backoff_line =~ "error=temporary transport issue"
+  end
+
   test "snapshot fixture: unlimited credits variant" do
     snapshot_data =
       {:ok,
