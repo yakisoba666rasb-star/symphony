@@ -125,4 +125,137 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
     assert {:error, {:gh_json_error, _}} =
              GitHubPrLookup.lookup_by_head("octo/repo", "feature/bad-json", deps)
   end
+
+  test "resolves repository from SSH GitHub remote URL" do
+    workspace = "/tmp/owner-workspace-ssh"
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", args, _opts ->
+          assert args == ["-C", workspace, "remote", "get-url", "origin"]
+          {:ok, {"git@github.com:octo/repo.git", 0}}
+
+        "/tmp/fake-gh", _args, _opts ->
+          {:ok, {Jason.encode!([%{"number" => 1, "url" => "https://github.com/octo/repo/pull/1", "headRefName" => "feature/branch", "isDraft" => false, "mergeStateStatus" => "CLEAN"}]), 0}}
+      end
+    }
+
+    assert {:ok, %{"number" => 1, "headRefName" => "feature/branch"}} =
+             GitHubPrLookup.lookup_workspace_head(workspace, "feature/branch", deps)
+  end
+
+  test "resolves repository from HTTPS GitHub remote URL" do
+    workspace = "/tmp/owner-workspace-https"
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", args, _opts ->
+          assert args == ["-C", workspace, "remote", "get-url", "origin"]
+          {:ok, {"https://github.com/octo/repo.git", 0}}
+
+        "/tmp/fake-gh", _args, _opts ->
+          {:ok, {Jason.encode!([%{"number" => 2, "url" => "https://github.com/octo/repo/pull/2", "headRefName" => "feature/http", "isDraft" => false, "mergeStateStatus" => "CLEAN"}]), 0}}
+      end
+    }
+
+    assert {:ok, %{"number" => 2, "headRefName" => "feature/http"}} =
+             GitHubPrLookup.lookup_workspace_head(workspace, "feature/http", deps)
+  end
+
+  test "resolves repository from SSH host-alias GitHub remote URL" do
+    workspace = "/tmp/owner-workspace-alias"
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", args, _opts ->
+          assert args == ["-C", workspace, "remote", "get-url", "origin"]
+          {:ok, {"git@github-yakisoba:octo/repo.git", 0}}
+
+        "/tmp/fake-gh", _args, _opts ->
+          {:ok, {Jason.encode!([%{"number" => 3, "url" => "https://github.com/octo/repo/pull/3", "headRefName" => "feature/alias", "isDraft" => false, "mergeStateStatus" => "CLEAN"}]), 0}}
+      end
+    }
+
+    assert {:ok, %{"number" => 3, "headRefName" => "feature/alias"}} =
+             GitHubPrLookup.lookup_workspace_head(workspace, "feature/alias", deps)
+  end
+
+  test "returns tagged error for unsupported remote URL" do
+    workspace = "/tmp/owner-workspace-unsupported"
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", args, _opts ->
+          assert args == ["-C", workspace, "remote", "get-url", "origin"]
+          {:ok, {"https://gitlab.com/octo/repo.git", 0}}
+
+        "/tmp/fake-gh", _args, _opts ->
+          flunk("gh should not be invoked when remote URL is unsupported")
+      end
+    }
+
+    assert {:error, {:unsupported_remote_url, "https://gitlab.com/octo/repo.git"}} =
+             GitHubPrLookup.lookup_workspace_head(workspace, "feature/unsupported", deps)
+  end
+
+  test "returns tagged error for non-GitHub SSH remote URL" do
+    workspace = "/tmp/owner-workspace-ssh-unsupported"
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", args, _opts ->
+          assert args == ["-C", workspace, "remote", "get-url", "origin"]
+          {:ok, {"git@gitlab.com:octo/repo.git", 0}}
+
+        "/tmp/fake-gh", _args, _opts ->
+          flunk("gh should not be invoked when SSH remote URL is not GitHub")
+      end
+    }
+
+    assert {:error, {:unsupported_remote_url, "git@gitlab.com:octo/repo.git"}} =
+             GitHubPrLookup.lookup_workspace_head(workspace, "feature/unsupported-ssh", deps)
+  end
+
+  test "returns error when git is missing" do
+    workspace = "/tmp/owner-workspace-no-git"
+
+    deps = %{
+      find_git_bin: fn -> nil end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn _gh, _args, _opts -> {:error, :unused} end
+    }
+
+    assert {:error, :git_not_found} =
+             GitHubPrLookup.lookup_workspace_head(workspace, "feature/no-git", deps)
+  end
+
+  test "returns tagged error when git command fails" do
+    workspace = "/tmp/owner-workspace-git-fail"
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", args, _opts ->
+          assert args == ["-C", workspace, "remote", "get-url", "origin"]
+          {:error, :git_failed}
+
+        "/tmp/fake-gh", _args, _opts ->
+          {:ok, {"[]", 0}}
+      end
+    }
+
+    assert {:error, {:git_command_failed, :git_failed}} =
+             GitHubPrLookup.lookup_workspace_head(workspace, "feature/git-fail", deps)
+  end
 end
