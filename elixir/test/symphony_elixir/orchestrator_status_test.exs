@@ -1277,6 +1277,61 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.blocked[issue_id]
   end
 
+  test "orchestrator blocks normal worker exits when workspace exists but branch is missing" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+
+    issue_id = "issue-normal-missing-branch"
+    orchestrator_name = Module.concat(__MODULE__, :NormalMissingBranchOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-MISSING-BRANCH",
+      state: "In Progress"
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      workspace_path: "/tmp/mt-missing-branch",
+      session_id: "thread-missing-branch",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute MapSet.member?(state.completed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+
+    assert %{
+             identifier: "MT-MISSING-BRANCH",
+             error: "no branch name available for GitHub PR lookup"
+           } = state.blocked[issue_id]
+  end
+
   test "orchestrator moves to In Review and does not retry on normal exit with discoverable PR" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
 
