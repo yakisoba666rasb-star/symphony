@@ -356,7 +356,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> reconcile_blocked_issues()
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
+         {:ok, issues} <- tracker_module().fetch_candidate_issues(),
          true <- available_slots(state) > 0 do
       choose_issues(issues, state)
     else
@@ -410,7 +410,7 @@ defmodule SymphonyElixir.Orchestrator do
     if running_ids == [] do
       state
     else
-      case Tracker.fetch_issue_states_by_ids(running_ids) do
+      case tracker_module().fetch_issue_states_by_ids(running_ids) do
         {:ok, issues} ->
           issues
           |> reconcile_running_issue_states(
@@ -434,7 +434,7 @@ defmodule SymphonyElixir.Orchestrator do
     if blocked_ids == [] do
       state
     else
-      case Tracker.fetch_issue_states_by_ids(blocked_ids) do
+      case tracker_module().fetch_issue_states_by_ids(blocked_ids) do
         {:ok, issues} ->
           issues
           |> reconcile_blocked_issue_states(
@@ -1027,7 +1027,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
-    case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
+    case revalidate_issue_for_dispatch(issue, fn issue_ids -> tracker_module().fetch_issue_states_by_ids(issue_ids) end, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
         do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
 
@@ -1055,7 +1055,7 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       worker_host ->
-        case claim_issue_for_dispatch(issue, &Tracker.update_issue_state/2) do
+        case claim_issue_for_dispatch(issue, fn issue_id, state_name -> tracker_module().update_issue_state(issue_id, state_name) end) do
           {:ok, claimed_issue} ->
             spawn_issue_on_worker_host(state, claimed_issue, attempt, recipient, worker_host)
 
@@ -1239,7 +1239,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
-    case Tracker.fetch_candidate_issues() do
+    case tracker_module().fetch_candidate_issues() do
       {:ok, issues} ->
         issues
         |> find_issue_by_id(issue_id)
@@ -1298,7 +1298,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp run_terminal_workspace_cleanup do
-    case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
+    case tracker_module().fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
       {:ok, issues} ->
         issues
         |> Enum.each(fn

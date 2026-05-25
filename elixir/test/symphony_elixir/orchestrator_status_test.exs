@@ -37,6 +37,33 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       :ok
     end
+
+    def fetch_candidate_issues do
+      {:ok, []}
+    end
+
+    def fetch_issues_by_states(_states) do
+      {:ok, []}
+    end
+
+    def fetch_issue_states_by_ids(issue_ids) when is_list(issue_ids) do
+      {:ok,
+       Enum.map(issue_ids, fn
+         "issue-branch-snapshot-blocked" ->
+           %Issue{
+             id: "issue-branch-snapshot-blocked",
+             identifier: "issue-branch-snapshot-blocked",
+             title: "issue-branch-snapshot-blocked",
+             state: "In Progress",
+             branch_name: "feature/branch-snapshot-blocked"
+           }
+
+         issue_id ->
+           %Issue{id: issue_id, identifier: issue_id, title: issue_id, state: "In Progress"}
+       end)}
+    end
+
+    def fetch_issue_states_by_ids(_issue_ids), do: {:ok, []}
   end
 
   defmodule FakeTrackerUpdateInReviewError do
@@ -62,6 +89,89 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
 
       :ok
+    end
+
+    def fetch_candidate_issues do
+      {:ok, []}
+    end
+
+    def fetch_issues_by_states(_states) do
+      {:ok, []}
+    end
+
+    def fetch_issue_states_by_ids(issue_ids) when is_list(issue_ids) do
+      {:ok,
+       Enum.map(issue_ids, fn
+         "issue-branch-snapshot-blocked" ->
+           %Issue{
+             id: "issue-branch-snapshot-blocked",
+             identifier: "issue-branch-snapshot-blocked",
+             title: "issue-branch-snapshot-blocked",
+             state: "In Progress",
+             branch_name: "feature/branch-snapshot-blocked"
+           }
+
+         issue_id ->
+           %Issue{id: issue_id, identifier: issue_id, title: issue_id, state: "In Progress"}
+       end)}
+    end
+
+    def fetch_issue_states_by_ids(_issue_ids), do: {:ok, []}
+  end
+
+  defmodule FakeTrackerConfiguredModule do
+    def fetch_candidate_issues do
+      notify(:fetch_candidate_called)
+
+      {:ok,
+       [
+         %Issue{
+           id: "configured-fetch-issue",
+           identifier: "MT-CONFIG",
+           title: "Configured tracker fetch test",
+           description: "Proves orchestrator uses configured tracker module",
+           state: "Todo",
+           url: "https://example.org/issues/MT-CONFIG"
+         }
+       ]}
+    end
+
+    def fetch_issue_states_by_ids(issue_ids) when is_list(issue_ids) do
+      notify({:fetch_issue_states_by_ids_called, issue_ids})
+
+      issues =
+        Enum.map(issue_ids, fn issue_id ->
+          %Issue{id: issue_id, identifier: issue_id, title: issue_id, state: "Todo", description: "Tracked from configured tracker", url: "https://example.org/issues/" <> issue_id}
+        end)
+
+      {:ok, issues}
+    end
+
+    def fetch_issue_states_by_ids(_issue_ids), do: {:ok, []}
+
+    def fetch_issues_by_states(_states) do
+      notify(:fetch_issues_by_states_called)
+      {:ok, []}
+    end
+
+    def create_comment(issue_id, body) do
+      notify({:create_comment_called, issue_id, body})
+      :ok
+    end
+
+    def update_issue_state(issue_id, state_name) do
+      notify({:update_issue_state_called, issue_id, state_name})
+      :ok
+    end
+
+    defp notify(event) do
+      case Application.get_env(:symphony_elixir, :tracker_module_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:tracker_module_called, event})
+
+        _ ->
+          :ok
+      end
     end
   end
 
@@ -1666,6 +1776,62 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_receive {:memory_tracker_comment, ^issue_id, comment}
     assert comment =~ "Symphony blocked MT-MAX"
     assert comment =~ "agent.max_turns reached while Linear issue stayed active"
+  end
+
+  test "orchestrator uses configured tracker module for polling candidate fetch" do
+    write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: 1)
+
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_tracker_module_recipient = Application.get_env(:symphony_elixir, :tracker_module_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+
+      if is_nil(previous_tracker_module_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_module_recipient)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module_recipient, previous_tracker_module_recipient)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerConfiguredModule)
+    Application.put_env(:symphony_elixir, :tracker_module_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :ConfiguredTrackerPollingOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    running_issue_id = "running-issue-placeholder"
+
+    running_issue = %Issue{
+      id: running_issue_id,
+      identifier: "MT-RUN",
+      state: "In Progress"
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:max_concurrent_agents, 1)
+      |> Map.put(:running, %{running_issue_id => %{pid: self(), ref: make_ref(), issue: running_issue, started_at: DateTime.utc_now(), identifier: "MT-RUN"}})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, running_issue_id))
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    assert_receive {:tracker_module_called, :fetch_issues_by_states_called}, 500
+    assert_receive {:tracker_module_called, :fetch_candidate_called}, 500
+    assert_receive {:tracker_module_called, {:fetch_issue_states_by_ids_called, [^running_issue_id]}}, 500
+    refute_receive {:tracker_module_called, {:update_issue_state_called, _issue_id, _state_name}}, 200
   end
 
   test "orchestrator snapshot includes branch_name for running entries" do
