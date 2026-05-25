@@ -747,7 +747,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       timer_ref: nil,
       due_at_ms: System.monotonic_time(:millisecond) + 5_000,
       identifier: "MT-500",
-      error: "agent exited: :boom"
+      error: "agent exited: :boom",
+      pr_number: 987,
+      pr_url: "https://example.org/pull/987"
     }
 
     initial_state = :sys.get_state(pid)
@@ -763,7 +765,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                attempt: 2,
                due_in_ms: due_in_ms,
                identifier: "MT-500",
-               error: "agent exited: :boom"
+               error: "agent exited: :boom",
+               pr_number: 987,
+               pr_url: "https://example.org/pull/987"
              }
            ] = snapshot.retrying
 
@@ -1282,6 +1286,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert MapSet.member?(state.completed, issue_id)
     assert Map.has_key?(state.retry_attempts, issue_id)
+    assert %{pr_number: 123, pr_url: "https://example.org/pull/123"} = state.retry_attempts[issue_id]
   end
 
   test "orchestrator blocks normal exits when PR lookup fails" do
