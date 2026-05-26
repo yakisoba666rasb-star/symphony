@@ -112,6 +112,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert {:error, {:dirty_workspace, ^workspace, status}} = Workspace.create_for_issue("MT-DIRTY")
       assert status =~ "README.md"
       assert status =~ "local-progress.txt"
+
+      reason_log = Path.join(workspace, "_reason.log")
+      assert File.exists?(reason_log)
+      reason = File.read!(reason_log)
+      assert reason =~ "dirty workspace detected"
+      assert reason =~ "README.md"
+      assert reason =~ "local-progress.txt"
     after
       File.rm_rf(workspace_root)
     end
