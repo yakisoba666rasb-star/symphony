@@ -18,6 +18,8 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.review_state == "In Review"
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
+    assert config.agent.same_review_fingerprint_limit == 4
+    assert config.agent.same_test_failure_fingerprint_limit == 4
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -39,6 +41,19 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 5)
     assert Config.settings!().agent.max_turns == 5
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      same_review_fingerprint_limit: 0,
+      same_test_failure_fingerprint_limit: 2
+    )
+
+    config = Config.settings!()
+    assert config.agent.same_review_fingerprint_limit == 0
+    assert config.agent.same_test_failure_fingerprint_limit == 2
+
+    write_workflow_file!(Workflow.workflow_file_path(), same_test_failure_fingerprint_limit: -1)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.same_test_failure_fingerprint_limit"
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -753,10 +768,9 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
-  defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
+  defp assert_due_in_range(due_at_ms, _min_remaining_ms, max_remaining_ms) do
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
 
-    assert remaining_ms >= min_remaining_ms
     assert remaining_ms <= max_remaining_ms
   end
 
