@@ -59,6 +59,15 @@ defmodule SymphonyElixir.Workspace do
         "  if [ -d .git ]; then",
         "    dirty_status=$(git status --porcelain)",
         "    if [ -n \"$dirty_status\" ]; then",
+        "      {",
+        "        printf '%s\\n\\n' 'dirty workspace detected'",
+        "        printf 'Workspace: %s\\n' \"$(pwd -P)\"",
+        "        printf 'Recorded at: %s\\n\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"",
+        "        printf '%s\\n' 'Git status --porcelain:'",
+        "        printf '%s\\n' \"$dirty_status\"",
+        "        printf '\\n%s\\n' 'Git diff --stat:'",
+        "        git diff --stat || true",
+        "      } > _reason.log",
         "      escaped_dirty_status=$(printf '%s' \"$dirty_status\" | sed ':a;N;$!ba;s/\\n/\\\\n/g')",
         "      printf '%s\\t%s\\t%s\\n' '#{@remote_dirty_workspace_marker}' \"$(pwd -P)\" \"$escaped_dirty_status\"",
         "      exit 72",
@@ -105,13 +114,41 @@ defmodule SymphonyElixir.Workspace do
   defp ensure_reusable_workspace(workspace) do
     if File.dir?(Path.join(workspace, ".git")) do
       case System.cmd("git", ["-C", workspace, "status", "--porcelain"], stderr_to_stdout: true) do
-        {"", 0} -> :ok
-        {output, 0} -> {:error, {:dirty_workspace, workspace, output}}
-        {output, status} -> {:error, {:workspace_git_status_failed, workspace, status, output}}
+        {"", 0} ->
+          :ok
+
+        {output, 0} ->
+          write_dirty_workspace_reason_log(workspace, output)
+          {:error, {:dirty_workspace, workspace, output}}
+
+        {output, status} ->
+          {:error, {:workspace_git_status_failed, workspace, status, output}}
       end
     else
       :ok
     end
+  end
+
+  defp write_dirty_workspace_reason_log(workspace, dirty_status) do
+    diff_summary =
+      case System.cmd("git", ["-C", workspace, "diff", "--stat"], stderr_to_stdout: true) do
+        {"", 0} -> ""
+        {output, 0} -> "\nGit diff --stat:\n#{output}"
+        {output, status} -> "\nGit diff --stat failed status=#{status}:\n#{output}"
+      end
+
+    body = """
+    dirty workspace detected
+
+    Workspace: #{workspace}
+    Recorded at: #{DateTime.utc_now() |> DateTime.to_iso8601()}
+
+    Git status --porcelain:
+    #{dirty_status}#{diff_summary}
+    """
+
+    File.write(Path.join(workspace, "_reason.log"), body)
+    :ok
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
