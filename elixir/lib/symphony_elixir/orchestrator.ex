@@ -256,28 +256,7 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     case lookup_pr_for_branch(workspace_path, branch_name) do
       {:ok, pr} when is_map(pr) ->
-        _pr_number = pr["number"] || pr[:number]
-        _pr_url = pr["url"] || pr[:url]
-
-        target_state = Config.settings!().tracker.review_state
-
-        case tracker_module().update_issue_state(issue_id, target_state) do
-          :ok ->
-            Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; issue moved to #{target_state}")
-
-            state
-            |> complete_issue(issue_id)
-
-          {:error, reason} ->
-            error = "failed to move issue to #{target_state} after PR discovery: #{inspect(reason)}"
-            Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
-            block_issue_from_entry(state, issue_id, running_entry, error)
-
-          other ->
-            error = "failed to move issue to #{target_state} after PR discovery: #{inspect(other)}"
-            Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
-            block_issue_from_entry(state, issue_id, running_entry, error)
-        end
+        move_issue_to_review_after_pr_discovery(state, issue_id, running_entry, session_id, pr)
 
       {:ok, nil} ->
         error = "no GitHub PR found for branch #{branch_name}"
@@ -333,6 +312,47 @@ defmodule SymphonyElixir.Orchestrator do
   defp max_turns_reached_active_issue?(_reason), do: false
 
   defp block_max_turns_agent_down(state, issue_id, running_entry, session_id) do
+    case branch_name_and_workspace(running_entry) do
+      {:ok, branch_name, workspace_path} ->
+        case lookup_pr_for_branch(workspace_path, branch_name) do
+          {:ok, pr} when is_map(pr) ->
+            move_issue_to_review_after_pr_discovery(state, issue_id, running_entry, session_id, pr)
+
+          _other ->
+            block_max_turns_without_pr(state, issue_id, running_entry, session_id)
+        end
+
+      :missing ->
+        block_max_turns_without_pr(state, issue_id, running_entry, session_id)
+    end
+  end
+
+  defp move_issue_to_review_after_pr_discovery(state, issue_id, running_entry, session_id, pr) do
+    _pr_number = pr["number"] || pr[:number]
+    _pr_url = pr["url"] || pr[:url]
+
+    target_state = Config.settings!().tracker.review_state
+
+    case tracker_module().update_issue_state(issue_id, target_state) do
+      :ok ->
+        Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; issue moved to #{target_state}")
+
+        state
+        |> complete_issue(issue_id)
+
+      {:error, reason} ->
+        error = "failed to move issue to #{target_state} after PR discovery: #{inspect(reason)}"
+        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+        block_issue_from_entry(state, issue_id, running_entry, error)
+
+      other ->
+        error = "failed to move issue to #{target_state} after PR discovery: #{inspect(other)}"
+        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+        block_issue_from_entry(state, issue_id, running_entry, error)
+    end
+  end
+
+  defp block_max_turns_without_pr(state, issue_id, running_entry, session_id) do
     error = "agent.max_turns reached while Linear issue stayed active"
 
     Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")

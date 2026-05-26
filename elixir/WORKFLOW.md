@@ -1,3 +1,4 @@
+---
 # Required env (do not commit values)
 # - SYMPHONY_RYO_LINEAR_TOKEN: Linear API token
 # - SYMPHONY_RYO_LINEAR_PROJECT: Linear project slug for filtered polling (e.g. <linear-project-slug>)
@@ -5,7 +6,6 @@
 # - SYMPHONY_RYO_TARGET_REPO: target repo in owner/name format (e.g. <owner>/<repo>)
 # - SYMPHONY_RYO_GITHUB_TOKEN: token used by codex for PR writes
 # - SYMPHONY_RYO_LINEAR_TEAM: policy label for runbook mapping (reference only)
----
 tracker:
   kind: linear
   api_key: $SYMPHONY_RYO_LINEAR_TOKEN
