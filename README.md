@@ -10,6 +10,16 @@ _In this [demo video](https://player.vimeo.com/video/1186371009?h=5626e4b899), S
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
 
+## Fork deployment boundary
+
+When running this fork as an engine, keep it focused on the Symphony runtime.
+Use it to poll work, create isolated workspaces, and launch agents against
+separate target repositories.
+
+Do not use this public fork as the place to store private target-project code,
+deployment secrets, production logs, or lab-specific evidence. Keep those in the
+private target repository that Symphony operates on.
+
 ## Running Symphony
 
 ### Requirements

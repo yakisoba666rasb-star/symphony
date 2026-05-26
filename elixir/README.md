@@ -7,6 +7,15 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 > Symphony Elixir is prototype software intended for evaluation only and is presented as-is.
 > We recommend implementing your own hardened version based on `SPEC.md`.
 
+## Runtime role
+
+This Elixir implementation is the runtime engine. It should run against cloned
+target repositories and workspaces, not become the target repository itself.
+
+Keep project-specific code, private run evidence, deployment secrets, and
+environment-specific logs outside this public engine fork. Store those in the
+private target repository or in operator-managed runtime storage.
+
 ## Screenshot
 
 ![Symphony Elixir screenshot](../.github/media/elixir-screenshot.png)
