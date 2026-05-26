@@ -1,7 +1,16 @@
+# Required env (do not commit values)
+# - SYMPHONY_RYO_LINEAR_TOKEN: Linear API token
+# - SYMPHONY_RYO_LINEAR_PROJECT: Linear project slug for filtered polling (e.g. <linear-project-slug>)
+# - SYMPHONY_RYO_LINEAR_ASSIGNEE: assignee filter (me / <Linear user id>)
+# - SYMPHONY_RYO_TARGET_REPO: target repo in owner/name format (e.g. <owner>/<repo>)
+# - SYMPHONY_RYO_GITHUB_TOKEN: token used by codex for PR writes
+# - SYMPHONY_RYO_LINEAR_TEAM: policy label for runbook mapping (reference only)
 ---
 tracker:
   kind: linear
-  project_slug: "symphony-0c79b11b75ea"
+  api_key: $SYMPHONY_RYO_LINEAR_TOKEN
+  project_slug: $SYMPHONY_RYO_LINEAR_PROJECT
+  assignee: $SYMPHONY_RYO_LINEAR_ASSIGNEE
   active_states:
     - Todo
     - In Progress
@@ -19,7 +28,7 @@ workspace:
   root: ~/code/symphony-workspaces
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/openai/symphony .
+    git clone --depth 1 https://github.com/$SYMPHONY_RYO_TARGET_REPO .
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
