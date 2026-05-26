@@ -1103,7 +1103,166 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.blocked[issue_id]
 
     assert %{blocked: [%{identifier: "MT-MCP", error: "codex MCP elicitation requires operator input"}]} =
-             Orchestrator.snapshot(orchestrator_name, 1_000)
+             Orchestrator.snapshot(orchestrator_name, 5_000)
+  end
+
+  test "orchestrator blocks repeated identical test failure fingerprints" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      same_test_failure_fingerprint_limit: 2
+    )
+
+    issue_id = "issue-repeated-test-fingerprint"
+    orchestrator_name = Module.concat(__MODULE__, :RepeatedTestFingerprintOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: "MT-REPEAT-TEST",
+      issue: %Issue{id: issue_id, identifier: "MT-REPEAT-TEST", state: "In Progress"},
+      session_id: "thread-repeated-test-fingerprint",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    failed_command_update = fn ->
+      %{
+        event: :notification,
+        payload: %{
+          "method" => "codex/event/exec_command_end",
+          "params" => %{
+            "msg" => %{
+              "command" => "mix test test/symphony_elixir/orchestrator_status_test.exs",
+              "exit_code" => 1
+            }
+          }
+        },
+        timestamp: DateTime.utc_now()
+      }
+    end
+
+    send(pid, {:codex_worker_update, issue_id, failed_command_update.()})
+    Process.sleep(50)
+
+    state_after_first = :sys.get_state(pid)
+    assert Map.has_key?(state_after_first.running, issue_id)
+    refute Map.has_key?(state_after_first.blocked, issue_id)
+
+    send(pid, {:codex_worker_update, issue_id, failed_command_update.()})
+    Process.sleep(50)
+
+    state = :sys.get_state(pid)
+
+    refute Process.alive?(worker_pid)
+    refute Map.has_key?(state.running, issue_id)
+
+    assert %{
+             identifier: "MT-REPEAT-TEST",
+             error: "repeated test failure fingerprint reached limit 2"
+           } = state.blocked[issue_id]
+  end
+
+  test "orchestrator blocks repeated identical review fingerprints" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      same_review_fingerprint_limit: 2
+    )
+
+    issue_id = "issue-repeated-review-fingerprint"
+    orchestrator_name = Module.concat(__MODULE__, :RepeatedReviewFingerprintOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: "MT-REPEAT-REVIEW",
+      issue: %Issue{id: issue_id, identifier: "MT-REPEAT-REVIEW", state: "In Progress"},
+      session_id: "thread-repeated-review-fingerprint",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    review_update = fn ->
+      %{
+        event: :notification,
+        payload: %{
+          "method" => "codex/event/agent_message_delta",
+          "params" => %{
+            "msg" => %{
+              "delta" => "Request changes: please fix the missing retry test coverage"
+            }
+          }
+        },
+        timestamp: DateTime.utc_now()
+      }
+    end
+
+    send(pid, {:codex_worker_update, issue_id, review_update.()})
+    Process.sleep(50)
+
+    state_after_first = :sys.get_state(pid)
+    assert Map.has_key?(state_after_first.running, issue_id)
+    refute Map.has_key?(state_after_first.blocked, issue_id)
+
+    send(pid, {:codex_worker_update, issue_id, review_update.()})
+    Process.sleep(50)
+
+    state = :sys.get_state(pid)
+
+    refute Process.alive?(worker_pid)
+    refute Map.has_key?(state.running, issue_id)
+
+    assert %{
+             identifier: "MT-REPEAT-REVIEW",
+             error: "repeated review fingerprint reached limit 2"
+           } = state.blocked[issue_id]
   end
 
   test "orchestrator blocks failed workers after app-server reports input required" do
@@ -1862,7 +2021,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
-    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+    snapshot = Orchestrator.snapshot(orchestrator_name, 5_000)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.branch_name == "feature/branch-snapshot-running"
   end
@@ -1942,7 +2101,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert comment =~ "Symphony blocked MT-BR-BLK"
     assert comment =~ "codex turn requires operator input"
 
-    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+    snapshot = Orchestrator.snapshot(orchestrator_name, 5_000)
     assert %{blocked: [snapshot_entry]} = snapshot
     assert snapshot_entry.branch_name == "feature/branch-snapshot-blocked"
   end
@@ -1983,7 +2142,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
-    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+    snapshot = Orchestrator.snapshot(orchestrator_name, 5_000)
     assert %{blocked: [snapshot_entry]} = snapshot
     assert snapshot_entry.issue_id == issue_id
     assert snapshot_entry.identifier == "MT-BR-NO"

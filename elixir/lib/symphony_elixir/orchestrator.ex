@@ -172,8 +172,11 @@ defmodule SymphonyElixir.Orchestrator do
           |> apply_codex_token_delta(token_delta)
           |> apply_codex_rate_limits(update)
 
+        state = %{state | running: Map.put(running, issue_id, updated_running_entry)}
+        state = maybe_block_repeated_fingerprint(state, issue_id, updated_running_entry)
+
         notify_dashboard()
-        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+        {:noreply, state}
     end
   end
 
@@ -869,6 +872,43 @@ defmodule SymphonyElixir.Orchestrator do
     stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref))
     block_issue_from_entry(state, issue_id, running_entry, error)
   end
+
+  defp maybe_block_repeated_fingerprint(%State{} = state, issue_id, running_entry) do
+    config = Config.settings!().agent
+
+    cond do
+      fingerprint_limit_reached?(
+        Map.get(running_entry, :test_failure_fingerprint_streak, 0),
+        config.same_test_failure_fingerprint_limit
+      ) ->
+        stop_and_block_issue(
+          state,
+          issue_id,
+          running_entry,
+          "repeated test failure fingerprint reached limit #{config.same_test_failure_fingerprint_limit}"
+        )
+
+      fingerprint_limit_reached?(
+        Map.get(running_entry, :review_fingerprint_streak, 0),
+        config.same_review_fingerprint_limit
+      ) ->
+        stop_and_block_issue(
+          state,
+          issue_id,
+          running_entry,
+          "repeated review fingerprint reached limit #{config.same_review_fingerprint_limit}"
+        )
+
+      true ->
+        state
+    end
+  end
+
+  defp fingerprint_limit_reached?(streak, limit)
+       when is_integer(streak) and is_integer(limit) and limit > 0,
+       do: streak >= limit
+
+  defp fingerprint_limit_reached?(_streak, _limit), do: false
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do
     comment_on_blocked_issue(issue_id, running_entry, error)
@@ -1675,8 +1715,9 @@ defmodule SymphonyElixir.Orchestrator do
     last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
 
-    {
-      Map.merge(running_entry, %{
+    updated_running_entry =
+      running_entry
+      |> Map.merge(%{
         last_codex_timestamp: timestamp,
         last_codex_message: summarize_codex_update(update),
         session_id: session_id_for_update(running_entry.session_id, update),
@@ -1689,10 +1730,181 @@ defmodule SymphonyElixir.Orchestrator do
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
         turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
-      }),
+      })
+      |> record_codex_fingerprint(update)
+
+    {
+      updated_running_entry,
       token_delta
     }
   end
+
+  defp record_codex_fingerprint(running_entry, update) do
+    case codex_fingerprint_signal(update) do
+      {:review, text} ->
+        record_fingerprint(
+          running_entry,
+          text,
+          :last_review_fingerprint,
+          :review_fingerprint_streak
+        )
+
+      {:test_failure, text} ->
+        record_fingerprint(
+          running_entry,
+          text,
+          :last_test_failure_fingerprint,
+          :test_failure_fingerprint_streak
+        )
+
+      nil ->
+        running_entry
+    end
+  end
+
+  defp record_fingerprint(running_entry, text, last_key, streak_key) do
+    case fingerprint_text(text) do
+      "" ->
+        running_entry
+
+      fingerprint ->
+        streak =
+          if Map.get(running_entry, last_key) == fingerprint do
+            Map.get(running_entry, streak_key, 0) + 1
+          else
+            1
+          end
+
+        running_entry
+        |> Map.put(last_key, fingerprint)
+        |> Map.put(streak_key, streak)
+    end
+  end
+
+  defp codex_fingerprint_signal(%{event: event} = update)
+       when event in [:turn_failed, :turn_ended_with_error, :startup_failed] do
+    {:test_failure, inspect(Map.get(update, :payload) || Map.get(update, :raw) || update)}
+  end
+
+  defp codex_fingerprint_signal(%{event: :notification, payload: %{} = payload}) do
+    case map_value(payload, ["method", :method]) do
+      "codex/event/exec_command_end" ->
+        exec_command_failure_fingerprint(payload)
+
+      method
+      when method in [
+             "codex/event/agent_message_delta",
+             "codex/event/agent_message_content_delta",
+             "item/agentMessage/delta"
+           ] ->
+        review_message_fingerprint(payload)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp codex_fingerprint_signal(_update), do: nil
+
+  defp exec_command_failure_fingerprint(payload) do
+    exit_code =
+      map_path(payload, ["params", "msg", "exit_code"]) ||
+        map_path(payload, [:params, :msg, :exit_code]) ||
+        map_path(payload, ["params", "msg", "exitCode"]) ||
+        map_path(payload, [:params, :msg, :exitCode])
+
+    if nonzero_exit_code?(exit_code) do
+      command =
+        map_path(payload, ["params", "msg", "command"]) ||
+          map_path(payload, [:params, :msg, :command]) ||
+          map_path(payload, ["params", "msg", "parsed_cmd"]) ||
+          map_path(payload, [:params, :msg, :parsed_cmd]) ||
+          "unknown command"
+
+      {:test_failure, "#{normalize_command(command)} exit #{exit_code}"}
+    end
+  end
+
+  defp review_message_fingerprint(payload) do
+    text =
+      map_path(payload, ["params", "msg", "delta"]) ||
+        map_path(payload, [:params, :msg, :delta]) ||
+        map_path(payload, ["params", "delta"]) ||
+        map_path(payload, [:params, :delta]) ||
+        map_path(payload, ["params", "text"]) ||
+        map_path(payload, [:params, :text])
+
+    if review_signal_text?(text) do
+      {:review, text}
+    end
+  end
+
+  defp review_signal_text?(text) when is_binary(text) do
+    normalized = normalize_fingerprint_text(text)
+
+    String.length(normalized) >= 20 and
+      String.match?(
+        normalized,
+        ~r/(request changes|changes requested|review|needs fix|fix required|修正|差し戻し|再レビュー)/
+      )
+  end
+
+  defp review_signal_text?(_text), do: false
+
+  defp fingerprint_text(text) do
+    normalized = normalize_fingerprint_text(text)
+
+    if normalized == "" do
+      ""
+    else
+      :crypto.hash(:sha256, normalized)
+      |> Base.encode16(case: :lower)
+    end
+  end
+
+  defp normalize_fingerprint_text(text) when is_binary(text) do
+    text
+    |> String.downcase()
+    |> String.split()
+    |> Enum.join(" ")
+  end
+
+  defp normalize_fingerprint_text(text) when is_list(text), do: normalize_fingerprint_text(to_string(text))
+  defp normalize_fingerprint_text(nil), do: ""
+  defp normalize_fingerprint_text(text), do: normalize_fingerprint_text(inspect(text))
+
+  defp nonzero_exit_code?(exit_code) when is_integer(exit_code), do: exit_code != 0
+
+  defp nonzero_exit_code?(exit_code) when is_binary(exit_code) do
+    case Integer.parse(exit_code) do
+      {0, ""} -> false
+      {_code, ""} -> true
+      _ -> false
+    end
+  end
+
+  defp nonzero_exit_code?(_exit_code), do: false
+
+  defp normalize_command(command) when is_binary(command), do: command
+  defp normalize_command(command) when is_list(command), do: Enum.join(command, " ")
+  defp normalize_command(command), do: inspect(command)
+
+  defp map_path(value, []), do: value
+
+  defp map_path(value, [key | rest]) when is_map(value) do
+    case Map.fetch(value, key) do
+      {:ok, next_value} -> map_path(next_value, rest)
+      :error -> nil
+    end
+  end
+
+  defp map_path(_value, _path), do: nil
+
+  defp map_value(value, keys) when is_map(value) and is_list(keys) do
+    Enum.find_value(keys, fn key -> Map.get(value, key) end)
+  end
+
+  defp map_value(_value, _keys), do: nil
 
   defp codex_app_server_pid_for_update(_existing, %{codex_app_server_pid: pid})
        when is_binary(pid),
