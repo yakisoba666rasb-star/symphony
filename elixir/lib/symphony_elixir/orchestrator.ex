@@ -65,6 +65,7 @@ defmodule SymphonyElixir.Orchestrator do
       codex_rate_limits: nil
     }
 
+    run_dirty_workspace_cleanup()
     run_terminal_workspace_cleanup()
     state = schedule_tick(state, 0)
 
@@ -1383,6 +1384,19 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
+    end
+  end
+
+  defp run_dirty_workspace_cleanup do
+    case Workspace.cleanup_dirty_workspaces() do
+      {:ok, %{removed: removed}} when removed != [] ->
+        Logger.info("Cleaned expired dirty workspaces count=#{length(removed)}")
+
+      {:ok, _result} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Skipping dirty workspace cleanup: #{inspect(reason)}")
     end
   end
 

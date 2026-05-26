@@ -193,6 +193,41 @@ defmodule SymphonyElixir.Workspace do
     :ok
   end
 
+  @spec cleanup_dirty_workspaces(keyword()) :: {:ok, %{removed: [String.t()], kept: [String.t()]}} | {:error, term()}
+  def cleanup_dirty_workspaces(opts \\ []) do
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+    settings = Config.settings!()
+    root = settings.workspace.root
+    retention_days = settings.workspace.dirty_workspace_retention_days
+
+    with true <- retention_days > 0,
+         {:ok, entries} <- File.ls(root) do
+      cutoff = DateTime.add(now, -retention_days, :day)
+
+      entries
+      |> Enum.map(&Path.join(root, &1))
+      |> Enum.reduce({[], []}, fn path, {removed, kept} ->
+        case dirty_workspace_timestamp(path) do
+          {:ok, timestamp} ->
+            if DateTime.compare(timestamp, cutoff) == :lt do
+              File.rm_rf(path)
+              {[path | removed], kept}
+            else
+              {removed, [path | kept]}
+            end
+
+          :error ->
+            {removed, kept}
+        end
+      end)
+      |> then(fn {removed, kept} -> {:ok, %{removed: Enum.reverse(removed), kept: Enum.reverse(kept)}} end)
+    else
+      false -> {:ok, %{removed: [], kept: []}}
+      {:error, :enoent} -> {:ok, %{removed: [], kept: []}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   @spec run_before_run_hook(Path.t(), map() | String.t() | nil, worker_host()) ::
           :ok | {:error, term()}
   def run_before_run_hook(workspace, issue_or_identifier, worker_host \\ nil) when is_binary(workspace) do
@@ -475,6 +510,22 @@ defmodule SymphonyElixir.Workspace do
       _ ->
         {:error, {:workspace_prepare_failed, :invalid_output, output}}
     end
+  end
+
+  defp dirty_workspace_timestamp(path) when is_binary(path) do
+    basename = Path.basename(path)
+
+    with true <- File.dir?(path),
+         [date, time] <- Regex.run(~r/\.dirty-(\d{8})-(\d{6})$/, basename, capture: :all_but_first),
+         {:ok, naive} <- NaiveDateTime.from_iso8601(dirty_timestamp_iso8601(date, time)) do
+      {:ok, DateTime.from_naive!(naive, "Etc/UTC")}
+    else
+      _ -> :error
+    end
+  end
+
+  defp dirty_timestamp_iso8601(<<year::binary-size(4), month::binary-size(2), day::binary-size(2)>>, <<hour::binary-size(2), minute::binary-size(2), second::binary-size(2)>>) do
+    "#{year}-#{month}-#{day}T#{hour}:#{minute}:#{second}"
   end
 
   defp run_remote_command(worker_host, script, timeout_ms)

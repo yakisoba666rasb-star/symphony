@@ -304,6 +304,45 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace cleanup removes only expired dirty quarantine directories" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-dirty-workspace-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      expired_dirty = Path.join(workspace_root, "MT-OLD.dirty-20260501-000000")
+      fresh_dirty = Path.join(workspace_root, "MT-NEW.dirty-20260525-000000")
+      normal_workspace = Path.join(workspace_root, "MT-NORMAL")
+
+      File.mkdir_p!(expired_dirty)
+      File.mkdir_p!(fresh_dirty)
+      File.mkdir_p!(normal_workspace)
+      File.write!(Path.join(expired_dirty, "marker.txt"), "remove")
+      File.write!(Path.join(fresh_dirty, "marker.txt"), "keep")
+      File.write!(Path.join(normal_workspace, "marker.txt"), "keep")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        dirty_workspace_retention_days: 7
+      )
+
+      now = ~U[2026-05-26 00:00:00Z]
+
+      assert {:ok, %{removed: [^expired_dirty], kept: kept}} =
+               Workspace.cleanup_dirty_workspaces(now: now)
+
+      refute File.exists?(expired_dirty)
+      assert File.exists?(fresh_dirty)
+      assert File.exists?(normal_workspace)
+      assert fresh_dirty in kept
+      refute normal_workspace in kept
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace cleanup handles missing workspace root" do
     missing_root =
       Path.join(

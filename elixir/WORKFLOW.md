@@ -26,6 +26,7 @@ polling:
   interval_ms: 5000
 workspace:
   root: ~/code/symphony-workspaces
+  dirty_workspace_retention_days: 7
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/$SYMPHONY_RYO_TARGET_REPO .
