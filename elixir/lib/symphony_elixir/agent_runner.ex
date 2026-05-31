@@ -105,33 +105,60 @@ defmodule SymphonyElixir.AgentRunner do
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
-        {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
-
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns
-          )
-
-        {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning unfinished outcome to orchestrator")
-
-          {:error, {:max_turns_reached_active_issue, refreshed_issue.id}}
-
-        {:done, _refreshed_issue} ->
-          :ok
-
-        {:error, reason} ->
-          {:error, reason}
+      if workspace_has_changes?(workspace) do
+        Logger.info("Workspace has uncommitted changes after normal turn for #{issue_context(issue)}; stopping for runtime PR handoff")
+        :ok
+      else
+        continue_after_clean_turn(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns)
       end
     end
+  end
+
+  defp continue_after_clean_turn(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+    case continue_with_issue?(issue, issue_state_fetcher) do
+      {:continue, refreshed_issue} when turn_number < max_turns ->
+        Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+
+        do_run_codex_turns(
+          app_session,
+          workspace,
+          refreshed_issue,
+          codex_update_recipient,
+          opts,
+          issue_state_fetcher,
+          turn_number + 1,
+          max_turns
+        )
+
+      {:continue, refreshed_issue} ->
+        Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning unfinished outcome to orchestrator")
+
+        {:error, {:max_turns_reached_active_issue, refreshed_issue.id}}
+
+      {:done, _refreshed_issue} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp workspace_has_changes?(workspace) when is_binary(workspace) do
+    case System.cmd("git", ["-C", workspace, "status", "--porcelain"], stderr_to_stdout: true) do
+      {"", 0} ->
+        false
+
+      {_status, 0} ->
+        true
+
+      {output, status} ->
+        Logger.warning("Could not inspect workspace dirty status for #{workspace}: git exited #{status}: #{String.trim(output)}")
+        false
+    end
+  rescue
+    exception ->
+      Logger.warning("Could not inspect workspace dirty status for #{workspace}: #{Exception.message(exception)}")
+      false
   end
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)

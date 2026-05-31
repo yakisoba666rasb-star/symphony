@@ -3,7 +3,7 @@ defmodule SymphonyElixir.PromptBuilder do
   Builds agent prompts from Linear issue data.
   """
 
-  alias SymphonyElixir.{Config, Workflow}
+  alias SymphonyElixir.{Config, RepositoryResolver, Workflow}
 
   @render_opts [strict_variables: true, strict_filters: true]
 
@@ -18,7 +18,8 @@ defmodule SymphonyElixir.PromptBuilder do
     |> Solid.render!(
       %{
         "attempt" => Keyword.get(opts, :attempt),
-        "issue" => issue |> Map.from_struct() |> to_solid_map()
+        "issue" => issue |> Map.from_struct() |> to_solid_map(),
+        "repository" => issue |> RepositoryResolver.resolve!() |> to_solid_map()
       },
       @render_opts
     )
