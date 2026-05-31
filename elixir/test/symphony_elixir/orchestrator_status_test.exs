@@ -1523,6 +1523,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     previous_tracker_state_update_recipient =
       Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
 
+    previous_tracker_comment_recipient =
+      Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
     on_exit(fn ->
       if is_nil(previous_lookup) do
         Application.delete_env(:symphony_elixir, :github_pr_lookup)
@@ -1551,12 +1554,23 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           previous_tracker_state_update_recipient
         )
       end
+
+      if is_nil(previous_tracker_comment_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_comment_recipient,
+          previous_tracker_comment_recipient
+        )
+      end
     end)
 
     Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupFound)
     Application.put_env(:symphony_elixir, :review_runner, FakeReviewRunnerApproved)
     Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
     Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
 
     issue_id = "issue-normal-pr-found"
     orchestrator_name = Module.concat(__MODULE__, :NormalPrFoundOrchestrator)
@@ -1603,6 +1617,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     state = :sys.get_state(pid)
 
     assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 200
+    assert_receive {:tracker_comment_called, ^issue_id, comment}, 200
+    assert comment =~ "Symphony automated review decision: approve-equivalent"
+    assert comment =~ "Merge judgment: ready for human final merge decision"
+    assert comment =~ "The runtime will not approve on GitHub and will not merge automatically."
 
     assert MapSet.member?(state.completed, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
