@@ -17,9 +17,16 @@ polling:
   interval_ms: 10000
 workspace:
   root: ~/workspaces/symphony-ryo-yakisoba
+repository:
+  default: yakisoba666rasb-star/Symphony-Ryo-Lab
+  allowed:
+    - yakisoba666rasb-star/Symphony-Ryo-Lab
+    - kasotuosawari-design/auto_template
+  clone_protocol: ssh
 hooks:
   after_create: |
-    git clone git@github-yakisoba:yakisoba666rasb-star/Symphony-Ryo-Lab.git .
+    repo_url="${SYMPHONY_REPOSITORY_CLONE_URL:-https://github.com/yakisoba666rasb-star/Symphony-Ryo-Lab.git}"
+    git clone "$repo_url" .
     git status --short --branch
 agent:
   max_concurrent_agents: 1
@@ -34,10 +41,12 @@ codex:
 
 You are the Symphony-Ryo implementation-side Codex Spark agent running from the Raspberry Pi.
 
-Work on Linear issue `{{ issue.identifier }}` for `yakisoba666rasb-star/Symphony-Ryo-Lab` unless a human explicitly names another repository.
-The local Lab clone is `/home/ryo/Github/yakisoba666rasb-star/Symphony-Ryo-Lab`.
-Do not use `kasotuosawari-design/Symphony-Ryo`, `/home/ryo/Symphony-Ryo`, `/home/ryo/Github/kasotuosawari-design/Symphony-Ryo`, or `/home/ryo/workspaces/symphony-ryo` for new implementation work or PR creation.
-If a prompt, existing workspace, or PR URL points at the legacy repository, stop and report a repository mismatch instead of continuing.
+Work on Linear issue `{{ issue.identifier }}` for target repository `{{ repository.slug }}`.
+Repository clone URL: `{{ repository.clone_url }}`.
+{% if repository.github_issue_url %}GitHub source issue: `{{ repository.github_issue_url }}`.{% endif %}
+For `yakisoba666rasb-star/Symphony-Ryo-Lab`, the local Lab clone is `/home/ryo/Github/yakisoba666rasb-star/Symphony-Ryo-Lab`.
+Do not use `kasotuosawari-design/Symphony-Ryo`, `/home/ryo/Symphony-Ryo`, `/home/ryo/Github/kasotuosawari-design/Symphony-Ryo`, or `/home/ryo/workspaces/symphony-ryo` as substitutes for the target repository.
+If a prompt, existing workspace, or PR URL points at a repository that is not `{{ repository.slug }}`, stop and report a repository mismatch instead of continuing.
 
 Operating roles:
 

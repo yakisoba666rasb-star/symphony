@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.WorkspaceAndConfigTest do
   use SymphonyElixir.TestSupport
   alias Ecto.Changeset
+  alias SymphonyElixir.RepositoryResolver
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
@@ -38,6 +39,133 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "workspace hook receives repository context resolved from issue metadata" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-repository-hook-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        repository_default: "yakisoba666rasb-star/Symphony-Ryo-Lab",
+        repository_allowed: ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"],
+        hook_after_create: """
+        printf '%s' "$SYMPHONY_REPOSITORY" > repo.txt
+        printf '%s' "$SYMPHONY_REPOSITORY_OWNER" > owner.txt
+        printf '%s' "$SYMPHONY_REPOSITORY_NAME" > name.txt
+        printf '%s' "$SYMPHONY_REPOSITORY_CLONE_URL" > clone.txt
+        printf '%s' "$SYMPHONY_GITHUB_ISSUE_URL" > source-issue.txt
+        """
+      )
+
+      issue = %Issue{
+        id: "issue-338",
+        identifier: "LAB-338",
+        title: "Fix stale Tailscale smoke defaults",
+        description: """
+        Repo: kasotuosawari-design/auto_template
+        Source: https://github.com/kasotuosawari-design/auto_template/issues/338
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert File.read!(Path.join(workspace, "repo.txt")) == "kasotuosawari-design/auto_template"
+      assert File.read!(Path.join(workspace, "owner.txt")) == "kasotuosawari-design"
+      assert File.read!(Path.join(workspace, "name.txt")) == "auto_template"
+      assert File.read!(Path.join(workspace, "clone.txt")) == "https://github.com/kasotuosawari-design/auto_template.git"
+      assert File.read!(Path.join(workspace, "source-issue.txt")) == "https://github.com/kasotuosawari-design/auto_template/issues/338"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "repository resolver falls back to workflow default and enforces allowlist" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "default" => "yakisoba666rasb-star/Symphony-Ryo-Lab",
+                 "allowed" => ["yakisoba666rasb-star/Symphony-Ryo-Lab"],
+                 "clone_protocol" => "ssh"
+               }
+             })
+
+    assert {:ok, repository} = RepositoryResolver.resolve(%Issue{identifier: "LAB-1"}, settings)
+    assert repository.slug == "yakisoba666rasb-star/Symphony-Ryo-Lab"
+    assert repository.clone_url == "git@github.com:yakisoba666rasb-star/Symphony-Ryo-Lab.git"
+
+    issue = %Issue{
+      identifier: "LAB-338",
+      description: "https://github.com/kasotuosawari-design/auto_template/issues/338"
+    }
+
+    assert {:error, {:repository_not_allowed, "kasotuosawari-design/auto_template", _allowed}} =
+             RepositoryResolver.resolve(issue, settings)
+  end
+
+  test "repository resolver rejects conflicting explicit repo and GitHub source URL" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "allowed" => ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"]
+               }
+             })
+
+    issue = %Issue{
+      identifier: "LAB-CONFLICT",
+      description: """
+      Repo: yakisoba666rasb-star/Symphony-Ryo-Lab
+      Source: https://github.com/kasotuosawari-design/auto_template/issues/338
+      """
+    }
+
+    assert {:error, {:repository_source_conflict, "yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"}} =
+             RepositoryResolver.resolve(issue, settings)
+  end
+
+  test "repository resolver rejects ambiguous GitHub repository URLs without explicit source" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "allowed" => ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"]
+               }
+             })
+
+    issue = %Issue{
+      identifier: "LAB-AMBIGUOUS",
+      description: """
+      See https://github.com/yakisoba666rasb-star/Symphony-Ryo-Lab/issues/1
+      and https://github.com/kasotuosawari-design/auto_template/issues/338
+      """
+    }
+
+    assert {:error, {:ambiguous_repository_urls, ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"]}} =
+             RepositoryResolver.resolve(issue, settings)
+  end
+
+  test "repository resolver allows explicit repo when reference links mention another repository" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "allowed" => ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"]
+               }
+             })
+
+    issue = %Issue{
+      identifier: "LAB-EXPLICIT",
+      description: """
+      Repo: kasotuosawari-design/auto_template
+
+      Related design note:
+      https://github.com/yakisoba666rasb-star/Symphony-Ryo-Lab/issues/1
+      """
+    }
+
+    assert {:ok, repository} = RepositoryResolver.resolve(issue, settings)
+    assert repository.slug == "kasotuosawari-design/auto_template"
   end
 
   test "workspace path is deterministic per issue identifier" do

@@ -103,6 +103,54 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Repository do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:default, :string)
+      field(:allowed, {:array, :string}, default: [])
+      field(:clone_protocol, :string, default: "https")
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:default, :allowed, :clone_protocol], empty_values: [])
+      |> validate_change(:default, &validate_optional_repository_slug/2)
+      |> validate_change(:allowed, &validate_repository_slug_list/2)
+      |> validate_inclusion(:clone_protocol, ["https", "ssh"])
+    end
+
+    defp validate_optional_repository_slug(_field, nil), do: []
+    defp validate_optional_repository_slug(_field, ""), do: []
+
+    defp validate_optional_repository_slug(field, value) when is_binary(value) do
+      if valid_repository_slug?(value) do
+        []
+      else
+        [{field, "must be a GitHub repository slug like owner/name"}]
+      end
+    end
+
+    defp validate_repository_slug_list(field, values) when is_list(values) do
+      values
+      |> Enum.reject(&valid_repository_slug?/1)
+      |> case do
+        [] -> []
+        _invalid -> [{field, "must contain GitHub repository slugs like owner/name"}]
+      end
+    end
+
+    defp valid_repository_slug?(value) when is_binary(value) do
+      Regex.match?(~r/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, String.trim(value))
+    end
+
+    defp valid_repository_slug?(_value), do: false
+  end
+
   defmodule Worker do
     @moduledoc false
     use Ecto.Schema
@@ -134,6 +182,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
+      field(:max_review_fix_loops, :integer, default: 3)
       field(:same_review_fingerprint_limit, :integer, default: 4)
       field(:same_test_failure_fingerprint_limit, :integer, default: 4)
       field(:max_concurrent_agents_by_state, :map, default: %{})
@@ -148,6 +197,7 @@ defmodule SymphonyElixir.Config.Schema do
           :max_concurrent_agents,
           :max_turns,
           :max_retry_backoff_ms,
+          :max_review_fix_loops,
           :same_review_fingerprint_limit,
           :same_test_failure_fingerprint_limit,
           :max_concurrent_agents_by_state
@@ -157,6 +207,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
+      |> validate_number(:max_review_fix_loops, greater_than_or_equal_to: 0)
       |> validate_number(:same_review_fingerprint_limit, greater_than_or_equal_to: 0)
       |> validate_number(:same_test_failure_fingerprint_limit, greater_than_or_equal_to: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
@@ -279,6 +330,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:repository, Repository, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
@@ -371,6 +423,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
+    |> cast_embed(:repository, with: &Repository.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
