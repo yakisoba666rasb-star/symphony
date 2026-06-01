@@ -21,9 +21,15 @@ defmodule SymphonyElixir.Workspace do
 
       with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
            :ok <- validate_workspace_path(workspace, worker_host),
-           {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host),
-           :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
-        {:ok, workspace}
+           {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host) do
+        case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
+          :ok ->
+            {:ok, workspace}
+
+          {:error, reason} = error ->
+            cleanup_created_workspace_after_create_failure(workspace, worker_host, created?, reason)
+            error
+        end
       end
     rescue
       error in [ArgumentError, ErlangError, File.Error] ->
@@ -109,6 +115,42 @@ defmodule SymphonyElixir.Workspace do
     File.rm_rf!(workspace)
     File.mkdir_p!(workspace)
     {:ok, workspace, true}
+  end
+
+  defp cleanup_created_workspace_after_create_failure(_workspace, _worker_host, false, _reason), do: :ok
+
+  defp cleanup_created_workspace_after_create_failure(workspace, nil, true, reason) do
+    Logger.warning("Removing newly-created workspace after after_create failure workspace=#{workspace} reason=#{inspect(reason)}")
+    File.rm_rf(workspace)
+    :ok
+  end
+
+  defp cleanup_created_workspace_after_create_failure(workspace, worker_host, true, reason)
+       when is_binary(worker_host) do
+    Logger.warning("Removing newly-created remote workspace after after_create failure workspace=#{workspace} worker_host=#{worker_host} reason=#{inspect(reason)}")
+
+    script =
+      [
+        remote_shell_assign("workspace", workspace),
+        "rm -rf \"$workspace\""
+      ]
+      |> Enum.join("\n")
+
+    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
+      {:ok, {_output, 0}} ->
+        :ok
+
+      {:ok, {output, status}} ->
+        Logger.warning(
+          "Failed to remove workspace after after_create failure workspace=#{workspace} worker_host=#{worker_host} status=#{status} output=#{inspect(sanitize_hook_output_for_log(output))}"
+        )
+
+        :ok
+
+      {:error, cleanup_reason} ->
+        Logger.warning("Failed to remove workspace after after_create failure workspace=#{workspace} worker_host=#{worker_host} reason=#{inspect(cleanup_reason)}")
+        :ok
+    end
   end
 
   defp ensure_reusable_workspace(workspace) do
