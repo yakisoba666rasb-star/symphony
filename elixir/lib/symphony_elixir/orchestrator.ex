@@ -452,7 +452,7 @@ defmodule SymphonyElixir.Orchestrator do
       workspace_path when is_binary(workspace_path) ->
         review_opts =
           [
-            max_review_fix_loops: Config.settings!().agent.max_review_fix_loops
+            max_review_fix_loops: Config.max_review_fix_loops()
           ]
           |> maybe_put_rework_publisher(running_entry)
 
@@ -491,7 +491,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp move_issue_to_review_after_approval(state, issue_id, running_entry, session_id) do
-    target_state = Config.settings!().tracker.review_state
+    target_state = Config.review_handoff_state()
 
     case tracker_module().update_issue_state(issue_id, target_state) do
       :ok ->
