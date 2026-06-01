@@ -1263,6 +1263,71 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            ]
   end
 
+  test "config parses review workflow from x-lab-runtime" do
+    workflow = """
+    ---
+    review:
+      final_review: gpt
+      max_review_fix_loops: 1
+    x-lab-runtime:
+      review_workflow:
+        final_review: human_required
+        handoff_state: In Review
+        require_pr_url_before_handoff: true
+        approve_equivalent_required_before_handoff: false
+        merge_decision: always_auto_merge
+        auto_merge: true
+        max_review_fix_loops: 7
+        implementer_model: gpt-5.3-codex-spark
+        reviewer_model: gpt-5.5
+    ---
+    """
+
+    File.write!(Workflow.workflow_file_path(), workflow)
+
+    config = Config.settings!()
+    assert config.review.final_review == "human_required"
+    assert config.review.handoff_state == "In Review"
+    assert config.review.require_pr_url_before_handoff == true
+    assert config.review.approve_equivalent_required_before_handoff == false
+    assert config.review.merge_decision == "always_auto_merge"
+    assert config.review.auto_merge == true
+    assert Config.max_review_fix_loops() == 7
+
+    assert Config.review_role_codex_options(:implementer) == [
+             codex_command: "codex --config 'model=\"gpt-5.3-codex-spark\"' --profile 'implementer' app-server"
+           ]
+
+    assert Config.review_role_codex_options(:reviewer) == [
+             codex_command: "codex --config 'model=\"gpt-5.5\"' --profile 'reviewer' app-server"
+           ]
+  end
+
+  test "schema rejects malformed x-lab-runtime.review_workflow" do
+    assert {
+             :error,
+             {:invalid_workflow_config, message}
+           } =
+             Schema.parse(%{
+               "x-lab-runtime" => %{"review_workflow" => true}
+             })
+
+    assert message =~ "x-lab-runtime.review_workflow must be an object"
+  end
+
+  test "schema rejects review collision when review is not an object" do
+    assert {
+             :error,
+             {:invalid_workflow_config, message}
+           } =
+             Schema.parse(%{
+               "review" => "human_required",
+               "x-lab-runtime" => %{"review_workflow" => %{"final_review" => "human_required"}}
+             })
+
+    assert message =~ "x-lab-runtime.review_workflow requires review to be a map"
+  end
+
   test "schema helpers cover custom type and state limit validation" do
     assert StringOrMap.type() == :map
     assert StringOrMap.embed_as(:json) == :self
