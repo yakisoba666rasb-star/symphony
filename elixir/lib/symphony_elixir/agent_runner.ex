@@ -24,6 +24,10 @@ defmodule SymphonyElixir.AgentRunner do
         Logger.warning("Agent run stopped unfinished for #{issue_context(issue)}: #{inspect(reason)}")
         exit(reason)
 
+      {:error, {:dirty_workspace, _workspace, _status} = reason} ->
+        Logger.warning("Agent run blocked by dirty workspace for #{issue_context(issue)}: #{inspect(reason)}")
+        exit(reason)
+
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"

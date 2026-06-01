@@ -67,7 +67,7 @@ defmodule SymphonyElixir.Workspace do
         "        printf '%s\\n' \"$dirty_status\"",
         "        printf '\\n%s\\n' 'Git diff --stat:'",
         "        git diff --stat || true",
-        "      } > _reason.log",
+        "      } > \"$workspace.dirty-reason.log\"",
         "      escaped_dirty_status=$(printf '%s' \"$dirty_status\" | sed ':a;N;$!ba;s/\\n/\\\\n/g')",
         "      printf '%s\\t%s\\t%s\\n' '#{@remote_dirty_workspace_marker}' \"$(pwd -P)\" \"$escaped_dirty_status\"",
         "      exit 72",
@@ -147,8 +147,12 @@ defmodule SymphonyElixir.Workspace do
     #{dirty_status}#{diff_summary}
     """
 
-    File.write(Path.join(workspace, "_reason.log"), body)
+    File.write(dirty_workspace_reason_log_path(workspace), body)
     :ok
+  end
+
+  defp dirty_workspace_reason_log_path(workspace) do
+    Path.join(Path.dirname(workspace), "#{Path.basename(workspace)}.dirty-reason.log")
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
