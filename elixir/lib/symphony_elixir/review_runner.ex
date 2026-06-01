@@ -26,7 +26,7 @@ defmodule SymphonyElixir.ReviewRunner do
           {:ok, verdict()} | {:error, term()}
   def run_loop(workspace_path, issue, pr, opts \\ [])
       when is_binary(workspace_path) and is_map(pr) do
-    max_loops = Keyword.get(opts, :max_review_fix_loops, Config.settings!().agent.max_review_fix_loops)
+    max_loops = Keyword.get(opts, :max_review_fix_loops, Config.max_review_fix_loops())
     do_run_loop(workspace_path, issue, pr, 0, max_loops, opts)
   end
 
@@ -56,7 +56,7 @@ defmodule SymphonyElixir.ReviewRunner do
 
     prompt = reviewer_prompt(issue, pr, loop_index)
 
-    with :ok <- run_codex_turn(workspace_path, prompt, issue, opts),
+    with :ok <- run_codex_turn(workspace_path, prompt, issue, :reviewer, opts),
          {:ok, verdict} <- read_verdict(verdict_path),
          :ok <- remove_verdict_file(verdict_path) do
       {:ok, verdict}
@@ -65,12 +65,22 @@ defmodule SymphonyElixir.ReviewRunner do
 
   defp run_rework_turn(workspace_path, issue, pr, verdict, loop_number, opts) do
     prompt = rework_prompt(issue, pr, verdict, loop_number)
-    run_codex_turn(workspace_path, prompt, issue, opts)
+    run_codex_turn(workspace_path, prompt, issue, :implementer, opts)
   end
 
-  defp run_codex_turn(workspace_path, prompt, issue, opts) do
+  defp run_codex_turn(workspace_path, prompt, issue, role, opts) do
     app_server = Keyword.get(opts, :app_server_module, app_server_module())
-    turn_opts = Keyword.drop(opts, [:app_server_module, :max_review_fix_loops, :publish_rework])
+
+    turn_opts =
+      opts
+      |> Keyword.drop([
+        :app_server_module,
+        :max_review_fix_loops,
+        :publish_rework,
+        :implementer_codex_command,
+        :reviewer_codex_command
+      ])
+      |> Keyword.merge(role_codex_options(role, opts))
 
     with {:ok, session} <- app_server.start_session(workspace_path, turn_opts) do
       try do
@@ -88,6 +98,20 @@ defmodule SymphonyElixir.ReviewRunner do
 
   defp app_server_module do
     Application.get_env(:symphony_elixir, :codex_app_server, AppServer)
+  end
+
+  defp role_codex_options(:implementer, opts) do
+    case Keyword.get(opts, :implementer_codex_command) do
+      command when is_binary(command) -> [codex_command: command]
+      _ -> Config.review_role_codex_options(:implementer)
+    end
+  end
+
+  defp role_codex_options(:reviewer, opts) do
+    case Keyword.get(opts, :reviewer_codex_command) do
+      command when is_binary(command) -> [codex_command: command]
+      _ -> Config.review_role_codex_options(:reviewer)
+    end
   end
 
   defp publish_rework(opts, current_pr) do

@@ -215,6 +215,54 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Review do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:final_review, :string, default: "human_required")
+      field(:handoff_state, :string)
+      field(:require_pr_url_before_handoff, :boolean, default: true)
+      field(:approve_equivalent_required_before_handoff, :boolean, default: true)
+      field(:merge_decision, :string, default: "human_required_after_approve_equivalent")
+      field(:auto_merge, :boolean, default: false)
+      field(:max_review_fix_loops, :integer)
+      field(:implementer_command, :string)
+      field(:reviewer_command, :string)
+      field(:implementer_model, :string)
+      field(:reviewer_model, :string)
+      field(:implementer_profile, :string)
+      field(:reviewer_profile, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :final_review,
+          :handoff_state,
+          :require_pr_url_before_handoff,
+          :approve_equivalent_required_before_handoff,
+          :merge_decision,
+          :auto_merge,
+          :max_review_fix_loops,
+          :implementer_command,
+          :reviewer_command,
+          :implementer_model,
+          :reviewer_model,
+          :implementer_profile,
+          :reviewer_profile
+        ],
+        empty_values: []
+      )
+      |> validate_number(:max_review_fix_loops, greater_than_or_equal_to: 0)
+    end
+  end
+
   defmodule Codex do
     @moduledoc false
     use Ecto.Schema
@@ -333,6 +381,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:repository, Repository, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:review, Review, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
@@ -426,6 +475,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:repository, with: &Repository.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
+    |> cast_embed(:review, with: &Review.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)

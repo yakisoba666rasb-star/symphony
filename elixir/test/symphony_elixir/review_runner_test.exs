@@ -5,7 +5,10 @@ defmodule SymphonyElixir.ReviewRunnerTest do
   alias SymphonyElixir.ReviewRunner
 
   defmodule FakeReviewLoopAppServer do
-    def start_session(workspace, _opts), do: {:ok, %{workspace: workspace}}
+    def start_session(workspace, opts) do
+      send(test_pid(), {:codex_session_opts, opts})
+      {:ok, %{workspace: workspace}}
+    end
 
     def run_turn(%{workspace: workspace}, prompt, _issue, _opts) do
       send(test_pid(), {:codex_turn, prompt})
@@ -97,6 +100,8 @@ defmodule SymphonyElixir.ReviewRunnerTest do
                  %{"number" => 238, "url" => "https://github.example/pull/238"},
                  app_server_module: FakeReviewLoopAppServer,
                  max_review_fix_loops: 1,
+                 implementer_codex_command: "codex --profile implementer app-server",
+                 reviewer_codex_command: "codex --profile reviewer app-server",
                  publish_rework: fn ->
                    send(self(), :publish_rework)
                    {:ok, %{"number" => 238, "url" => "https://github.example/pull/238"}}
@@ -105,8 +110,12 @@ defmodule SymphonyElixir.ReviewRunnerTest do
 
       assert_receive {:codex_turn, first_review_prompt}
       assert first_review_prompt =~ "independent reviewer"
+      assert_receive {:codex_session_opts, review_opts}
+      assert review_opts[:codex_command] == "codex --profile reviewer app-server"
       assert_receive {:codex_turn, rework_codex_prompt}
       assert rework_codex_prompt =~ "implementer in the Symphony rework loop"
+      assert_receive {:codex_session_opts, rework_opts}
+      assert rework_opts[:codex_command] == "codex --profile implementer app-server"
       assert_receive {:rework_turn, rework_prompt}
       assert rework_prompt =~ "PR update is missing"
       assert_receive :publish_rework

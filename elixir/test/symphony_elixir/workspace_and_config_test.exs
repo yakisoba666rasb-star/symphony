@@ -1217,6 +1217,52 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().worker.max_concurrent_agents_per_host == 2
   end
 
+  test "config parses review handoff and role runner settings" do
+    workflow = """
+    ---
+    tracker:
+      kind: linear
+      api_key: token
+      project_slug: project
+      review_state: Legacy Review
+    agent:
+      max_review_fix_loops: 2
+    review:
+      final_review: human_required
+      handoff_state: In Review
+      require_pr_url_before_handoff: true
+      approve_equivalent_required_before_handoff: true
+      merge_decision: human_required_after_approve_equivalent
+      auto_merge: false
+      max_review_fix_loops: 5
+      implementer_model: gpt-5.3-codex-spark
+      implementer_profile: implementer
+      reviewer_model: gpt-5.5
+      reviewer_profile: reviewer
+    ---
+    """
+
+    File.write!(Workflow.workflow_file_path(), workflow)
+
+    config = Config.settings!()
+    assert config.review.final_review == "human_required"
+    assert config.review.handoff_state == "In Review"
+    assert config.review.require_pr_url_before_handoff == true
+    assert config.review.approve_equivalent_required_before_handoff == true
+    assert config.review.merge_decision == "human_required_after_approve_equivalent"
+    assert config.review.auto_merge == false
+    assert Config.review_handoff_state() == "In Review"
+    assert Config.max_review_fix_loops() == 5
+
+    assert Config.review_role_codex_options(:implementer) == [
+             codex_command: "codex --config 'model=\"gpt-5.3-codex-spark\"' --profile 'implementer' app-server"
+           ]
+
+    assert Config.review_role_codex_options(:reviewer) == [
+             codex_command: "codex --config 'model=\"gpt-5.5\"' --profile 'reviewer' app-server"
+           ]
+  end
+
   test "schema helpers cover custom type and state limit validation" do
     assert StringOrMap.type() == :map
     assert StringOrMap.embed_as(:json) == :self

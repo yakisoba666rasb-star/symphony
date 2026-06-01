@@ -374,7 +374,8 @@ defmodule SymphonyElixir.Orchestrator do
     _pr_number = pr["number"] || pr[:number]
     _pr_url = pr["url"] || pr[:url]
 
-    with {:ok, verdict} <- review_pr_before_handoff(running_entry, pr) do
+    with {:ok, verdict} <- review_pr_before_handoff(running_entry, pr),
+         :ok <- comment_on_approved_review_handoff(issue_id, running_entry, pr, verdict) do
       Logger.info("Review loop approved-equivalent for issue_id=#{issue_id} session_id=#{session_id} verdict=#{inspect(verdict)}")
       move_issue_to_review_after_approval(state, issue_id, running_entry, session_id)
     else
@@ -385,12 +386,73 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp comment_on_approved_review_handoff(issue_id, running_entry, pr, verdict)
+       when is_binary(issue_id) do
+    body = approved_review_handoff_comment(running_entry, pr, verdict)
+
+    try do
+      case tracker_module().create_comment(issue_id, body) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          {:error, {:approved_review_comment_failed, reason}}
+
+        other ->
+          {:error, {:approved_review_comment_failed, other}}
+      end
+    rescue
+      exception ->
+        {:error, {:approved_review_comment_failed, Exception.message(exception)}}
+    end
+  end
+
+  defp comment_on_approved_review_handoff(_issue_id, _running_entry, _pr, _verdict), do: :ok
+
+  defp approved_review_handoff_comment(running_entry, pr, verdict) do
+    """
+    Symphony automated review decision: approve-equivalent.
+
+    Issue: #{Map.get(running_entry, :identifier, "issue")}
+    PR: #{pr_url(pr)}
+
+    Review loop result:
+    - blocking findings: #{format_review_items(verdict_value(verdict, :blocking_findings))}
+    - required tests checked/requested: #{format_review_items(verdict_value(verdict, :tests_required))}
+    - residual risk: #{blank_to_none(verdict_value(verdict, :residual_risk))}
+
+    Merge judgment: ready for human final merge decision after required GitHub checks are green. The runtime will not approve on GitHub and will not merge automatically.
+    """
+    |> String.trim()
+  end
+
+  defp pr_url(%{"url" => url}) when is_binary(url), do: url
+  defp pr_url(%{url: url}) when is_binary(url), do: url
+  defp pr_url(_pr), do: "unknown"
+
+  defp verdict_value(verdict, key) when is_map(verdict), do: Map.get(verdict, key) || Map.get(verdict, Atom.to_string(key))
+  defp verdict_value(_verdict, _key), do: nil
+
+  defp format_review_items(items) when is_list(items) do
+    case Enum.map(items, &to_string/1) |> Enum.reject(&(&1 == "")) do
+      [] -> "none"
+      values -> Enum.join(values, "; ")
+    end
+  end
+
+  defp format_review_items(nil), do: "none"
+  defp format_review_items(item), do: to_string(item)
+
+  defp blank_to_none(nil), do: "none"
+  defp blank_to_none(""), do: "none"
+  defp blank_to_none(value), do: to_string(value)
+
   defp review_pr_before_handoff(running_entry, pr) do
     case Map.get(running_entry, :workspace_path) do
       workspace_path when is_binary(workspace_path) ->
         review_opts =
           [
-            max_review_fix_loops: Config.settings!().agent.max_review_fix_loops
+            max_review_fix_loops: Config.max_review_fix_loops()
           ]
           |> maybe_put_rework_publisher(running_entry)
 
@@ -429,7 +491,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp move_issue_to_review_after_approval(state, issue_id, running_entry, session_id) do
-    target_state = Config.settings!().tracker.review_state
+    target_state = Config.review_handoff_state()
 
     case tracker_module().update_issue_state(issue_id, target_state) do
       :ok ->
@@ -1080,7 +1142,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp review_premature_handoff_pr(%State{} = state, %Issue{} = issue, running_entry, session_id, pr) do
     stopped_state = terminate_running_issue(state, issue.id, false)
 
-    with {:ok, verdict} <- review_pr_before_handoff(running_entry, pr) do
+    with {:ok, verdict} <- review_pr_before_handoff(running_entry, pr),
+         :ok <- comment_on_approved_review_handoff(issue.id, running_entry, pr, verdict) do
       Logger.info("Review loop approved-equivalent for premature review handoff issue_id=#{issue.id} session_id=#{session_id} verdict=#{inspect(verdict)}")
       move_issue_to_review_after_approval(stopped_state, issue.id, running_entry, session_id)
     else
