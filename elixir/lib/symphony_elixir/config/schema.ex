@@ -260,6 +260,21 @@ defmodule SymphonyElixir.Config.Schema do
         empty_values: []
       )
       |> validate_number(:max_review_fix_loops, greater_than_or_equal_to: 0)
+      |> validate_inclusion(:final_review, ["human_required"])
+      |> validate_inclusion(:merge_decision, ["human_required_after_approve_equivalent"])
+      |> validate_boolean_policy(:require_pr_url_before_handoff, true)
+      |> validate_boolean_policy(:approve_equivalent_required_before_handoff, true)
+      |> validate_boolean_policy(:auto_merge, false)
+    end
+
+    defp validate_boolean_policy(changeset, field, expected) when is_boolean(expected) do
+      validate_change(changeset, field, fn ^field, value ->
+        if value == expected do
+          []
+        else
+          [{field, "must be #{expected} for the official human-review workflow"}]
+        end
+      end)
     end
   end
 
