@@ -1274,12 +1274,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         final_review: human_required
         handoff_state: In Review
         require_pr_url_before_handoff: true
-        approve_equivalent_required_before_handoff: false
-        merge_decision: always_auto_merge
-        auto_merge: true
+        approve_equivalent_required_before_handoff: true
+        merge_decision: human_required_after_approve_equivalent
+        auto_merge: false
         max_review_fix_loops: 7
         implementer_model: gpt-5.3-codex-spark
+        implementer_profile: implementer
         reviewer_model: gpt-5.5
+        reviewer_profile: reviewer
     ---
     """
 
@@ -1289,9 +1291,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.review.final_review == "human_required"
     assert config.review.handoff_state == "In Review"
     assert config.review.require_pr_url_before_handoff == true
-    assert config.review.approve_equivalent_required_before_handoff == false
-    assert config.review.merge_decision == "always_auto_merge"
-    assert config.review.auto_merge == true
+    assert config.review.approve_equivalent_required_before_handoff == true
+    assert config.review.merge_decision == "human_required_after_approve_equivalent"
+    assert config.review.auto_merge == false
     assert Config.max_review_fix_loops() == 7
 
     assert Config.review_role_codex_options(:implementer) == [
@@ -1301,6 +1303,30 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.review_role_codex_options(:reviewer) == [
              codex_command: "codex --config 'model=\"gpt-5.5\"' --profile 'reviewer' app-server"
            ]
+  end
+
+  test "schema rejects unsupported review workflow policies" do
+    assert {
+             :error,
+             {:invalid_workflow_config, message}
+           } =
+             Schema.parse(%{
+               "x-lab-runtime" => %{
+                 "review_workflow" => %{
+                   "final_review" => "automated",
+                   "require_pr_url_before_handoff" => false,
+                   "approve_equivalent_required_before_handoff" => false,
+                   "merge_decision" => "always_auto_merge",
+                   "auto_merge" => true
+                 }
+               }
+             })
+
+    assert message =~ "review.final_review is invalid"
+    assert message =~ "review.require_pr_url_before_handoff must be true"
+    assert message =~ "review.approve_equivalent_required_before_handoff must be true"
+    assert message =~ "review.merge_decision is invalid"
+    assert message =~ "review.auto_merge must be false"
   end
 
   test "schema rejects malformed x-lab-runtime.review_workflow" do
