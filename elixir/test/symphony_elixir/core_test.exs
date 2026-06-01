@@ -539,7 +539,9 @@ defmodule SymphonyElixir.CoreTest do
       updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
 
       assert_receive {:tracker_state_update, ^issue_id, "In Review"}
-      refute_receive {:tracker_comment, ^issue_id, _body}, 100
+      assert_receive {:tracker_comment, ^issue_id, body}
+      assert body =~ "Symphony automated review decision: approve-equivalent"
+      assert body =~ "PR: https://github.example/pull/237"
       refute Map.has_key?(updated_state.running, issue_id)
       assert MapSet.member?(updated_state.completed, issue_id)
       refute Map.has_key?(updated_state.blocked, issue_id)

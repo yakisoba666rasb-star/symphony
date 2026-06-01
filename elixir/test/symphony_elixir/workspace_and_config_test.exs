@@ -1279,7 +1279,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         auto_merge: true
         max_review_fix_loops: 7
         implementer_model: gpt-5.3-codex-spark
+        implementer_profile: implementer
         reviewer_model: gpt-5.5
+        reviewer_profile: reviewer
     ---
     """
 
