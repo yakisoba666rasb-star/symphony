@@ -394,14 +394,21 @@ defmodule SymphonyElixir.Config.Schema do
     |> normalize_keys()
     |> drop_nil_values()
     |> promote_review_workflow_config()
-    |> changeset()
-    |> apply_action(:validate)
     |> case do
-      {:ok, settings} ->
-        {:ok, finalize_settings(settings)}
+      {:ok, config} ->
+        config
+        |> changeset()
+        |> apply_action(:validate)
+        |> case do
+          {:ok, settings} ->
+            {:ok, finalize_settings(settings)}
 
-      {:error, changeset} ->
-        {:error, {:invalid_workflow_config, format_errors(changeset)}}
+          {:error, changeset} ->
+            {:error, {:invalid_workflow_config, format_errors(changeset)}}
+        end
+
+      {:error, message} when is_binary(message) ->
+        {:error, {:invalid_workflow_config, message}}
     end
   end
 
@@ -676,12 +683,24 @@ defmodule SymphonyElixir.Config.Schema do
   defp promote_review_workflow_config(%{"x-lab-runtime" => %{} = runtime} = config) do
     case Map.get(runtime, "review_workflow") do
       review_workflow when is_map(review_workflow) ->
-        Map.update(config, "review", review_workflow, &Map.merge(&1, review_workflow))
+        case Map.get(config, "review") do
+          nil ->
+            {:ok, Map.put(config, "review", review_workflow)}
+
+          existing_review when is_map(existing_review) ->
+            {:ok, Map.put(config, "review", Map.merge(existing_review, review_workflow))}
+
+          _ ->
+            {:error, "x-lab-runtime.review_workflow requires review to be a map"}
+        end
+
+      nil ->
+        {:ok, config}
 
       _ ->
-        config
+        {:error, "x-lab-runtime.review_workflow must be an object"}
     end
   end
 
-  defp promote_review_workflow_config(config), do: config
+  defp promote_review_workflow_config(config), do: {:ok, config}
 end
