@@ -1142,7 +1142,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp review_premature_handoff_pr(%State{} = state, %Issue{} = issue, running_entry, session_id, pr) do
     stopped_state = terminate_running_issue(state, issue.id, false)
 
-    with {:ok, verdict} <- review_pr_before_handoff(running_entry, pr) do
+    with {:ok, verdict} <- review_pr_before_handoff(running_entry, pr),
+         :ok <- comment_on_approved_review_handoff(issue.id, running_entry, pr, verdict) do
       Logger.info("Review loop approved-equivalent for premature review handoff issue_id=#{issue.id} session_id=#{session_id} verdict=#{inspect(verdict)}")
       move_issue_to_review_after_approval(stopped_state, issue.id, running_entry, session_id)
     else
