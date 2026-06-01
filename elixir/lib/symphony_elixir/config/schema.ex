@@ -393,6 +393,7 @@ defmodule SymphonyElixir.Config.Schema do
     config
     |> normalize_keys()
     |> drop_nil_values()
+    |> promote_review_workflow_config()
     |> changeset()
     |> apply_action(:validate)
     |> case do
@@ -671,4 +672,16 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp error_value_to_string(value) when is_atom(value), do: Atom.to_string(value)
   defp error_value_to_string(value), do: inspect(value)
+
+  defp promote_review_workflow_config(%{"x-lab-runtime" => %{} = runtime} = config) do
+    case Map.get(runtime, "review_workflow") do
+      review_workflow when is_map(review_workflow) ->
+        Map.update(config, "review", review_workflow, &Map.merge(&1, review_workflow))
+
+      _ ->
+        config
+    end
+  end
+
+  defp promote_review_workflow_config(config), do: config
 end

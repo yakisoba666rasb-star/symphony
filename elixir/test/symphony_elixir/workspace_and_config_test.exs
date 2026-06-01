@@ -1263,6 +1263,38 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            ]
   end
 
+  test "config parses review workflow from x-lab-runtime" do
+    workflow = """
+    ---
+    review:
+      final_review: gpt
+      max_review_fix_loops: 1
+    x-lab-runtime:
+      review_workflow:
+        final_review: human_required
+        handoff_state: In Review
+        require_pr_url_before_handoff: true
+        approve_equivalent_required_before_handoff: false
+        merge_decision: always_auto_merge
+        auto_merge: true
+        max_review_fix_loops: 7
+        implementer_model: gpt-5.3-codex-spark
+        reviewer_model: gpt-5.5
+    ---
+    """
+
+    File.write!(Workflow.workflow_file_path(), workflow)
+
+    config = Config.settings!()
+    assert config.review.final_review == "human_required"
+    assert config.review.handoff_state == "In Review"
+    assert config.review.require_pr_url_before_handoff == true
+    assert config.review.approve_equivalent_required_before_handoff == false
+    assert config.review.merge_decision == "always_auto_merge"
+    assert config.review.auto_merge == true
+    assert Config.max_review_fix_loops() == 7
+  end
+
   test "schema helpers cover custom type and state limit validation" do
     assert StringOrMap.type() == :map
     assert StringOrMap.embed_as(:json) == :self
