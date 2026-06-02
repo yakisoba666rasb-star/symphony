@@ -2310,6 +2310,68 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert comment =~ "agent.max_turns reached while Linear issue stayed active"
   end
 
+  test "orchestrator blocks dirty workspace exits instead of retrying" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", tracker_api_token: nil)
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-dirty-workspace-block"
+    issue = %Issue{id: issue_id, identifier: "MT-DIRTY-BLOCK", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :DirtyWorkspaceBlockOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-DIRTY-BLOCK",
+      issue: issue,
+      workspace_path: "/tmp/mt-dirty-block",
+      session_id: "thread-dirty-workspace",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:DOWN, ref, :process, self(), {:dirty_workspace, "/tmp/mt-dirty-block", "?? docs/operations/LAB-269-smoke.md\n"}}
+    )
+
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    refute MapSet.member?(state.completed, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+
+    assert %{
+             identifier: "MT-DIRTY-BLOCK",
+             error: "dirty workspace detected at /tmp/mt-dirty-block: ?? docs/operations/LAB-269-smoke.md"
+           } = state.blocked[issue_id]
+
+    assert_receive {:memory_tracker_comment, ^issue_id, comment}
+    assert comment =~ "Symphony blocked MT-DIRTY-BLOCK"
+    assert comment =~ "dirty workspace detected at /tmp/mt-dirty-block"
+    assert comment =~ "docs/operations/LAB-269-smoke.md"
+  end
+
   test "orchestrator moves max-turn active issue exits to review when a PR is discoverable" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
 

@@ -1969,6 +1969,39 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner exits with explicit dirty workspace reason" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-dirty-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git init -b main && git config user.name Test && git config user.email test@example.com && echo first > README.md && git add README.md && git commit -m initial"
+      )
+
+      issue = %Issue{
+        id: "issue-dirty-workspace",
+        identifier: "MT-DIRTY-RUNNER",
+        title: "Dirty workspace",
+        description: "Existing dirty workspace should block explicitly",
+        state: "In Progress"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      File.write!(Path.join(workspace, "agent-output.txt"), "created but not committed\n")
+
+      assert catch_exit(AgentRunner.run(issue)) ==
+               {:dirty_workspace, workspace, "?? agent-output.txt\n"}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server starts with workspace cwd and expected startup command" do
     test_root =
       Path.join(

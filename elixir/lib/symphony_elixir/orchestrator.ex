@@ -239,6 +239,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
     cond do
+      dirty_workspace_reason?(reason) ->
+        block_dirty_workspace_agent_down(state, issue_id, running_entry, session_id, reason)
+
       max_turns_reached_active_issue?(reason) ->
         block_max_turns_agent_down(state, issue_id, running_entry, session_id)
 
@@ -353,6 +356,24 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp max_turns_reached_active_issue?({:max_turns_reached_active_issue, _issue_id}), do: true
   defp max_turns_reached_active_issue?(_reason), do: false
+
+  defp dirty_workspace_reason?({:dirty_workspace, workspace, status})
+       when is_binary(workspace) and is_binary(status),
+       do: true
+
+  defp dirty_workspace_reason?(_reason), do: false
+
+  defp block_dirty_workspace_agent_down(
+         state,
+         issue_id,
+         running_entry,
+         session_id,
+         {:dirty_workspace, workspace, status}
+       ) do
+    error = "dirty workspace detected at #{workspace}: #{String.trim(status)}"
+    Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+    block_issue_from_entry(state, issue_id, running_entry, error)
+  end
 
   defp block_max_turns_agent_down(state, issue_id, running_entry, session_id) do
     case branch_name_and_workspace(running_entry) do

@@ -41,6 +41,40 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace removes failed after_create bootstrap so retry starts fresh" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-failed-bootstrap-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      failed_workspace = Path.join(workspace_root, "MT-FAILED-BOOTSTRAP")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "echo partial > old.txt && exit 17"
+      )
+
+      assert {:error, {:workspace_hook_failed, "after_create", 17, _output}} =
+               Workspace.create_for_issue("MT-FAILED-BOOTSTRAP")
+
+      refute File.exists?(failed_workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git init -b main && echo fresh > README.md"
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-FAILED-BOOTSTRAP")
+      assert File.dir?(Path.join(workspace, ".git"))
+      assert File.read!(Path.join(workspace, "README.md")) == "fresh\n"
+      refute File.exists?(Path.join(workspace, "old.txt"))
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace hook receives repository context resolved from issue metadata" do
     workspace_root =
       Path.join(
@@ -241,12 +275,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert status =~ "README.md"
       assert status =~ "local-progress.txt"
 
-      reason_log = Path.join(workspace, "_reason.log")
+      reason_log = Path.join(workspace_root, "MT-DIRTY.dirty-reason.log")
       assert File.exists?(reason_log)
       reason = File.read!(reason_log)
       assert reason =~ "dirty workspace detected"
       assert reason =~ "README.md"
       assert reason =~ "local-progress.txt"
+      refute File.exists?(Path.join(workspace, "_reason.log"))
     after
       File.rm_rf(workspace_root)
     end

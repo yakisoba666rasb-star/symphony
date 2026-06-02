@@ -21,9 +21,15 @@ defmodule SymphonyElixir.Workspace do
 
       with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
            :ok <- validate_workspace_path(workspace, worker_host),
-           {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host),
-           :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
-        {:ok, workspace}
+           {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host) do
+        case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
+          :ok ->
+            {:ok, workspace}
+
+          {:error, reason} = error ->
+            cleanup_created_workspace_after_create_failure(workspace, worker_host, created?, reason)
+            error
+        end
       end
     rescue
       error in [ArgumentError, ErlangError, File.Error] ->
@@ -67,7 +73,7 @@ defmodule SymphonyElixir.Workspace do
         "        printf '%s\\n' \"$dirty_status\"",
         "        printf '\\n%s\\n' 'Git diff --stat:'",
         "        git diff --stat || true",
-        "      } > _reason.log",
+        "      } > \"$workspace.dirty-reason.log\"",
         "      escaped_dirty_status=$(printf '%s' \"$dirty_status\" | sed ':a;N;$!ba;s/\\n/\\\\n/g')",
         "      printf '%s\\t%s\\t%s\\n' '#{@remote_dirty_workspace_marker}' \"$(pwd -P)\" \"$escaped_dirty_status\"",
         "      exit 72",
@@ -111,6 +117,42 @@ defmodule SymphonyElixir.Workspace do
     {:ok, workspace, true}
   end
 
+  defp cleanup_created_workspace_after_create_failure(_workspace, _worker_host, false, _reason), do: :ok
+
+  defp cleanup_created_workspace_after_create_failure(workspace, nil, true, reason) do
+    Logger.warning("Removing newly-created workspace after after_create failure workspace=#{workspace} reason=#{inspect(reason)}")
+    File.rm_rf(workspace)
+    :ok
+  end
+
+  defp cleanup_created_workspace_after_create_failure(workspace, worker_host, true, reason)
+       when is_binary(worker_host) do
+    Logger.warning("Removing newly-created remote workspace after after_create failure workspace=#{workspace} worker_host=#{worker_host} reason=#{inspect(reason)}")
+
+    script =
+      [
+        remote_shell_assign("workspace", workspace),
+        "rm -rf \"$workspace\""
+      ]
+      |> Enum.join("\n")
+
+    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
+      {:ok, {_output, 0}} ->
+        :ok
+
+      {:ok, {output, status}} ->
+        Logger.warning(
+          "Failed to remove workspace after after_create failure workspace=#{workspace} worker_host=#{worker_host} status=#{status} output=#{inspect(sanitize_hook_output_for_log(output))}"
+        )
+
+        :ok
+
+      {:error, cleanup_reason} ->
+        Logger.warning("Failed to remove workspace after after_create failure workspace=#{workspace} worker_host=#{worker_host} reason=#{inspect(cleanup_reason)}")
+        :ok
+    end
+  end
+
   defp ensure_reusable_workspace(workspace) do
     if File.dir?(Path.join(workspace, ".git")) do
       case System.cmd("git", ["-C", workspace, "status", "--porcelain"], stderr_to_stdout: true) do
@@ -147,8 +189,12 @@ defmodule SymphonyElixir.Workspace do
     #{dirty_status}#{diff_summary}
     """
 
-    File.write(Path.join(workspace, "_reason.log"), body)
+    File.write(dirty_workspace_reason_log_path(workspace), body)
     :ok
+  end
+
+  defp dirty_workspace_reason_log_path(workspace) do
+    Path.join(Path.dirname(workspace), "#{Path.basename(workspace)}.dirty-reason.log")
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
