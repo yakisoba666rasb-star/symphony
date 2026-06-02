@@ -129,6 +129,11 @@ defmodule SymphonyElixir.TestSupport do
           observability_enabled: true,
           observability_refresh_ms: 1_000,
           observability_render_interval_ms: 16,
+          hermes_kanban_enabled: false,
+          hermes_kanban_command: nil,
+          hermes_kanban_board: "default",
+          hermes_kanban_tenant: nil,
+          hermes_kanban_assignee: nil,
           server_port: nil,
           server_host: nil,
           prompt: @workflow_prompt
@@ -173,6 +178,11 @@ defmodule SymphonyElixir.TestSupport do
     observability_enabled = Keyword.get(config, :observability_enabled)
     observability_refresh_ms = Keyword.get(config, :observability_refresh_ms)
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
+    hermes_kanban_enabled = Keyword.get(config, :hermes_kanban_enabled)
+    hermes_kanban_command = Keyword.get(config, :hermes_kanban_command)
+    hermes_kanban_board = Keyword.get(config, :hermes_kanban_board)
+    hermes_kanban_tenant = Keyword.get(config, :hermes_kanban_tenant)
+    hermes_kanban_assignee = Keyword.get(config, :hermes_kanban_assignee)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
     prompt = Keyword.get(config, :prompt)
@@ -212,7 +222,16 @@ defmodule SymphonyElixir.TestSupport do
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
-        observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
+        observability_yaml(
+          observability_enabled,
+          observability_refresh_ms,
+          observability_render_interval_ms,
+          hermes_kanban_enabled,
+          hermes_kanban_command,
+          hermes_kanban_board,
+          hermes_kanban_tenant,
+          hermes_kanban_assignee
+        ),
         server_yaml(server_port, server_host),
         "---",
         prompt
@@ -287,12 +306,27 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
-  defp observability_yaml(enabled, refresh_ms, render_interval_ms) do
+  defp observability_yaml(
+         enabled,
+         refresh_ms,
+         render_interval_ms,
+         hermes_kanban_enabled,
+         hermes_kanban_command,
+         hermes_kanban_board,
+         hermes_kanban_tenant,
+         hermes_kanban_assignee
+       ) do
     [
       "observability:",
       "  dashboard_enabled: #{yaml_value(enabled)}",
       "  refresh_ms: #{yaml_value(refresh_ms)}",
-      "  render_interval_ms: #{yaml_value(render_interval_ms)}"
+      "  render_interval_ms: #{yaml_value(render_interval_ms)}",
+      "  hermes_kanban:",
+      "    enabled: #{yaml_value(hermes_kanban_enabled)}",
+      "    command: #{yaml_value(hermes_kanban_command)}",
+      "    board: #{yaml_value(hermes_kanban_board)}",
+      "    tenant: #{yaml_value(hermes_kanban_tenant)}",
+      "    assignee: #{yaml_value(hermes_kanban_assignee)}"
     ]
     |> Enum.join("\n")
   end

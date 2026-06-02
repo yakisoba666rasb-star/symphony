@@ -49,6 +49,30 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  defmodule FakeHermesKanbanRecordsSync do
+    def sync_issue_running(issue, _opts \\ []) do
+      send(test_pid(), {:hermes_kanban_running_started, self(), issue.id, issue.identifier, issue.state})
+
+      receive do
+        :release -> :ok
+      after
+        1_000 -> :ok
+      end
+
+      send(test_pid(), {:hermes_kanban_running_finished, issue.id})
+      {:ok, "hermes-task-#{issue.id}"}
+    end
+
+    def sync_issue_done(issue, opts \\ []) do
+      send(test_pid(), {:hermes_kanban_done, issue.id, issue.identifier, opts})
+      :ok
+    end
+
+    defp test_pid do
+      Application.fetch_env!(:symphony_elixir, :test_pid)
+    end
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -123,6 +147,30 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.command"
     assert message =~ "can't be blank"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      hermes_kanban_enabled: true,
+      hermes_kanban_command: "/opt/hermes/bin/hermes",
+      hermes_kanban_board: "lab",
+      hermes_kanban_tenant: "auto_template",
+      hermes_kanban_assignee: "symphony"
+    )
+
+    config = Config.settings!()
+    assert config.observability.hermes_kanban.enabled == true
+    assert config.observability.hermes_kanban.command == "/opt/hermes/bin/hermes"
+    assert config.observability.hermes_kanban.board == "lab"
+    assert config.observability.hermes_kanban.tenant == "auto_template"
+    assert config.observability.hermes_kanban.assignee == "symphony"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      hermes_kanban_enabled: true,
+      hermes_kanban_command: ""
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "observability.hermes_kanban.command"
+    assert message =~ "can't be blank when enabled"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "   ")
     assert :ok = Config.validate!()
@@ -212,6 +260,69 @@ defmodule SymphonyElixir.CoreTest do
     )
 
     assert Config.settings!().tracker.assignee == env_assignee
+  end
+
+  test "claiming a Todo issue schedules Hermes Kanban running sync without blocking dispatch" do
+    previous_hermes = Application.get_env(:symphony_elixir, :hermes_kanban_module)
+    previous_test_pid = Application.get_env(:symphony_elixir, :test_pid)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        hermes_kanban_enabled: true,
+        hermes_kanban_command: "/opt/hermes/bin/hermes"
+      )
+
+      Application.put_env(:symphony_elixir, :hermes_kanban_module, FakeHermesKanbanRecordsSync)
+      Application.put_env(:symphony_elixir, :test_pid, self())
+
+      issue = %Issue{id: "issue-claim-hermes", identifier: "LAB-280", title: "Mirror claim", state: "Todo"}
+      parent = self()
+
+      updater = fn issue_id, state_name ->
+        send(parent, {:tracker_state_update, issue_id, state_name})
+        :ok
+      end
+
+      claim_task = Task.async(fn -> Orchestrator.claim_issue_for_dispatch_for_test(issue, updater) end)
+
+      assert_receive {:tracker_state_update, "issue-claim-hermes", "In Progress"}
+      assert_receive {:hermes_kanban_running_started, hermes_pid, "issue-claim-hermes", "LAB-280", "In Progress"}
+      assert {:ok, {:ok, %Issue{state: "In Progress"} = claimed_issue}} = Task.yield(claim_task, 100)
+      assert claimed_issue.id == issue.id
+
+      send(hermes_pid, :release)
+      assert_receive {:hermes_kanban_running_finished, "issue-claim-hermes"}
+    after
+      if is_nil(previous_hermes) do
+        Application.delete_env(:symphony_elixir, :hermes_kanban_module)
+      else
+        Application.put_env(:symphony_elixir, :hermes_kanban_module, previous_hermes)
+      end
+
+      if is_nil(previous_test_pid) do
+        Application.delete_env(:symphony_elixir, :test_pid)
+      else
+        Application.put_env(:symphony_elixir, :test_pid, previous_test_pid)
+      end
+    end
+  end
+
+  test "Hermes Kanban running sync result is stored on the running entry" do
+    issue_id = "issue-hermes-result"
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          issue: %Issue{id: issue_id, identifier: "LAB-281", state: "In Progress"},
+          identifier: "LAB-281"
+        }
+      }
+    }
+
+    assert {:noreply, updated_state} =
+             Orchestrator.handle_info({:hermes_kanban_running_synced, issue_id, {:ok, "task-123"}}, state)
+
+    assert updated_state.running[issue_id].hermes_kanban_task_id == "task-123"
   end
 
   test "workflow file path defaults to WORKFLOW.md in the current working directory when app env is unset" do
@@ -591,6 +702,7 @@ defmodule SymphonyElixir.CoreTest do
     previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
     previous_review_runner = Application.get_env(:symphony_elixir, :review_runner)
     previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_hermes = Application.get_env(:symphony_elixir, :hermes_kanban_module)
     previous_test_pid = Application.get_env(:symphony_elixir, :test_pid)
     issue_id = "issue-review-pr"
     issue_identifier = "MT-REVIEW-PR"
@@ -601,12 +713,15 @@ defmodule SymphonyElixir.CoreTest do
         workspace_root: test_root,
         tracker_active_states: ["Todo", "In Progress", "Rework"],
         tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
-        tracker_review_state: "In Review"
+        tracker_review_state: "In Review",
+        hermes_kanban_enabled: true,
+        hermes_kanban_command: "/opt/hermes/bin/hermes"
       )
 
       Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupFound)
       Application.put_env(:symphony_elixir, :review_runner, FakeReviewRunnerApproved)
       Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerRecordsUpdates)
+      Application.put_env(:symphony_elixir, :hermes_kanban_module, FakeHermesKanbanRecordsSync)
       Application.put_env(:symphony_elixir, :test_pid, self())
 
       File.mkdir_p!(test_root)
@@ -632,6 +747,7 @@ defmodule SymphonyElixir.CoreTest do
               branch_name: "feature/pr"
             },
             workspace_path: workspace,
+            hermes_kanban_task_id: "task-review-pr",
             started_at: DateTime.utc_now()
           }
         },
@@ -652,6 +768,10 @@ defmodule SymphonyElixir.CoreTest do
       updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
 
       assert_receive {:tracker_state_update, ^issue_id, "In Review"}
+      assert_receive {:hermes_kanban_done, ^issue_id, ^issue_identifier, opts}
+      assert Keyword.fetch!(opts, :task_id) == "task-review-pr"
+      assert Keyword.fetch!(opts, :summary) =~ "Symphony handed off MT-REVIEW-PR"
+      assert get_in(Keyword.fetch!(opts, :metadata), ["pr_url"]) == "https://github.example/pull/236"
       refute Map.has_key?(updated_state.running, issue_id)
       assert MapSet.member?(updated_state.completed, issue_id)
       refute Map.has_key?(updated_state.blocked, issue_id)
@@ -673,6 +793,12 @@ defmodule SymphonyElixir.CoreTest do
         Application.delete_env(:symphony_elixir, :tracker_module)
       else
         Application.put_env(:symphony_elixir, :tracker_module, previous_tracker)
+      end
+
+      if is_nil(previous_hermes) do
+        Application.delete_env(:symphony_elixir, :hermes_kanban_module)
+      else
+        Application.put_env(:symphony_elixir, :hermes_kanban_module, previous_hermes)
       end
 
       if is_nil(previous_test_pid) do
