@@ -128,6 +128,55 @@ defmodule SymphonyElixir.ReviewRunnerTest do
     end
   end
 
+  test "runs rework when reviewer writes structured blocking findings" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-review-runner-structured-rework-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(test_root)
+
+    previous_test_pid = Application.get_env(:symphony_elixir, :test_pid)
+
+    try do
+      Application.put_env(:symphony_elixir, :test_pid, self())
+
+      Process.put(:review_verdicts, [
+        %{
+          "approved_equivalent" => false,
+          "blocking_findings" => [
+            %{
+              "file" => "tests/test_server_ui.py",
+              "line" => 766,
+              "issue" => "Expected excluded history card"
+            }
+          ],
+          "tests_required" => ["PYTHONPATH=. pytest -q tests/test_server_ui.py::ServerUiTest::test_history"],
+          "residual_risk" => "CI should pass after assertion update"
+        },
+        %{"approved_equivalent" => true, "blocking_findings" => [], "tests_required" => [], "residual_risk" => ""}
+      ])
+
+      assert {:ok, %{approved_equivalent: true}} =
+               ReviewRunner.run_loop(
+                 test_root,
+                 %Issue{identifier: "LAB-277", title: "Runtime rework loop"},
+                 %{"number" => 381, "url" => "https://github.example/pull/381"},
+                 app_server_module: FakeReviewLoopAppServer,
+                 max_review_fix_loops: 1,
+                 publish_rework: fn ->
+                   send(self(), :publish_rework)
+                   {:ok, %{"number" => 381, "url" => "https://github.example/pull/381"}}
+                 end
+               )
+
+      assert_receive {:rework_turn, rework_prompt}
+      assert rework_prompt =~ "tests/test_server_ui.py:766"
+      assert rework_prompt =~ "Expected excluded history card"
+      assert_receive :publish_rework
+      refute File.exists?(Path.join(test_root, ".symphony-review-verdict.json"))
+    after
+      restore_app_env(:test_pid, previous_test_pid)
+      File.rm_rf(test_root)
+    end
+  end
+
   test "stops when max review fix loops is reached" do
     test_root = Path.join(System.tmp_dir!(), "symphony-review-runner-max-#{System.unique_integer([:positive])}")
     File.mkdir_p!(test_root)
