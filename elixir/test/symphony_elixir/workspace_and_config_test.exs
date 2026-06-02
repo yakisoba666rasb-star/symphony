@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.WorkspaceAndConfigTest do
   use SymphonyElixir.TestSupport
   alias Ecto.Changeset
+  alias SymphonyElixir.RepositoryResolver
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
@@ -72,6 +73,133 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(workspace_root)
     end
+  end
+
+  test "workspace hook receives repository context resolved from issue metadata" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-repository-hook-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        repository_default: "yakisoba666rasb-star/Symphony-Ryo-Lab",
+        repository_allowed: ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"],
+        hook_after_create: """
+        printf '%s' "$SYMPHONY_REPOSITORY" > repo.txt
+        printf '%s' "$SYMPHONY_REPOSITORY_OWNER" > owner.txt
+        printf '%s' "$SYMPHONY_REPOSITORY_NAME" > name.txt
+        printf '%s' "$SYMPHONY_REPOSITORY_CLONE_URL" > clone.txt
+        printf '%s' "$SYMPHONY_GITHUB_ISSUE_URL" > source-issue.txt
+        """
+      )
+
+      issue = %Issue{
+        id: "issue-338",
+        identifier: "LAB-338",
+        title: "Fix stale Tailscale smoke defaults",
+        description: """
+        Repo: kasotuosawari-design/auto_template
+        Source: https://github.com/kasotuosawari-design/auto_template/issues/338
+        """
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert File.read!(Path.join(workspace, "repo.txt")) == "kasotuosawari-design/auto_template"
+      assert File.read!(Path.join(workspace, "owner.txt")) == "kasotuosawari-design"
+      assert File.read!(Path.join(workspace, "name.txt")) == "auto_template"
+      assert File.read!(Path.join(workspace, "clone.txt")) == "https://github.com/kasotuosawari-design/auto_template.git"
+      assert File.read!(Path.join(workspace, "source-issue.txt")) == "https://github.com/kasotuosawari-design/auto_template/issues/338"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "repository resolver falls back to workflow default and enforces allowlist" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "default" => "yakisoba666rasb-star/Symphony-Ryo-Lab",
+                 "allowed" => ["yakisoba666rasb-star/Symphony-Ryo-Lab"],
+                 "clone_protocol" => "ssh"
+               }
+             })
+
+    assert {:ok, repository} = RepositoryResolver.resolve(%Issue{identifier: "LAB-1"}, settings)
+    assert repository.slug == "yakisoba666rasb-star/Symphony-Ryo-Lab"
+    assert repository.clone_url == "git@github.com:yakisoba666rasb-star/Symphony-Ryo-Lab.git"
+
+    issue = %Issue{
+      identifier: "LAB-338",
+      description: "https://github.com/kasotuosawari-design/auto_template/issues/338"
+    }
+
+    assert {:error, {:repository_not_allowed, "kasotuosawari-design/auto_template", _allowed}} =
+             RepositoryResolver.resolve(issue, settings)
+  end
+
+  test "repository resolver rejects conflicting explicit repo and GitHub source URL" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "allowed" => ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"]
+               }
+             })
+
+    issue = %Issue{
+      identifier: "LAB-CONFLICT",
+      description: """
+      Repo: yakisoba666rasb-star/Symphony-Ryo-Lab
+      Source: https://github.com/kasotuosawari-design/auto_template/issues/338
+      """
+    }
+
+    assert {:error, {:repository_source_conflict, "yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"}} =
+             RepositoryResolver.resolve(issue, settings)
+  end
+
+  test "repository resolver rejects ambiguous GitHub repository URLs without explicit source" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "allowed" => ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"]
+               }
+             })
+
+    issue = %Issue{
+      identifier: "LAB-AMBIGUOUS",
+      description: """
+      See https://github.com/yakisoba666rasb-star/Symphony-Ryo-Lab/issues/1
+      and https://github.com/kasotuosawari-design/auto_template/issues/338
+      """
+    }
+
+    assert {:error, {:ambiguous_repository_urls, ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"]}} =
+             RepositoryResolver.resolve(issue, settings)
+  end
+
+  test "repository resolver allows explicit repo when reference links mention another repository" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "allowed" => ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"]
+               }
+             })
+
+    issue = %Issue{
+      identifier: "LAB-EXPLICIT",
+      description: """
+      Repo: kasotuosawari-design/auto_template
+
+      Related design note:
+      https://github.com/yakisoba666rasb-star/Symphony-Ryo-Lab/issues/1
+      """
+    }
+
+    assert {:ok, repository} = RepositoryResolver.resolve(issue, settings)
+    assert repository.slug == "kasotuosawari-design/auto_template"
   end
 
   test "workspace path is deterministic per issue identifier" do
@@ -1122,6 +1250,143 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_agents_per_host: 2)
     assert :ok = Config.validate!()
     assert Config.settings!().worker.max_concurrent_agents_per_host == 2
+  end
+
+  test "config parses review handoff and role runner settings" do
+    workflow = """
+    ---
+    tracker:
+      kind: linear
+      api_key: token
+      project_slug: project
+      review_state: Legacy Review
+    agent:
+      max_review_fix_loops: 2
+    review:
+      final_review: human_required
+      handoff_state: In Review
+      require_pr_url_before_handoff: true
+      approve_equivalent_required_before_handoff: true
+      merge_decision: human_required_after_approve_equivalent
+      auto_merge: false
+      max_review_fix_loops: 5
+      implementer_model: gpt-5.3-codex-spark
+      implementer_profile: implementer
+      reviewer_model: gpt-5.5
+      reviewer_profile: reviewer
+    ---
+    """
+
+    File.write!(Workflow.workflow_file_path(), workflow)
+
+    config = Config.settings!()
+    assert config.review.final_review == "human_required"
+    assert config.review.handoff_state == "In Review"
+    assert config.review.require_pr_url_before_handoff == true
+    assert config.review.approve_equivalent_required_before_handoff == true
+    assert config.review.merge_decision == "human_required_after_approve_equivalent"
+    assert config.review.auto_merge == false
+    assert Config.review_handoff_state() == "In Review"
+    assert Config.max_review_fix_loops() == 5
+
+    assert Config.review_role_codex_options(:implementer) == [
+             codex_command: "codex --config 'model=\"gpt-5.3-codex-spark\"' --profile 'implementer' app-server"
+           ]
+
+    assert Config.review_role_codex_options(:reviewer) == [
+             codex_command: "codex --config 'model=\"gpt-5.5\"' --profile 'reviewer' app-server"
+           ]
+  end
+
+  test "config parses review workflow from x-lab-runtime" do
+    workflow = """
+    ---
+    review:
+      final_review: gpt
+      max_review_fix_loops: 1
+    x-lab-runtime:
+      review_workflow:
+        final_review: human_required
+        handoff_state: In Review
+        require_pr_url_before_handoff: true
+        approve_equivalent_required_before_handoff: true
+        merge_decision: human_required_after_approve_equivalent
+        auto_merge: false
+        max_review_fix_loops: 7
+        implementer_model: gpt-5.3-codex-spark
+        implementer_profile: implementer
+        reviewer_model: gpt-5.5
+        reviewer_profile: reviewer
+    ---
+    """
+
+    File.write!(Workflow.workflow_file_path(), workflow)
+
+    config = Config.settings!()
+    assert config.review.final_review == "human_required"
+    assert config.review.handoff_state == "In Review"
+    assert config.review.require_pr_url_before_handoff == true
+    assert config.review.approve_equivalent_required_before_handoff == true
+    assert config.review.merge_decision == "human_required_after_approve_equivalent"
+    assert config.review.auto_merge == false
+    assert Config.max_review_fix_loops() == 7
+
+    assert Config.review_role_codex_options(:implementer) == [
+             codex_command: "codex --config 'model=\"gpt-5.3-codex-spark\"' --profile 'implementer' app-server"
+           ]
+
+    assert Config.review_role_codex_options(:reviewer) == [
+             codex_command: "codex --config 'model=\"gpt-5.5\"' --profile 'reviewer' app-server"
+           ]
+  end
+
+  test "schema rejects unsupported review workflow policies" do
+    assert {
+             :error,
+             {:invalid_workflow_config, message}
+           } =
+             Schema.parse(%{
+               "x-lab-runtime" => %{
+                 "review_workflow" => %{
+                   "final_review" => "automated",
+                   "require_pr_url_before_handoff" => false,
+                   "approve_equivalent_required_before_handoff" => false,
+                   "merge_decision" => "always_auto_merge",
+                   "auto_merge" => true
+                 }
+               }
+             })
+
+    assert message =~ "review.final_review is invalid"
+    assert message =~ "review.require_pr_url_before_handoff must be true"
+    assert message =~ "review.approve_equivalent_required_before_handoff must be true"
+    assert message =~ "review.merge_decision is invalid"
+    assert message =~ "review.auto_merge must be false"
+  end
+
+  test "schema rejects malformed x-lab-runtime.review_workflow" do
+    assert {
+             :error,
+             {:invalid_workflow_config, message}
+           } =
+             Schema.parse(%{
+               "x-lab-runtime" => %{"review_workflow" => true}
+             })
+
+    assert message =~ "x-lab-runtime.review_workflow must be an object"
+  end
+
+  test "schema rejects review collision when review is not an object" do
+    assert {
+             :error,
+             {:invalid_workflow_config, message}
+           } =
+             Schema.parse(%{
+               "review" => "human_required",
+               "x-lab-runtime" => %{"review_workflow" => %{"final_review" => "human_required"}}
+             })
+
+    assert message =~ "x-lab-runtime.review_workflow requires review to be a map"
   end
 
   test "schema helpers cover custom type and state limit validation" do

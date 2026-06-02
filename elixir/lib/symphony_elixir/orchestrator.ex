@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, GitHubPrPublisher, ReviewRunner, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -266,9 +266,7 @@ defmodule SymphonyElixir.Orchestrator do
         move_issue_to_review_after_pr_discovery(state, issue_id, running_entry, session_id, pr)
 
       {:ok, nil} ->
-        error = "no GitHub PR found for branch #{branch_name}"
-        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
-        block_issue_from_entry(state, issue_id, running_entry, error)
+        publish_pr_after_normal_completion(state, issue_id, running_entry, session_id, branch_name, workspace_path)
 
       {:error, reason} ->
         error = "GitHub PR lookup failed for branch #{branch_name}: #{inspect(reason)}"
@@ -315,6 +313,47 @@ defmodule SymphonyElixir.Orchestrator do
     Application.get_env(:symphony_elixir, :github_pr_lookup, SymphonyElixir.GitHubPrLookup)
   end
 
+  defp github_pr_publisher_module do
+    Application.get_env(:symphony_elixir, :github_pr_publisher, GitHubPrPublisher)
+  end
+
+  defp review_runner_module do
+    Application.get_env(:symphony_elixir, :review_runner, ReviewRunner)
+  end
+
+  defp publish_pr_after_normal_completion(state, issue_id, running_entry, session_id, branch_name, workspace_path) do
+    case publish_pr_for_branch(workspace_path, branch_name, running_entry) do
+      {:ok, pr} when is_map(pr) ->
+        Logger.info("Published GitHub PR for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} branch=#{branch_name} url=#{inspect(pr["url"] || pr[:url])}")
+        move_issue_to_review_after_pr_discovery(state, issue_id, running_entry, session_id, pr)
+
+      {:error, reason} ->
+        error = "no GitHub PR found for branch #{branch_name}; runtime publish failed: #{inspect(reason)}"
+        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+        block_issue_from_entry(state, issue_id, running_entry, error)
+
+      other ->
+        error = "no GitHub PR found for branch #{branch_name}; runtime publish returned unexpected result: #{inspect(other)}"
+        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+        block_issue_from_entry(state, issue_id, running_entry, error)
+    end
+  end
+
+  defp publish_pr_for_branch(workspace_path, branch_name, running_entry)
+       when is_binary(workspace_path) and is_binary(branch_name) do
+    github_pr_publisher_module().publish_workspace(workspace_path, branch_name, issue_for_publish(running_entry, branch_name))
+  end
+
+  defp issue_for_publish(%{issue: %Issue{} = issue}, branch_name), do: %{issue | branch_name: issue.branch_name || branch_name}
+
+  defp issue_for_publish(running_entry, branch_name) when is_map(running_entry) do
+    %Issue{
+      identifier: Map.get(running_entry, :identifier),
+      title: Map.get(running_entry, :identifier, "Automated changes"),
+      branch_name: branch_name
+    }
+  end
+
   defp max_turns_reached_active_issue?({:max_turns_reached_active_issue, _issue_id}), do: true
   defp max_turns_reached_active_issue?(_reason), do: false
 
@@ -356,7 +395,124 @@ defmodule SymphonyElixir.Orchestrator do
     _pr_number = pr["number"] || pr[:number]
     _pr_url = pr["url"] || pr[:url]
 
-    target_state = Config.settings!().tracker.review_state
+    with {:ok, verdict} <- review_pr_before_handoff(running_entry, pr),
+         :ok <- comment_on_approved_review_handoff(issue_id, running_entry, pr, verdict) do
+      Logger.info("Review loop approved-equivalent for issue_id=#{issue_id} session_id=#{session_id} verdict=#{inspect(verdict)}")
+      move_issue_to_review_after_approval(state, issue_id, running_entry, session_id)
+    else
+      {:error, reason} ->
+        error = "review loop did not approve PR before In Review handoff: #{inspect(reason)}"
+        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+        block_issue_from_entry(state, issue_id, running_entry, error)
+    end
+  end
+
+  defp comment_on_approved_review_handoff(issue_id, running_entry, pr, verdict)
+       when is_binary(issue_id) do
+    body = approved_review_handoff_comment(running_entry, pr, verdict)
+
+    try do
+      case tracker_module().create_comment(issue_id, body) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          {:error, {:approved_review_comment_failed, reason}}
+
+        other ->
+          {:error, {:approved_review_comment_failed, other}}
+      end
+    rescue
+      exception ->
+        {:error, {:approved_review_comment_failed, Exception.message(exception)}}
+    end
+  end
+
+  defp comment_on_approved_review_handoff(_issue_id, _running_entry, _pr, _verdict), do: :ok
+
+  defp approved_review_handoff_comment(running_entry, pr, verdict) do
+    """
+    Symphony automated review decision: approve-equivalent.
+
+    Issue: #{Map.get(running_entry, :identifier, "issue")}
+    PR: #{pr_url(pr)}
+
+    Review loop result:
+    - blocking findings: #{format_review_items(verdict_value(verdict, :blocking_findings))}
+    - required tests checked/requested: #{format_review_items(verdict_value(verdict, :tests_required))}
+    - residual risk: #{blank_to_none(verdict_value(verdict, :residual_risk))}
+
+    Merge judgment: ready for human final merge decision after required GitHub checks are green. The runtime will not approve on GitHub and will not merge automatically.
+    """
+    |> String.trim()
+  end
+
+  defp pr_url(%{"url" => url}) when is_binary(url), do: url
+  defp pr_url(%{url: url}) when is_binary(url), do: url
+  defp pr_url(_pr), do: "unknown"
+
+  defp verdict_value(verdict, key) when is_map(verdict), do: Map.get(verdict, key) || Map.get(verdict, Atom.to_string(key))
+  defp verdict_value(_verdict, _key), do: nil
+
+  defp format_review_items(items) when is_list(items) do
+    case Enum.map(items, &to_string/1) |> Enum.reject(&(&1 == "")) do
+      [] -> "none"
+      values -> Enum.join(values, "; ")
+    end
+  end
+
+  defp format_review_items(nil), do: "none"
+  defp format_review_items(item), do: to_string(item)
+
+  defp blank_to_none(nil), do: "none"
+  defp blank_to_none(""), do: "none"
+  defp blank_to_none(value), do: to_string(value)
+
+  defp review_pr_before_handoff(running_entry, pr) do
+    case Map.get(running_entry, :workspace_path) do
+      workspace_path when is_binary(workspace_path) ->
+        review_opts =
+          [
+            max_review_fix_loops: Config.max_review_fix_loops()
+          ]
+          |> maybe_put_rework_publisher(running_entry)
+
+        review_runner_module().run_loop(
+          workspace_path,
+          issue_for_review(running_entry),
+          pr,
+          review_opts
+        )
+
+      _other ->
+        {:error, :missing_workspace_path_for_review_loop}
+    end
+  end
+
+  defp maybe_put_rework_publisher(opts, running_entry) do
+    case branch_name_and_workspace(running_entry) do
+      {:ok, branch_name, workspace_path} ->
+        Keyword.put(opts, :publish_rework, fn ->
+          publish_pr_for_branch(workspace_path, branch_name, running_entry)
+        end)
+
+      :missing ->
+        opts
+    end
+  end
+
+  defp issue_for_review(%{issue: %Issue{} = issue}), do: issue
+
+  defp issue_for_review(running_entry) when is_map(running_entry) do
+    %Issue{
+      id: Map.get(running_entry, :issue_id),
+      identifier: Map.get(running_entry, :identifier),
+      title: Map.get(running_entry, :identifier, "Automated changes")
+    }
+  end
+
+  defp move_issue_to_review_after_approval(state, issue_id, running_entry, session_id) do
+    target_state = Config.review_handoff_state()
 
     case tracker_module().update_issue_state(issue_id, target_state) do
       :ok ->
@@ -579,6 +735,9 @@ defmodule SymphonyElixir.Orchestrator do
       active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue)
 
+      review_issue_state?(issue.state) ->
+        reconcile_review_handoff_issue_state(issue, state)
+
       true ->
         Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
@@ -587,6 +746,65 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp review_issue_state?(state) when is_binary(state) do
+    String.trim(state) == Config.settings!().tracker.review_state
+  end
+
+  defp review_issue_state?(_state), do: false
+
+  defp reconcile_review_handoff_issue_state(%Issue{} = issue, %State{} = state) do
+    case Map.get(state.running, issue.id) do
+      nil ->
+        state
+
+      running_entry ->
+        case branch_name_and_workspace(running_entry) do
+          {:ok, branch_name, workspace_path} ->
+            reconcile_review_handoff_with_pr_lookup(
+              issue,
+              state,
+              running_entry,
+              branch_name,
+              workspace_path
+            )
+
+          :missing ->
+            error = "issue moved to #{issue.state} without branch metadata for GitHub PR lookup"
+            Logger.warning("Agent task blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{running_entry_session_id(running_entry)}: #{error}")
+            stop_and_block_review_handoff_issue(state, issue, running_entry, error)
+        end
+    end
+  end
+
+  defp reconcile_review_handoff_with_pr_lookup(
+         %Issue{} = issue,
+         %State{} = state,
+         running_entry,
+         branch_name,
+         workspace_path
+       ) do
+    session_id = running_entry_session_id(running_entry)
+
+    case lookup_pr_for_branch(workspace_path, branch_name) do
+      {:ok, pr} when is_map(pr) ->
+        Logger.info("Issue moved to review state after PR discovery: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
+        review_premature_handoff_pr(state, issue, running_entry, session_id, pr)
+
+      {:ok, nil} ->
+        stop_and_publish_review_handoff_issue(state, issue, running_entry, branch_name, workspace_path, session_id)
+
+      {:error, reason} ->
+        error = "issue moved to #{issue.state} but GitHub PR lookup failed for branch #{branch_name}: #{inspect(reason)}"
+        Logger.warning("Agent task blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
+        stop_and_block_review_handoff_issue(state, issue, running_entry, error)
+
+      _other ->
+        error = "issue moved to #{issue.state} but GitHub PR lookup returned unexpected result for branch #{branch_name}"
+        Logger.warning("Agent task blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
+        stop_and_block_review_handoff_issue(state, issue, running_entry, error)
+    end
+  end
 
   defp reconcile_blocked_issue_states([], state, _active_states, _terminal_states), do: state
 
@@ -893,6 +1111,97 @@ defmodule SymphonyElixir.Orchestrator do
   defp stop_and_block_issue(%State{} = state, issue_id, running_entry, error) do
     stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref))
     block_issue_from_entry(state, issue_id, running_entry, error)
+  end
+
+  defp stop_and_block_review_handoff_issue(%State{} = state, %Issue{} = issue, running_entry, error) do
+    target_state = review_handoff_block_state()
+    move_review_handoff_issue_to_block_state(issue.id, issue.identifier, target_state)
+
+    running_entry =
+      Map.update(running_entry, :issue, %{issue | state: target_state}, fn
+        %Issue{} = running_issue -> %{running_issue | state: target_state}
+        _other -> %{issue | state: target_state}
+      end)
+
+    stop_and_block_issue(state, issue.id, running_entry, error)
+  end
+
+  defp stop_and_publish_review_handoff_issue(
+         %State{} = state,
+         %Issue{} = issue,
+         running_entry,
+         branch_name,
+         workspace_path,
+         session_id
+       ) do
+    stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref))
+
+    state = %{
+      state
+      | running: Map.delete(state.running, issue.id),
+        retry_attempts: Map.delete(state.retry_attempts, issue.id),
+        claimed: MapSet.delete(state.claimed, issue.id)
+    }
+
+    case publish_pr_for_branch(workspace_path, branch_name, running_entry) do
+      {:ok, pr} when is_map(pr) ->
+        Logger.info("Published GitHub PR after premature review handoff for issue_id=#{issue.id} issue_identifier=#{issue.identifier} branch=#{branch_name} url=#{inspect(pr["url"] || pr[:url])}")
+        review_premature_handoff_pr(state, issue, running_entry, session_id, pr)
+
+      {:error, reason} ->
+        error = "issue moved to #{issue.state} without discoverable GitHub PR for branch #{branch_name}; runtime publish failed: #{inspect(reason)}"
+        Logger.warning("Agent task blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
+        stop_and_block_review_handoff_issue(state, issue, running_entry, error)
+
+      other ->
+        error = "issue moved to #{issue.state} without discoverable GitHub PR for branch #{branch_name}; runtime publish returned unexpected result: #{inspect(other)}"
+        Logger.warning("Agent task blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
+        stop_and_block_review_handoff_issue(state, issue, running_entry, error)
+    end
+  end
+
+  defp review_premature_handoff_pr(%State{} = state, %Issue{} = issue, running_entry, session_id, pr) do
+    stopped_state = terminate_running_issue(state, issue.id, false)
+
+    with {:ok, verdict} <- review_pr_before_handoff(running_entry, pr),
+         :ok <- comment_on_approved_review_handoff(issue.id, running_entry, pr, verdict) do
+      Logger.info("Review loop approved-equivalent for premature review handoff issue_id=#{issue.id} session_id=#{session_id} verdict=#{inspect(verdict)}")
+      move_issue_to_review_after_approval(stopped_state, issue.id, running_entry, session_id)
+    else
+      {:error, reason} ->
+        error = "review loop did not approve PR before In Review handoff: #{inspect(reason)}"
+        Logger.warning("Premature review handoff blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
+        stop_and_block_review_handoff_issue(stopped_state, issue, running_entry, error)
+    end
+  end
+
+  defp review_handoff_block_state do
+    active_states = Config.settings!().tracker.active_states
+
+    Enum.find(active_states, "Backlog", fn state ->
+      normalize_issue_state(state) == "rework"
+    end)
+  end
+
+  defp move_review_handoff_issue_to_block_state(issue_id, issue_identifier, target_state)
+       when is_binary(issue_id) and is_binary(target_state) do
+    case tracker_module().update_issue_state(issue_id, target_state) do
+      :ok ->
+        Logger.info("Moved premature review handoff back to #{target_state}: issue_id=#{issue_id} issue_identifier=#{issue_identifier}")
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to move premature review handoff back to #{target_state}: issue_id=#{issue_id} issue_identifier=#{issue_identifier} reason=#{inspect(reason)}")
+        :ok
+
+      other ->
+        Logger.warning("Failed to move premature review handoff back to #{target_state}: issue_id=#{issue_id} issue_identifier=#{issue_identifier} result=#{inspect(other)}")
+        :ok
+    end
+  rescue
+    exception ->
+      Logger.warning("Failed to move premature review handoff back to #{target_state}: issue_id=#{issue_id} issue_identifier=#{issue_identifier} reason=#{Exception.message(exception)}")
+      :ok
   end
 
   defp maybe_block_repeated_fingerprint(%State{} = state, issue_id, running_entry) do

@@ -61,6 +61,29 @@ defmodule SymphonyElixir.Config do
 
   def max_concurrent_agents_for_state(_state_name), do: settings!().agent.max_concurrent_agents
 
+  @spec review_handoff_state() :: String.t()
+  def review_handoff_state do
+    settings = settings!()
+    settings.review.handoff_state || settings.tracker.review_state
+  end
+
+  @spec max_review_fix_loops() :: non_neg_integer()
+  def max_review_fix_loops do
+    settings = settings!()
+    settings.review.max_review_fix_loops || settings.agent.max_review_fix_loops
+  end
+
+  @spec review_role_codex_options(:implementer | :reviewer) :: keyword()
+  def review_role_codex_options(role) when role in [:implementer, :reviewer] do
+    settings = settings!()
+    review = settings.review
+
+    case review_role_command(review, role) || review_role_generated_command(review, role) do
+      nil -> []
+      command -> [codex_command: command]
+    end
+  end
+
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
     case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do
@@ -132,6 +155,54 @@ defmodule SymphonyElixir.Config do
         :ok
     end
   end
+
+  defp review_role_command(review, :implementer), do: blank_to_nil(review.implementer_command)
+  defp review_role_command(review, :reviewer), do: blank_to_nil(review.reviewer_command)
+
+  defp review_role_generated_command(review, role) do
+    model = review_role_model(review, role)
+    profile = review_role_profile(review, role)
+
+    if is_nil(model) and is_nil(profile) do
+      nil
+    else
+      [
+        "codex",
+        model_config_arg(model),
+        profile_arg(profile),
+        "app-server"
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join(" ")
+    end
+  end
+
+  defp review_role_model(review, :implementer), do: blank_to_nil(review.implementer_model)
+  defp review_role_model(review, :reviewer), do: blank_to_nil(review.reviewer_model)
+
+  defp review_role_profile(review, :implementer), do: blank_to_nil(review.implementer_profile)
+  defp review_role_profile(review, :reviewer), do: blank_to_nil(review.reviewer_profile)
+
+  defp model_config_arg(nil), do: nil
+  defp model_config_arg(model), do: "--config " <> shell_single_quote("model=" <> inspect(model))
+
+  defp profile_arg(nil), do: nil
+  defp profile_arg(profile), do: "--profile " <> shell_single_quote(profile)
+
+  defp shell_single_quote(value) do
+    "'" <> String.replace(to_string(value), "'", "'\"'\"'") <> "'"
+  end
+
+  defp blank_to_nil(nil), do: nil
+
+  defp blank_to_nil(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp blank_to_nil(value), do: value
 
   defp format_config_error(reason) do
     case reason do

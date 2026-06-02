@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, PathSafety, SSH}
+  alias SymphonyElixir.{Config, PathSafety, RepositoryResolver, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
   @remote_dirty_workspace_marker "__SYMPHONY_DIRTY_WORKSPACE__"
@@ -446,7 +446,11 @@ defmodule SymphonyElixir.Workspace do
 
     task =
       Task.async(fn ->
-        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
+        System.cmd("sh", ["-lc", command],
+          cd: workspace,
+          stderr_to_stdout: true,
+          env: hook_env(issue_context)
+        )
       end)
 
     case Task.yield(task, timeout_ms) do
@@ -467,7 +471,17 @@ defmodule SymphonyElixir.Workspace do
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host}")
 
-    case run_remote_command(worker_host, "cd #{shell_escape(workspace)} && #{command}", timeout_ms) do
+    script =
+      [
+        remote_hook_env_assignments(issue_context),
+        "cd #{shell_escape(workspace)}",
+        command
+      ]
+      |> List.flatten()
+      |> Enum.reject(&(&1 in [nil, ""]))
+      |> Enum.join("\n")
+
+    case run_remote_command(worker_host, script, timeout_ms) do
       {:ok, cmd_result} ->
         handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
 
@@ -635,24 +649,46 @@ defmodule SymphonyElixir.Workspace do
   defp worker_host_for_log(nil), do: "local"
   defp worker_host_for_log(worker_host), do: worker_host
 
-  defp issue_context(%{id: issue_id, identifier: identifier}) do
+  defp hook_env(issue_context) do
+    repository = Map.get(issue_context, :repository, %{})
+
+    [
+      {"SYMPHONY_ISSUE_ID", issue_context.issue_id},
+      {"SYMPHONY_ISSUE_IDENTIFIER", issue_context.issue_identifier},
+      {"SYMPHONY_REPOSITORY", Map.get(repository, :slug)},
+      {"SYMPHONY_REPOSITORY_OWNER", Map.get(repository, :owner)},
+      {"SYMPHONY_REPOSITORY_NAME", Map.get(repository, :name)},
+      {"SYMPHONY_REPOSITORY_CLONE_URL", Map.get(repository, :clone_url)},
+      {"SYMPHONY_GITHUB_ISSUE_URL", Map.get(repository, :github_issue_url)}
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) or value == "" end)
+  end
+
+  defp remote_hook_env_assignments(issue_context) do
+    Enum.map(hook_env(issue_context), fn {key, value} -> remote_shell_assign(key, value) end)
+  end
+
+  defp issue_context(%{id: issue_id, identifier: identifier} = issue) do
     %{
       issue_id: issue_id,
-      issue_identifier: identifier || "issue"
+      issue_identifier: identifier || "issue",
+      repository: RepositoryResolver.resolve!(issue)
     }
   end
 
   defp issue_context(identifier) when is_binary(identifier) do
     %{
       issue_id: nil,
-      issue_identifier: identifier
+      issue_identifier: identifier,
+      repository: RepositoryResolver.resolve!(identifier)
     }
   end
 
   defp issue_context(_identifier) do
     %{
       issue_id: nil,
-      issue_identifier: "issue"
+      issue_identifier: "issue",
+      repository: RepositoryResolver.resolve!(nil)
     }
   end
 

@@ -103,6 +103,54 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Repository do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:default, :string)
+      field(:allowed, {:array, :string}, default: [])
+      field(:clone_protocol, :string, default: "https")
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:default, :allowed, :clone_protocol], empty_values: [])
+      |> validate_change(:default, &validate_optional_repository_slug/2)
+      |> validate_change(:allowed, &validate_repository_slug_list/2)
+      |> validate_inclusion(:clone_protocol, ["https", "ssh"])
+    end
+
+    defp validate_optional_repository_slug(_field, nil), do: []
+    defp validate_optional_repository_slug(_field, ""), do: []
+
+    defp validate_optional_repository_slug(field, value) when is_binary(value) do
+      if valid_repository_slug?(value) do
+        []
+      else
+        [{field, "must be a GitHub repository slug like owner/name"}]
+      end
+    end
+
+    defp validate_repository_slug_list(field, values) when is_list(values) do
+      values
+      |> Enum.reject(&valid_repository_slug?/1)
+      |> case do
+        [] -> []
+        _invalid -> [{field, "must contain GitHub repository slugs like owner/name"}]
+      end
+    end
+
+    defp valid_repository_slug?(value) when is_binary(value) do
+      Regex.match?(~r/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, String.trim(value))
+    end
+
+    defp valid_repository_slug?(_value), do: false
+  end
+
   defmodule Worker do
     @moduledoc false
     use Ecto.Schema
@@ -134,6 +182,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
+      field(:max_review_fix_loops, :integer, default: 3)
       field(:same_review_fingerprint_limit, :integer, default: 4)
       field(:same_test_failure_fingerprint_limit, :integer, default: 4)
       field(:max_concurrent_agents_by_state, :map, default: %{})
@@ -148,6 +197,7 @@ defmodule SymphonyElixir.Config.Schema do
           :max_concurrent_agents,
           :max_turns,
           :max_retry_backoff_ms,
+          :max_review_fix_loops,
           :same_review_fingerprint_limit,
           :same_test_failure_fingerprint_limit,
           :max_concurrent_agents_by_state
@@ -157,10 +207,74 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
+      |> validate_number(:max_review_fix_loops, greater_than_or_equal_to: 0)
       |> validate_number(:same_review_fingerprint_limit, greater_than_or_equal_to: 0)
       |> validate_number(:same_test_failure_fingerprint_limit, greater_than_or_equal_to: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
+    end
+  end
+
+  defmodule Review do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:final_review, :string, default: "human_required")
+      field(:handoff_state, :string)
+      field(:require_pr_url_before_handoff, :boolean, default: true)
+      field(:approve_equivalent_required_before_handoff, :boolean, default: true)
+      field(:merge_decision, :string, default: "human_required_after_approve_equivalent")
+      field(:auto_merge, :boolean, default: false)
+      field(:max_review_fix_loops, :integer)
+      field(:implementer_command, :string)
+      field(:reviewer_command, :string)
+      field(:implementer_model, :string)
+      field(:reviewer_model, :string)
+      field(:implementer_profile, :string)
+      field(:reviewer_profile, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :final_review,
+          :handoff_state,
+          :require_pr_url_before_handoff,
+          :approve_equivalent_required_before_handoff,
+          :merge_decision,
+          :auto_merge,
+          :max_review_fix_loops,
+          :implementer_command,
+          :reviewer_command,
+          :implementer_model,
+          :reviewer_model,
+          :implementer_profile,
+          :reviewer_profile
+        ],
+        empty_values: []
+      )
+      |> validate_number(:max_review_fix_loops, greater_than_or_equal_to: 0)
+      |> validate_inclusion(:final_review, ["human_required"])
+      |> validate_inclusion(:merge_decision, ["human_required_after_approve_equivalent"])
+      |> validate_boolean_policy(:require_pr_url_before_handoff, true)
+      |> validate_boolean_policy(:approve_equivalent_required_before_handoff, true)
+      |> validate_boolean_policy(:auto_merge, false)
+    end
+
+    defp validate_boolean_policy(changeset, field, expected) when is_boolean(expected) do
+      validate_change(changeset, field, fn ^field, value ->
+        if value == expected do
+          []
+        else
+          [{field, "must be #{expected} for the official human-review workflow"}]
+        end
+      end)
     end
   end
 
@@ -279,8 +393,10 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:repository, Repository, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:review, Review, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
@@ -292,14 +408,22 @@ defmodule SymphonyElixir.Config.Schema do
     config
     |> normalize_keys()
     |> drop_nil_values()
-    |> changeset()
-    |> apply_action(:validate)
+    |> promote_review_workflow_config()
     |> case do
-      {:ok, settings} ->
-        {:ok, finalize_settings(settings)}
+      {:ok, config} ->
+        config
+        |> changeset()
+        |> apply_action(:validate)
+        |> case do
+          {:ok, settings} ->
+            {:ok, finalize_settings(settings)}
 
-      {:error, changeset} ->
-        {:error, {:invalid_workflow_config, format_errors(changeset)}}
+          {:error, changeset} ->
+            {:error, {:invalid_workflow_config, format_errors(changeset)}}
+        end
+
+      {:error, message} when is_binary(message) ->
+        {:error, {:invalid_workflow_config, message}}
     end
   end
 
@@ -371,8 +495,10 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
+    |> cast_embed(:repository, with: &Repository.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
+    |> cast_embed(:review, with: &Review.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
@@ -568,4 +694,28 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp error_value_to_string(value) when is_atom(value), do: Atom.to_string(value)
   defp error_value_to_string(value), do: inspect(value)
+
+  defp promote_review_workflow_config(%{"x-lab-runtime" => %{} = runtime} = config) do
+    case Map.get(runtime, "review_workflow") do
+      review_workflow when is_map(review_workflow) ->
+        case Map.get(config, "review") do
+          nil ->
+            {:ok, Map.put(config, "review", review_workflow)}
+
+          existing_review when is_map(existing_review) ->
+            {:ok, Map.put(config, "review", Map.merge(existing_review, review_workflow))}
+
+          _ ->
+            {:error, "x-lab-runtime.review_workflow requires review to be a map"}
+        end
+
+      nil ->
+        {:ok, config}
+
+      _ ->
+        {:error, "x-lab-runtime.review_workflow must be an object"}
+    end
+  end
+
+  defp promote_review_workflow_config(config), do: {:ok, config}
 end

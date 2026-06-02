@@ -1,6 +1,54 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  defmodule FakeGitHubPrLookupNone do
+    def lookup_workspace_head(_workspace_path, _branch_name), do: {:ok, nil}
+  end
+
+  defmodule FakeGitHubPrLookupFound do
+    def lookup_workspace_head(_workspace_path, _branch_name),
+      do: {:ok, %{"number" => 236, "url" => "https://github.example/pull/236"}}
+  end
+
+  defmodule FakeGitHubPrPublisherError do
+    def publish_workspace(_workspace_path, _branch_name, _issue), do: {:error, :publish_blocked}
+  end
+
+  defmodule FakeGitHubPrPublisherFound do
+    def publish_workspace(_workspace_path, branch_name, _issue),
+      do: {:ok, %{"number" => 237, "url" => "https://github.example/pull/237", "headRefName" => branch_name}}
+  end
+
+  defmodule FakeReviewRunnerApproved do
+    def run_loop(_workspace_path, _issue, _pr, _opts \\ []) do
+      {:ok, %{approved_equivalent: true, blocking_findings: [], tests_required: [], residual_risk: ""}}
+    end
+  end
+
+  defmodule FakeReviewRunnerBlocked do
+    def run_loop(_workspace_path, _issue, _pr, _opts \\ []), do: {:error, :review_blocked}
+  end
+
+  defmodule FakeTrackerRecordsUpdates do
+    def fetch_candidate_issues, do: {:ok, []}
+    def fetch_issues_by_states(_states), do: {:ok, []}
+    def fetch_issue_states_by_ids(_issue_ids), do: {:ok, []}
+
+    def update_issue_state(issue_id, state_name) do
+      send(test_pid(), {:tracker_state_update, issue_id, state_name})
+      :ok
+    end
+
+    def create_comment(issue_id, body) do
+      send(test_pid(), {:tracker_comment, issue_id, body})
+      :ok
+    end
+
+    defp test_pid do
+      Application.fetch_env!(:symphony_elixir, :test_pid)
+    end
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -18,6 +66,7 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.review_state == "In Review"
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
+    assert config.agent.max_review_fix_loops == 3
     assert config.agent.same_review_fingerprint_limit == 4
     assert config.agent.same_test_failure_fingerprint_limit == 4
 
@@ -123,10 +172,8 @@ defmodule SymphonyElixir.CoreTest do
 
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
-    assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/$SYMPHONY_RYO_TARGET_REPO ."
-    assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
-    assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
-    assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+    assert Map.get(hooks, "after_create") =~ "git clone"
+    assert Map.get(hooks, "after_create") =~ "yakisoba666rasb-star/Symphony-Ryo-Lab"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
@@ -301,6 +348,339 @@ defmodule SymphonyElixir.CoreTest do
       refute Process.alive?(agent_pid)
       assert File.exists?(workspace)
     after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "review issue state without discoverable PR blocks running agent" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-no-pr-reconcile-#{System.unique_integer([:positive])}"
+      )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_publisher = Application.get_env(:symphony_elixir, :github_pr_publisher)
+    previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_test_pid = Application.get_env(:symphony_elixir, :test_pid)
+    issue_id = "issue-review-no-pr"
+    issue_identifier = "MT-REVIEW-NO-PR"
+    workspace = Path.join(test_root, issue_identifier)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        tracker_active_states: ["Todo", "In Progress", "Rework"],
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+        tracker_review_state: "In Review"
+      )
+
+      Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupNone)
+      Application.put_env(:symphony_elixir, :github_pr_publisher, FakeGitHubPrPublisherError)
+      Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerRecordsUpdates)
+      Application.put_env(:symphony_elixir, :test_pid, self())
+
+      File.mkdir_p!(test_root)
+      File.mkdir_p!(workspace)
+
+      agent_pid =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      state = %Orchestrator.State{
+        running: %{
+          issue_id => %{
+            pid: agent_pid,
+            ref: nil,
+            identifier: issue_identifier,
+            issue: %Issue{
+              id: issue_id,
+              state: "In Progress",
+              identifier: issue_identifier,
+              branch_name: "feature/no-pr"
+            },
+            workspace_path: workspace,
+            started_at: DateTime.utc_now()
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "In Review",
+        title: "Premature review",
+        description: "Review state without PR",
+        labels: []
+      }
+
+      updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+      assert_receive {:tracker_state_update, ^issue_id, "Rework"}
+      assert_receive {:tracker_comment, ^issue_id, comment_body}
+      assert comment_body =~ "Symphony blocked #{issue_identifier}"
+      assert comment_body =~ "without discoverable GitHub PR"
+      refute Map.has_key?(updated_state.running, issue_id)
+      refute MapSet.member?(updated_state.completed, issue_id)
+      assert MapSet.member?(updated_state.claimed, issue_id)
+      refute Process.alive?(agent_pid)
+
+      assert %{
+               identifier: ^issue_identifier,
+               issue: %Issue{state: "Rework"},
+               error: "issue moved to In Review without discoverable GitHub PR for branch feature/no-pr; runtime publish failed: :publish_blocked"
+             } = updated_state.blocked[issue_id]
+    after
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_publisher) do
+        Application.delete_env(:symphony_elixir, :github_pr_publisher)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_publisher, previous_publisher)
+      end
+
+      if is_nil(previous_tracker) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker)
+      end
+
+      if is_nil(previous_test_pid) do
+        Application.delete_env(:symphony_elixir, :test_pid)
+      else
+        Application.put_env(:symphony_elixir, :test_pid, previous_test_pid)
+      end
+
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "review issue state without existing PR publishes draft PR before completing handoff" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-publish-reconcile-#{System.unique_integer([:positive])}"
+      )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_publisher = Application.get_env(:symphony_elixir, :github_pr_publisher)
+    previous_review_runner = Application.get_env(:symphony_elixir, :review_runner)
+    previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_test_pid = Application.get_env(:symphony_elixir, :test_pid)
+    issue_id = "issue-review-publish"
+    issue_identifier = "MT-REVIEW-PUBLISH"
+    workspace = Path.join(test_root, issue_identifier)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        tracker_active_states: ["Todo", "In Progress", "Rework"],
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+        tracker_review_state: "In Review"
+      )
+
+      Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupNone)
+      Application.put_env(:symphony_elixir, :github_pr_publisher, FakeGitHubPrPublisherFound)
+      Application.put_env(:symphony_elixir, :review_runner, FakeReviewRunnerApproved)
+      Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerRecordsUpdates)
+      Application.put_env(:symphony_elixir, :test_pid, self())
+
+      File.mkdir_p!(test_root)
+      File.mkdir_p!(workspace)
+
+      agent_pid =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      state = %Orchestrator.State{
+        running: %{
+          issue_id => %{
+            pid: agent_pid,
+            ref: nil,
+            identifier: issue_identifier,
+            issue: %Issue{
+              id: issue_id,
+              state: "In Progress",
+              identifier: issue_identifier,
+              title: "Publish from runtime",
+              branch_name: "feature/runtime-publish"
+            },
+            workspace_path: workspace,
+            started_at: DateTime.utc_now()
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "In Review",
+        title: "Publish from runtime",
+        description: "Review state without existing PR",
+        labels: []
+      }
+
+      updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+      assert_receive {:tracker_state_update, ^issue_id, "In Review"}
+      assert_receive {:tracker_comment, ^issue_id, body}
+      assert body =~ "Symphony automated review decision: approve-equivalent"
+      assert body =~ "PR: https://github.example/pull/237"
+      refute Map.has_key?(updated_state.running, issue_id)
+      assert MapSet.member?(updated_state.completed, issue_id)
+      refute Map.has_key?(updated_state.blocked, issue_id)
+      refute Process.alive?(agent_pid)
+    after
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_publisher) do
+        Application.delete_env(:symphony_elixir, :github_pr_publisher)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_publisher, previous_publisher)
+      end
+
+      if is_nil(previous_review_runner) do
+        Application.delete_env(:symphony_elixir, :review_runner)
+      else
+        Application.put_env(:symphony_elixir, :review_runner, previous_review_runner)
+      end
+
+      if is_nil(previous_tracker) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker)
+      end
+
+      if is_nil(previous_test_pid) do
+        Application.delete_env(:symphony_elixir, :test_pid)
+      else
+        Application.put_env(:symphony_elixir, :test_pid, previous_test_pid)
+      end
+
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "review issue state with discoverable PR completes running agent" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-pr-reconcile-#{System.unique_integer([:positive])}"
+      )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_review_runner = Application.get_env(:symphony_elixir, :review_runner)
+    previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_test_pid = Application.get_env(:symphony_elixir, :test_pid)
+    issue_id = "issue-review-pr"
+    issue_identifier = "MT-REVIEW-PR"
+    workspace = Path.join(test_root, issue_identifier)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        tracker_active_states: ["Todo", "In Progress", "Rework"],
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+        tracker_review_state: "In Review"
+      )
+
+      Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupFound)
+      Application.put_env(:symphony_elixir, :review_runner, FakeReviewRunnerApproved)
+      Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerRecordsUpdates)
+      Application.put_env(:symphony_elixir, :test_pid, self())
+
+      File.mkdir_p!(test_root)
+      File.mkdir_p!(workspace)
+
+      agent_pid =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      state = %Orchestrator.State{
+        running: %{
+          issue_id => %{
+            pid: agent_pid,
+            ref: nil,
+            identifier: issue_identifier,
+            issue: %Issue{
+              id: issue_id,
+              state: "In Progress",
+              identifier: issue_identifier,
+              branch_name: "feature/pr"
+            },
+            workspace_path: workspace,
+            started_at: DateTime.utc_now()
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "In Review",
+        title: "Review with PR",
+        description: "Review state with PR",
+        labels: []
+      }
+
+      updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+      assert_receive {:tracker_state_update, ^issue_id, "In Review"}
+      refute Map.has_key?(updated_state.running, issue_id)
+      assert MapSet.member?(updated_state.completed, issue_id)
+      refute Map.has_key?(updated_state.blocked, issue_id)
+      refute Process.alive?(agent_pid)
+    after
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_review_runner) do
+        Application.delete_env(:symphony_elixir, :review_runner)
+      else
+        Application.put_env(:symphony_elixir, :review_runner, previous_review_runner)
+      end
+
+      if is_nil(previous_tracker) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker)
+      end
+
+      if is_nil(previous_test_pid) do
+        Application.delete_env(:symphony_elixir, :test_pid)
+      else
+        Application.put_env(:symphony_elixir, :test_pid, previous_test_pid)
+      end
+
       File.rm_rf(test_root)
     end
   end
@@ -803,6 +1183,30 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "attempt=3"
   end
 
+  test "prompt builder renders resolved repository context" do
+    workflow_prompt =
+      "Ticket {{ issue.identifier }} repo={{ repository.slug }} clone={{ repository.clone_url }} source={{ repository.github_issue_url }}"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      repository_default: "yakisoba666rasb-star/Symphony-Ryo-Lab",
+      repository_allowed: ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"],
+      prompt: workflow_prompt
+    )
+
+    issue = %Issue{
+      identifier: "LAB-338",
+      title: "Fix stale Tailscale smoke defaults",
+      description: "https://github.com/kasotuosawari-design/auto_template/issues/338"
+    }
+
+    prompt = PromptBuilder.build_prompt(issue)
+
+    assert prompt =~ "Ticket LAB-338"
+    assert prompt =~ "repo=kasotuosawari-design/auto_template"
+    assert prompt =~ "clone=https://github.com/kasotuosawari-design/auto_template.git"
+    assert prompt =~ "source=https://github.com/kasotuosawari-design/auto_template/issues/338"
+  end
+
   test "prompt builder renders issue datetime fields without crashing" do
     workflow_prompt = "Ticket {{ issue.identifier }} created={{ issue.created_at }} updated={{ issue.updated_at }}"
 
@@ -976,19 +1380,13 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
-    assert prompt =~ "You are working on a Linear ticket `MT-616`"
-    assert prompt =~ "Issue context:"
-    assert prompt =~ "Identifier: MT-616"
-    assert prompt =~ "Title: Use rich templates for WORKFLOW.md"
-    assert prompt =~ "Current status: In Progress"
-    assert prompt =~ "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd"
-    assert prompt =~ "This is an unattended orchestration session."
-    assert prompt =~ "Only stop early for a true blocker"
-    assert prompt =~ "Do not include \"next steps for user\""
-    assert prompt =~ "open and follow `.codex/skills/land/SKILL.md`"
-    assert prompt =~ "Do not call `gh pr merge` directly"
-    assert prompt =~ "Continuation context:"
-    assert prompt =~ "retry attempt #2"
+    assert prompt =~ "Work on Linear issue `MT-616`"
+    assert prompt =~ "yakisoba666rasb-star/Symphony-Ryo-Lab"
+    assert prompt =~ "Refs MT-616"
+    assert prompt =~ "PR URL"
+    assert prompt =~ "Human"
+    assert prompt =~ "Do not merge any PR"
+    assert prompt =~ "final merge remains human-controlled"
   end
 
   test "prompt builder adds continuation guidance for retries" do
@@ -1376,6 +1774,97 @@ defmodule SymphonyElixir.CoreTest do
       refute Enum.at(turn_texts, 1) =~ "You are an agent for this repository."
       assert Enum.at(turn_texts, 1) =~ "Continuation guidance:"
       assert Enum.at(turn_texts, 1) =~ "continuation turn #2 of 3"
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner stops after a normal turn when workspace has changes for runtime PR handoff" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-dirty-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex.trace}"
+      printf 'RUN\\n' >> "$trace_file"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-dirty"}}}'
+            ;;
+          4)
+            printf '%s\\n' 'runtime handoff ready' > LAB-236-result.txt
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-dirty-1"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git clone #{template_repo} .",
+        codex_command: "#{codex_binary} app-server",
+        max_turns: 3
+      )
+
+      parent = self()
+
+      state_fetcher = fn [_issue_id] ->
+        send(parent, :unexpected_issue_state_fetch)
+        {:ok, [%Issue{id: "issue-dirty-handoff", identifier: "MT-DIRTY", state: "In Progress"}]}
+      end
+
+      issue = %Issue{
+        id: "issue-dirty-handoff",
+        identifier: "MT-DIRTY",
+        title: "Stop when workspace is dirty",
+        description: "Runtime should publish after a dirty normal completion",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-DIRTY",
+        labels: []
+      }
+
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      refute_receive :unexpected_issue_state_fetch, 100
+
+      workspace = Path.join(workspace_root, "MT-DIRTY")
+      assert File.read!(Path.join(workspace, "LAB-236-result.txt")) == "runtime handoff ready\n"
+
+      trace = File.read!(trace_file)
+      assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 1
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
       File.rm_rf(test_root)
