@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, GitHubPrPublisher, HermesKanban, ReviewRunner, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, GitHubPrPublisher, ReviewRunner, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -183,26 +183,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
-  def handle_info({:hermes_kanban_running_synced, issue_id, result}, %{running: running} = state)
-      when is_binary(issue_id) do
-    state =
-      case {Map.get(running, issue_id), result} do
-        {%{} = running_entry, {:ok, task_id}} when is_binary(task_id) and task_id != "" ->
-          updated_entry = Map.put(running_entry, :hermes_kanban_task_id, task_id)
-          %{state | running: Map.put(running, issue_id, updated_entry)}
-
-        {_running_entry, {:error, reason}} ->
-          Logger.warning("Hermes Kanban running sync failed for issue_id=#{issue_id}: #{inspect(reason)}")
-          state
-
-        {_running_entry, other} ->
-          Logger.warning("Hermes Kanban running sync returned unexpected result for issue_id=#{issue_id}: #{inspect(other)}")
-          state
-      end
-
-    {:noreply, state}
-  end
-
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
       case pop_retry_attempt_state(state, issue_id, retry_token) do
@@ -341,14 +321,6 @@ defmodule SymphonyElixir.Orchestrator do
     Application.get_env(:symphony_elixir, :review_runner, ReviewRunner)
   end
 
-  defp hermes_kanban_module do
-    Application.get_env(:symphony_elixir, :hermes_kanban_module, HermesKanban)
-  end
-
-  defp hermes_kanban_sync_enabled? do
-    Config.settings!().observability.hermes_kanban.enabled == true
-  end
-
   defp publish_pr_after_normal_completion(state, issue_id, running_entry, session_id, branch_name, workspace_path) do
     case publish_pr_for_branch(workspace_path, branch_name, running_entry) do
       {:ok, pr} when is_map(pr) ->
@@ -426,7 +398,7 @@ defmodule SymphonyElixir.Orchestrator do
     with {:ok, verdict} <- review_pr_before_handoff(running_entry, pr),
          :ok <- comment_on_approved_review_handoff(issue_id, running_entry, pr, verdict) do
       Logger.info("Review loop approved-equivalent for issue_id=#{issue_id} session_id=#{session_id} verdict=#{inspect(verdict)}")
-      move_issue_to_review_after_approval(state, issue_id, running_entry, session_id, pr)
+      move_issue_to_review_after_approval(state, issue_id, running_entry, session_id)
     else
       {:error, reason} ->
         error = "review loop did not approve PR before In Review handoff: #{inspect(reason)}"
@@ -604,85 +576,12 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp sync_hermes_kanban_running(%Issue{} = issue) do
-    if hermes_kanban_sync_enabled?() do
-      recipient = self()
-
-      start_hermes_kanban_sink(issue.id, :running, fn ->
-        result = hermes_kanban_module().sync_issue_running(issue)
-        send(recipient, {:hermes_kanban_running_synced, issue.id, result})
-      end)
-    else
-      :ok
-    end
-  end
-
-  defp sync_hermes_kanban_done(running_entry, pr) when is_map(running_entry) do
-    if hermes_kanban_sync_enabled?() do
-      case Map.get(running_entry, :hermes_kanban_task_id) do
-        task_id when is_binary(task_id) and task_id != "" ->
-          issue = issue_for_review(running_entry)
-          summary = hermes_done_summary(issue)
-          metadata = hermes_done_metadata(pr)
-
-          start_hermes_kanban_sink(issue.id, :done, fn ->
-            result = hermes_kanban_module().sync_issue_done(issue, task_id: task_id, summary: summary, metadata: metadata)
-            log_hermes_kanban_sink_result(result, issue.id, :done)
-          end)
-
-        _ ->
-          Logger.warning("Hermes Kanban done sync skipped; no task id recorded for issue_id=#{Map.get(running_entry, :issue_id) || Map.get(running_entry, :identifier)}")
-      end
-    else
-      :ok
-    end
-  end
-
-  defp sync_hermes_kanban_done(_running_entry, _pr), do: :ok
-
-  # Hermes Kanban is an optional observability sink. It is intentionally best-effort:
-  # no retry/backoff here, and failures must not block the Linear/GitHub source of truth.
-  defp start_hermes_kanban_sink(issue_id, kind, fun) when is_function(fun, 0) do
-    case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fun) do
-      {:ok, _pid} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("Hermes Kanban #{kind} sync task failed to start for issue_id=#{issue_id}: #{inspect(reason)}")
-    end
-  end
-
-  defp log_hermes_kanban_sink_result(result, issue_id, kind) do
-    case result do
-      value when value in [:ok] -> :ok
-      {:ok, _task_id} -> :ok
-      {:error, reason} -> Logger.warning("Hermes Kanban #{kind} sync failed for issue_id=#{issue_id}: #{inspect(reason)}")
-      other -> Logger.warning("Hermes Kanban #{kind} sync returned unexpected result for issue_id=#{issue_id}: #{inspect(other)}")
-    end
-  end
-
-  defp hermes_done_summary(%Issue{identifier: identifier}) when is_binary(identifier) and identifier != "" do
-    "Symphony handed off #{identifier} to #{Config.review_handoff_state()}"
-  end
-
-  defp hermes_done_summary(_issue), do: "Symphony handed off issue to #{Config.review_handoff_state()}"
-
-  defp hermes_done_metadata(pr) when is_map(pr) do
-    case pr["url"] || pr[:url] do
-      url when is_binary(url) and url != "" -> %{"pr_url" => url}
-      _ -> %{}
-    end
-  end
-
-  defp hermes_done_metadata(_pr), do: %{}
-
-  defp move_issue_to_review_after_approval(state, issue_id, running_entry, session_id, pr) do
+  defp move_issue_to_review_after_approval(state, issue_id, running_entry, session_id) do
     target_state = Config.review_handoff_state()
 
     case tracker_module().update_issue_state(issue_id, target_state) do
       :ok ->
         Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; issue moved to #{target_state}")
-        sync_hermes_kanban_done(running_entry, pr)
 
         state
         |> complete_issue(issue_id)
@@ -1332,7 +1231,7 @@ defmodule SymphonyElixir.Orchestrator do
     with {:ok, verdict} <- review_pr_before_handoff(running_entry, pr),
          :ok <- comment_on_approved_review_handoff(issue.id, running_entry, pr, verdict) do
       Logger.info("Review loop approved-equivalent for premature review handoff issue_id=#{issue.id} session_id=#{session_id} verdict=#{inspect(verdict)}")
-      move_issue_to_review_after_approval(stopped_state, issue.id, running_entry, session_id, pr)
+      move_issue_to_review_after_approval(stopped_state, issue.id, running_entry, session_id)
     else
       {:error, reason} ->
         error = "review loop did not approve PR before In Review handoff: #{inspect(reason)}"
@@ -1639,13 +1538,8 @@ defmodule SymphonyElixir.Orchestrator do
        when is_function(state_updater, 2) do
     if normalize_issue_state(state_name) == "todo" do
       case state_updater.(issue.id, "In Progress") do
-        :ok ->
-          claimed_issue = %{issue | state: "In Progress"}
-          sync_hermes_kanban_running(claimed_issue)
-          {:ok, claimed_issue}
-
-        {:error, reason} ->
-          {:error, {:claim_issue_failed, reason}}
+        :ok -> {:ok, %{issue | state: "In Progress"}}
+        {:error, reason} -> {:error, {:claim_issue_failed, reason}}
       end
     else
       {:ok, issue}
