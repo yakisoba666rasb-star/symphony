@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Workspace do
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
   @remote_dirty_workspace_marker "__SYMPHONY_DIRTY_WORKSPACE__"
+  @ignored_dirty_status_pathspecs [":!.symphony-review-verdict.json"]
 
   @type worker_host :: String.t() | nil
 
@@ -63,7 +64,7 @@ defmodule SymphonyElixir.Workspace do
         "  created=0",
         "  cd \"$workspace\"",
         "  if [ -d .git ]; then",
-        "    dirty_status=$(git status --porcelain)",
+        "    dirty_status=$(git status --porcelain -- ':!.symphony-review-verdict.json')",
         "    if [ -n \"$dirty_status\" ]; then",
         "      {",
         "        printf '%s\\n\\n' 'dirty workspace detected'",
@@ -155,7 +156,7 @@ defmodule SymphonyElixir.Workspace do
 
   defp ensure_reusable_workspace(workspace) do
     if File.dir?(Path.join(workspace, ".git")) do
-      case System.cmd("git", ["-C", workspace, "status", "--porcelain"], stderr_to_stdout: true) do
+      case System.cmd("git", ["-C", workspace, "status", "--porcelain", "--"] ++ @ignored_dirty_status_pathspecs, stderr_to_stdout: true) do
         {"", 0} ->
           :ok
 

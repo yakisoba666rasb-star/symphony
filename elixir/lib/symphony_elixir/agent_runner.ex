@@ -7,6 +7,8 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
+  @ignored_dirty_status_pathspecs [":!.symphony-review-verdict.json"]
+
   @type worker_host :: String.t() | nil
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
@@ -148,7 +150,7 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp workspace_has_changes?(workspace) when is_binary(workspace) do
-    case System.cmd("git", ["-C", workspace, "status", "--porcelain"], stderr_to_stdout: true) do
+    case System.cmd("git", ["-C", workspace, "status", "--porcelain", "--"] ++ @ignored_dirty_status_pathspecs, stderr_to_stdout: true) do
       {"", 0} ->
         false
 
