@@ -455,18 +455,83 @@ defmodule SymphonyElixir.Orchestrator do
   defp verdict_value(_verdict, _key), do: nil
 
   defp format_review_items(items) when is_list(items) do
-    case Enum.map(items, &to_string/1) |> Enum.reject(&(&1 == "")) do
+    case Enum.map(items, &review_value_to_string/1) |> Enum.reject(&(&1 == "")) do
       [] -> "none"
       values -> Enum.join(values, "; ")
     end
   end
 
   defp format_review_items(nil), do: "none"
-  defp format_review_items(item), do: to_string(item)
+  defp format_review_items(item), do: review_value_to_string(item)
 
   defp blank_to_none(nil), do: "none"
   defp blank_to_none(""), do: "none"
-  defp blank_to_none(value), do: to_string(value)
+
+  defp blank_to_none(value) do
+    case review_value_to_string(value) do
+      "" -> "none"
+      text -> text
+    end
+  end
+
+  defp review_value_to_string(nil), do: ""
+  defp review_value_to_string(value) when is_binary(value), do: value
+  defp review_value_to_string(value) when is_atom(value), do: to_string(value)
+  defp review_value_to_string(value) when is_integer(value), do: Integer.to_string(value)
+  defp review_value_to_string(value) when is_float(value), do: Float.to_string(value)
+  defp review_value_to_string(%{} = value), do: review_map_to_string(value)
+  defp review_value_to_string(value) when is_list(value), do: format_review_items(value)
+  defp review_value_to_string(value), do: inspect(value)
+
+  defp review_map_to_string(value) do
+    location =
+      [Map.get(value, "file") || Map.get(value, :file), Map.get(value, "line") || Map.get(value, :line)]
+      |> Enum.map(&review_value_to_string/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join(":")
+
+    command = first_review_map_value(value, ["command", :command])
+    result = first_review_map_value(value, ["result", :result])
+
+    summary =
+      first_review_map_value(value, [
+        "issue",
+        :issue,
+        "message",
+        :message,
+        "note",
+        :note,
+        "title",
+        :title,
+        "description",
+        :description,
+        "rationale",
+        :rationale,
+        "outcome",
+        :outcome
+      ]) ||
+        command_result_summary(command, result) ||
+        inspect(value)
+
+    case {location, summary} do
+      {"", ""} -> inspect(value)
+      {"", text} -> text
+      {place, ""} -> place
+      {place, text} -> "#{place} - #{text}"
+    end
+  end
+
+  defp first_review_map_value(value, keys) do
+    keys
+    |> Enum.map(&Map.get(value, &1))
+    |> Enum.map(&review_value_to_string/1)
+    |> Enum.find(&(&1 != ""))
+  end
+
+  defp command_result_summary(nil, nil), do: nil
+  defp command_result_summary(nil, result), do: result
+  defp command_result_summary(command, nil), do: command
+  defp command_result_summary(command, result), do: "#{command} (#{result})"
 
   defp review_pr_before_handoff(running_entry, pr) do
     case Map.get(running_entry, :workspace_path) do
