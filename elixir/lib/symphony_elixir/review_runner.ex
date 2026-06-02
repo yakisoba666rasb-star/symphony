@@ -159,12 +159,33 @@ defmodule SymphonyElixir.ReviewRunner do
 
   defp normalize_verdict(_raw), do: {:error, {:invalid_review_verdict, :map_required}}
 
-  defp string_list(values) when is_list(values), do: values |> Enum.map(&to_string/1) |> Enum.reject(&(&1 == ""))
+  defp string_list(values) when is_list(values), do: values |> Enum.map(&string_value/1) |> Enum.reject(&(&1 == ""))
   defp string_list(nil), do: []
-  defp string_list(value), do: [to_string(value)]
+  defp string_list(value), do: [string_value(value)]
 
   defp string_value(nil), do: ""
+  defp string_value(%{} = value), do: finding_map_to_string(value)
   defp string_value(value), do: to_string(value)
+
+  defp finding_map_to_string(value) do
+    file = string_value(Map.get(value, "file") || Map.get(value, :file))
+    line = string_value(Map.get(value, "line") || Map.get(value, :line))
+    issue = string_value(Map.get(value, "issue") || Map.get(value, :issue) || Map.get(value, "message") || Map.get(value, :message))
+
+    location =
+      cond do
+        file != "" and line != "" -> "#{file}:#{line}"
+        file != "" -> file
+        true -> ""
+      end
+
+    summary =
+      [location, issue]
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join(" - ")
+
+    if summary == "", do: inspect(value), else: summary
+  end
 
   defp verdict_path(workspace_path), do: Path.join(workspace_path, @verdict_file)
 
