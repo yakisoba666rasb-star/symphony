@@ -23,6 +23,22 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule FakeReviewRunnerApprovedStructured do
+    def run_loop(_workspace_path, _issue, _pr, _opts \\ []) do
+      {:ok,
+       %{
+         approved_equivalent: true,
+         blocking_findings: [
+           %{"file" => "lib/example.ex", "line" => 42, "issue" => "Structured finding handled"}
+         ],
+         tests_required: [
+           %{"command" => "mix test", "result" => "passed"}
+         ],
+         residual_risk: %{"note" => "none"}
+       }}
+    end
+  end
+
   defmodule FakeReviewRunnerBlocked do
     def run_loop(_workspace_path, _issue, _pr, _opts \\ []), do: {:error, :review_blocked}
   end
@@ -1624,6 +1640,119 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert MapSet.member?(state.completed, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
+    assert state.blocked == %{}
+  end
+
+  test "orchestrator comments on structured approved review verdicts" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_review_runner = Application.get_env(:symphony_elixir, :review_runner)
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+
+    previous_tracker_state_update_recipient =
+      Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
+
+    previous_tracker_comment_recipient =
+      Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_review_runner) do
+        Application.delete_env(:symphony_elixir, :review_runner)
+      else
+        Application.put_env(:symphony_elixir, :review_runner, previous_review_runner)
+      end
+
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+
+      if is_nil(previous_tracker_state_update_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_state_update_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_state_update_recipient,
+          previous_tracker_state_update_recipient
+        )
+      end
+
+      if is_nil(previous_tracker_comment_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_comment_recipient,
+          previous_tracker_comment_recipient
+        )
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupFound)
+    Application.put_env(:symphony_elixir, :review_runner, FakeReviewRunnerApprovedStructured)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-normal-pr-structured-verdict"
+    orchestrator_name = Module.concat(__MODULE__, :NormalPrStructuredVerdictOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-STRUCTURED-VERDICT",
+      branch_name: "feature/structured-verdict",
+      state: "In Progress"
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      workspace_path: "/tmp/mt-structured-verdict",
+      session_id: "thread-structured-verdict",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 200
+    assert_receive {:tracker_comment_called, ^issue_id, comment}, 200
+    assert comment =~ "lib/example.ex:42 - Structured finding handled"
+    assert comment =~ "mix test"
+    assert comment =~ "none"
+
+    assert MapSet.member?(state.completed, issue_id)
     assert state.blocked == %{}
   end
 
