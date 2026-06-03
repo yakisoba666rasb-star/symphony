@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, GitHubPrPublisher, ReviewRunner, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, GitHubPrPublisher, HermesDelegation, ReviewRunner, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -1516,6 +1516,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
     recipient = self()
+    preferred_worker_host = preferred_worker_host_for_issue(issue, preferred_worker_host)
 
     case select_worker_host(state, preferred_worker_host) do
       :no_worker_capacity ->
@@ -1901,6 +1902,15 @@ defmodule SymphonyElixir.Orchestrator do
             least_loaded_worker_host(state, available_hosts)
         end
     end
+  end
+
+  defp preferred_worker_host_for_issue(%Issue{}, preferred_worker_host)
+       when is_binary(preferred_worker_host) and preferred_worker_host != "" do
+    preferred_worker_host
+  end
+
+  defp preferred_worker_host_for_issue(%Issue{} = issue, _preferred_worker_host) do
+    HermesDelegation.preferred_worker_host(issue, Config.settings!().worker.ssh_hosts)
   end
 
   defp preferred_worker_host_available?(preferred_worker_host, hosts)
