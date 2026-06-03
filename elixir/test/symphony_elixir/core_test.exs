@@ -1274,6 +1274,35 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
+  test "preferred_worker_host_for_issue_for_test resolves Hermes ASSIGN primary" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["ras-codex", "worker-b"]
+    )
+
+    issue = %Issue{
+      id: "issue-hermes-delegation",
+      description: """
+      ## Hermes delegation
+      ASSIGN: primary=Ras Codex
+      """
+    }
+
+    assert Orchestrator.preferred_worker_host_for_issue_for_test(issue, nil) == "ras-codex"
+  end
+
+  test "preferred_worker_host_for_issue_for_test keeps explicit retry host over Hermes ASSIGN" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["ras-codex", "worker-b"]
+    )
+
+    issue = %Issue{
+      id: "issue-hermes-delegation-retry",
+      description: "ASSIGN: primary=Ras Codex"
+    }
+
+    assert Orchestrator.preferred_worker_host_for_issue_for_test(issue, "worker-b") == "worker-b"
+  end
+
   defp assert_due_in_range(due_at_ms, _min_remaining_ms, max_remaining_ms) do
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
 
