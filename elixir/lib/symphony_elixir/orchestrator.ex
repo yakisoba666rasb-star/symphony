@@ -875,12 +875,6 @@ defmodule SymphonyElixir.Orchestrator do
     select_worker_host(state, preferred_worker_host)
   end
 
-  @doc false
-  @spec preferred_worker_host_for_issue_for_test(Issue.t(), String.t() | nil) :: String.t() | nil
-  def preferred_worker_host_for_issue_for_test(%Issue{} = issue, preferred_worker_host) do
-    preferred_worker_host_for_issue(issue, preferred_worker_host)
-  end
-
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
 
   defp reconcile_running_issue_states([issue | rest], state, active_states, terminal_states) do

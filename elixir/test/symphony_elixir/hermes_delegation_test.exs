@@ -41,4 +41,23 @@ defmodule SymphonyElixir.HermesDelegationTest do
 
     assert HermesDelegation.preferred_worker_host(issue, ["worker-a"]) == nil
   end
+
+  test "preferred_worker_host logs a warning when ASSIGN value does not match any host" do
+    issue = %Issue{description: "ASSIGN: primary=ghost-host"}
+
+    assert capture_log(fn ->
+             assert HermesDelegation.preferred_worker_host(issue, ["worker-a"]) == nil
+           end) =~ "did not match any configured worker_hosts"
+  end
+
+  test "preferred_worker_host resolves ASSIGN primary across whitespace and case" do
+    issue = %Issue{
+      description: """
+      ## Hermes delegation
+      ASSIGN: primary=Ras Codex
+      """
+    }
+
+    assert HermesDelegation.preferred_worker_host(issue, ["ras-codex", "worker-b"]) == "ras-codex"
+  end
 end

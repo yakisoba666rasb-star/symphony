@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.HermesDelegation do
   @moduledoc false
 
+  require Logger
+
   alias SymphonyElixir.Linear.Issue
 
   @assignment_line ~r/^\s*ASSIGN:\s*([A-Za-z0-9_.-]+)\s*=\s*(.+?)\s*$/i
@@ -24,17 +26,23 @@ defmodule SymphonyElixir.HermesDelegation do
 
   @spec preferred_worker_host(Issue.t(), [String.t()]) :: String.t() | nil
   def preferred_worker_host(%Issue{description: description}, worker_hosts) when is_list(worker_hosts) do
-    values =
-      description
-      |> assignments()
-      |> then(fn parsed ->
-        [
-          parsed["worker_host"],
-          parsed["primary"]
-        ]
-      end)
+    parsed = assignments(description)
 
-    Enum.find_value(values, &matching_worker_host(&1, worker_hosts))
+    values = [parsed["worker_host"], parsed["primary"]]
+
+    case Enum.find_value(values, &matching_worker_host(&1, worker_hosts)) do
+      nil ->
+        requested = Enum.reject(values, &is_nil/1)
+
+        if requested != [] do
+          Logger.warning("HermesDelegation: ASSIGN host(s) #{inspect(requested)} did not match any configured worker_hosts #{inspect(worker_hosts)}; falling back to least-loaded")
+        end
+
+        nil
+
+      host ->
+        host
+    end
   end
 
   def preferred_worker_host(_issue, _worker_hosts), do: nil
@@ -42,6 +50,8 @@ defmodule SymphonyElixir.HermesDelegation do
   defp matching_worker_host(value, worker_hosts) when is_binary(value) do
     normalized_value = normalize_match_value(value)
 
+    # Exact match preferred; normalized match (collapses separators) is a deliberate
+    # forgiving fallback so "Ras Codex" matches "ras-codex" in config.
     Enum.find(worker_hosts, fn host ->
       host == value or normalize_match_value(host) == normalized_value
     end)
