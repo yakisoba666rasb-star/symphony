@@ -355,55 +355,16 @@ defmodule SymphonyElixir.Config.Schema do
     import Ecto.Changeset
 
     @primary_key false
-
-    defmodule HermesKanban do
-      @moduledoc false
-      use Ecto.Schema
-      import Ecto.Changeset
-
-      @primary_key false
-      embedded_schema do
-        field(:enabled, :boolean, default: false)
-        field(:command, :string)
-        field(:board, :string, default: "default")
-        field(:tenant, :string)
-        field(:assignee, :string)
-      end
-
-      @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
-      def changeset(schema, attrs) do
-        schema
-        |> cast(attrs, [:enabled, :command, :board, :tenant, :assignee], empty_values: [])
-        |> validate_command_when_enabled()
-      end
-
-      defp validate_command_when_enabled(changeset) do
-        if get_field(changeset, :enabled) == true do
-          case get_field(changeset, :command) do
-            command when is_binary(command) ->
-              if String.trim(command) == "", do: add_error(changeset, :command, "can't be blank when enabled"), else: changeset
-
-            _ ->
-              add_error(changeset, :command, "can't be blank when enabled")
-          end
-        else
-          changeset
-        end
-      end
-    end
-
     embedded_schema do
       field(:dashboard_enabled, :boolean, default: true)
       field(:refresh_ms, :integer, default: 1_000)
       field(:render_interval_ms, :integer, default: 16)
-      embeds_one(:hermes_kanban, HermesKanban, on_replace: :update, defaults_to_struct: true)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
       |> cast(attrs, [:dashboard_enabled, :refresh_ms, :render_interval_ms], empty_values: [])
-      |> cast_embed(:hermes_kanban, with: &HermesKanban.changeset/2)
       |> validate_number(:refresh_ms, greater_than: 0)
       |> validate_number(:render_interval_ms, greater_than: 0)
     end
