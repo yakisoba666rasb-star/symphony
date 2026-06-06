@@ -254,7 +254,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
-  test "workspace blocks existing git workspace with uncommitted changes" do
+  test "workspace quarantines existing git workspace with uncommitted changes before recreating" do
     workspace_root =
       Path.join(
         System.tmp_dir!(),
@@ -271,9 +271,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.write!(Path.join(workspace, "README.md"), "changed\n")
       File.write!(Path.join(workspace, "local-progress.txt"), "untracked\n")
 
-      assert {:error, {:dirty_workspace, ^workspace, status}} = Workspace.create_for_issue("MT-DIRTY")
-      assert status =~ "README.md"
-      assert status =~ "local-progress.txt"
+      assert {:ok, ^workspace} = Workspace.create_for_issue("MT-DIRTY")
+      assert File.read!(Path.join(workspace, "README.md")) == "first\n"
+      refute File.exists?(Path.join(workspace, "local-progress.txt"))
 
       reason_log = Path.join(workspace_root, "MT-DIRTY.dirty-reason.log")
       assert File.exists?(reason_log)
@@ -282,6 +282,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert reason =~ "README.md"
       assert reason =~ "local-progress.txt"
       refute File.exists?(Path.join(workspace, "_reason.log"))
+
+      [quarantined_workspace] =
+        workspace_root
+        |> Path.join("MT-DIRTY.dirty-*")
+        |> Path.wildcard()
+        |> Enum.filter(&File.dir?/1)
+
+      assert File.read!(Path.join(quarantined_workspace, "README.md")) == "changed\n"
+      assert File.read!(Path.join(quarantined_workspace, "local-progress.txt")) == "untracked\n"
     after
       File.rm_rf(workspace_root)
     end
@@ -1766,7 +1775,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.workflow_prompt() == workflow_prompt
   end
 
-  test "remote workspace creation rejects existing dirty git workspaces" do
+  test "remote workspace creation quarantines existing dirty git workspaces" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -1786,8 +1795,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       fake_ssh = Path.join(test_root, "ssh")
       workspace_root = "~/.symphony-remote-workspaces"
       workspace_path = "/remote/home/.symphony-remote-workspaces/MT-SSH-DIRTY"
-      dirty_status = " M README.md\n?? local-progress.txt\n"
-      escaped_dirty_status = String.replace(dirty_status, "\n", "\\n")
 
       File.mkdir_p!(test_root)
       System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
@@ -1798,8 +1805,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
       printf 'ARGV:%s\n' "$*" >> "$trace_file"
 
-      printf '%s\\t%s\\t%s\\n' '__SYMPHONY_DIRTY_WORKSPACE__' '#{workspace_path}' '#{escaped_dirty_status}'
-      exit 72
+      printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
       """)
 
       File.chmod!(fake_ssh, 0o755)
@@ -1809,10 +1815,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         worker_ssh_hosts: ["worker-01:2200"]
       )
 
-      assert {:error, {:dirty_workspace, ^workspace_path, status}} =
-               Workspace.create_for_issue("MT-SSH-DIRTY", "worker-01:2200")
+      assert {:ok, ^workspace_path} = Workspace.create_for_issue("MT-SSH-DIRTY", "worker-01:2200")
 
-      assert status =~ "README.md"
+      trace = File.read!(trace_file)
+      assert trace =~ "quarantine_workspace"
+      assert trace =~ ".dirty-$(date -u +%Y%m%d-%H%M%S)"
+      assert trace =~ ~s(mv "$workspace" "$quarantine_workspace")
     after
       File.rm_rf(test_root)
     end

@@ -42,9 +42,7 @@ defmodule SymphonyElixir.Workspace do
   defp ensure_workspace(workspace, nil) do
     cond do
       File.dir?(workspace) ->
-        with :ok <- ensure_reusable_workspace(workspace) do
-          {:ok, workspace, false}
-        end
+        ensure_reusable_workspace(workspace)
 
       File.exists?(workspace) ->
         File.rm_rf!(workspace)
@@ -66,18 +64,25 @@ defmodule SymphonyElixir.Workspace do
         "  if [ -d .git ]; then",
         "    dirty_status=$(git status --porcelain -- ':!.symphony-review-verdict.json')",
         "    if [ -n \"$dirty_status\" ]; then",
+        "      quarantine_workspace=\"$workspace.dirty-$(date -u +%Y%m%d-%H%M%S)\"",
+        "      if [ -e \"$quarantine_workspace\" ]; then",
+        "        quarantine_workspace=\"$quarantine_workspace-$$\"",
+        "      fi",
         "      {",
         "        printf '%s\\n\\n' 'dirty workspace detected'",
         "        printf 'Workspace: %s\\n' \"$(pwd -P)\"",
+        "        printf 'Quarantine: %s\\n' \"$quarantine_workspace\"",
         "        printf 'Recorded at: %s\\n\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"",
         "        printf '%s\\n' 'Git status --porcelain:'",
         "        printf '%s\\n' \"$dirty_status\"",
         "        printf '\\n%s\\n' 'Git diff --stat:'",
         "        git diff --stat || true",
         "      } > \"$workspace.dirty-reason.log\"",
-        "      escaped_dirty_status=$(printf '%s' \"$dirty_status\" | sed ':a;N;$!ba;s/\\n/\\\\n/g')",
-        "      printf '%s\\t%s\\t%s\\n' '#{@remote_dirty_workspace_marker}' \"$(pwd -P)\" \"$escaped_dirty_status\"",
-        "      exit 72",
+        "      cd \"$(dirname \"$workspace\")\"",
+        "      mv \"$workspace\" \"$quarantine_workspace\"",
+        "      mkdir -p \"$workspace\"",
+        "      created=1",
+        "      cd \"$workspace\"",
         "    fi",
         "  fi",
         "elif [ -e \"$workspace\" ]; then",
@@ -159,21 +164,43 @@ defmodule SymphonyElixir.Workspace do
     if File.dir?(Path.join(workspace, ".git")) do
       case System.cmd("git", ["-C", workspace, "status", "--porcelain", "--"] ++ @ignored_dirty_status_pathspecs, stderr_to_stdout: true) do
         {"", 0} ->
-          :ok
+          {:ok, workspace, false}
 
         {output, 0} ->
-          write_dirty_workspace_reason_log(workspace, output)
-          {:error, {:dirty_workspace, workspace, output}}
+          {:ok, quarantine_workspace} = quarantine_dirty_workspace(workspace, output)
+          Logger.warning("Quarantined dirty workspace workspace=#{workspace} quarantine=#{quarantine_workspace}")
+          create_workspace(workspace)
 
         {output, status} ->
           {:error, {:workspace_git_status_failed, workspace, status, output}}
       end
     else
-      :ok
+      {:ok, workspace, false}
     end
   end
 
-  defp write_dirty_workspace_reason_log(workspace, dirty_status) do
+  defp quarantine_dirty_workspace(workspace, dirty_status) do
+    quarantine_workspace = dirty_workspace_quarantine_path(workspace)
+    write_dirty_workspace_reason_log(workspace, dirty_status, quarantine_workspace)
+    File.rename!(workspace, quarantine_workspace)
+    {:ok, quarantine_workspace}
+  end
+
+  defp dirty_workspace_quarantine_path(workspace) do
+    timestamp =
+      DateTime.utc_now()
+      |> Calendar.strftime("%Y%m%d-%H%M%S")
+
+    base = Path.join(Path.dirname(workspace), "#{Path.basename(workspace)}.dirty-#{timestamp}")
+
+    if File.exists?(base) do
+      "#{base}-#{System.unique_integer([:positive])}"
+    else
+      base
+    end
+  end
+
+  defp write_dirty_workspace_reason_log(workspace, dirty_status, quarantine_workspace) do
     diff_summary =
       case System.cmd("git", ["-C", workspace, "diff", "--stat"], stderr_to_stdout: true) do
         {"", 0} -> ""
@@ -185,6 +212,7 @@ defmodule SymphonyElixir.Workspace do
     dirty workspace detected
 
     Workspace: #{workspace}
+    #{quarantine_line(quarantine_workspace)}
     Recorded at: #{DateTime.utc_now() |> DateTime.to_iso8601()}
 
     Git status --porcelain:
@@ -194,6 +222,8 @@ defmodule SymphonyElixir.Workspace do
     File.write(dirty_workspace_reason_log_path(workspace), body)
     :ok
   end
+
+  defp quarantine_line(quarantine_workspace), do: "Quarantine: #{quarantine_workspace}\n"
 
   defp dirty_workspace_reason_log_path(workspace) do
     Path.join(Path.dirname(workspace), "#{Path.basename(workspace)}.dirty-reason.log")
