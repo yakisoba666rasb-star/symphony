@@ -19,12 +19,20 @@ defmodule SymphonyElixir.Config do
   No description provided.
   {% endif %}
   """
+  @current_codex_model "gpt-5.5"
+  @retired_codex_models ["gpt-5.3-codex-spark"]
 
   @type codex_runtime_settings :: %{
           approval_policy: String.t() | map(),
           thread_sandbox: String.t(),
           turn_sandbox_policy: map()
         }
+
+  @spec current_codex_model() :: String.t()
+  def current_codex_model, do: @current_codex_model
+
+  @spec retired_codex_models() :: [String.t()]
+  def retired_codex_models, do: @retired_codex_models
 
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
@@ -163,10 +171,49 @@ defmodule SymphonyElixir.Config do
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
         {:error, :missing_linear_project_slug}
 
+      retired_model_message(settings) ->
+        {:error, {:retired_codex_model, retired_model_message(settings)}}
+
       true ->
         :ok
     end
   end
+
+  defp retired_model_message(settings) do
+    settings
+    |> retired_model_fields()
+    |> Enum.flat_map(fn {field, value} -> retired_model_matches(field, value) end)
+    |> case do
+      [] ->
+        nil
+
+      matches ->
+        details =
+          matches
+          |> Enum.map(fn {field, model} -> "#{field}=#{model}" end)
+          |> Enum.join(", ")
+
+        "Retired Codex model reference found. Use #{current_codex_model()} instead of: #{details}"
+    end
+  end
+
+  defp retired_model_fields(settings) do
+    [
+      {"codex.command", settings.codex.command},
+      {"review.implementer_command", settings.review.implementer_command},
+      {"review.reviewer_command", settings.review.reviewer_command},
+      {"review.implementer_model", settings.review.implementer_model},
+      {"review.reviewer_model", settings.review.reviewer_model}
+    ]
+  end
+
+  defp retired_model_matches(field, value) when is_binary(value) do
+    @retired_codex_models
+    |> Enum.filter(&String.contains?(value, &1))
+    |> Enum.map(fn retired_model -> {field, retired_model} end)
+  end
+
+  defp retired_model_matches(_field, _value), do: []
 
   defp review_role_command(review, :implementer), do: blank_to_nil(review.implementer_command)
   defp review_role_command(review, :reviewer), do: blank_to_nil(review.reviewer_command)

@@ -164,6 +164,28 @@ codex:
   command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server"
 ```
 
+- The current recommended Codex model is declared in `SymphonyElixir.Config.current_codex_model/0`.
+  When changing models, update that value first, then sweep every Markdown and workflow surface in
+  the deployment tree instead of editing only one file:
+
+```bash
+new_model='gpt-5.5'
+old_model='gpt-5.3-codex-spark'
+rg -l "$old_model|codex-spark" README.md WORKFLOW.md docs test lib |
+  xargs perl -0pi -e "s/\\Q$old_model\\E/$new_model/g; s/codex-spark/$new_model/g"
+rg -n "$old_model|codex-spark" README.md WORKFLOW.md docs test lib
+```
+
+- Runtime deployments may use a copied `WORKFLOW.md` outside this repository. Check the exact
+  path from the service definition, update that file too, and restart the service after it passes
+  validation:
+
+```bash
+systemctl cat symphony-engine-auto-template.service
+rg -n "$old_model|codex-spark" /path/from/ExecStart/WORKFLOW.md
+mise exec -- mix run -e 'SymphonyElixir.Workflow.set_workflow_file_path("/path/from/ExecStart/WORKFLOW.md"); case SymphonyElixir.Config.validate!() do :ok -> IO.puts("workflow ok"); {:error, reason} -> IO.inspect(reason); System.halt(1) end'
+```
+
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.

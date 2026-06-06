@@ -182,6 +182,8 @@ defmodule SymphonyElixir.CoreTest do
     refute workflow_text =~ "danger-full-access"
     refute workflow_text =~ "/home/ryo/"
     refute workflow_text =~ "Slack"
+    refute workflow_text =~ "gpt-" <> "5.3-codex-" <> "spark"
+    refute workflow_text =~ "codex-" <> "spark"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
