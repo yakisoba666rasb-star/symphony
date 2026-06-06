@@ -134,11 +134,31 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
            }
   end
 
-  test "linear_graphql marks GraphQL error responses as failures while preserving the body" do
+  test "linear_graphql rejects mutations by default before calling Linear" do
     response =
       DynamicTool.execute(
         "linear_graphql",
         %{"query" => "mutation BadMutation { nope }"},
+        linear_client: fn _query, _variables, _opts ->
+          flunk("linear client should not be called for mutations by default")
+        end
+      )
+
+    assert response["success"] == false
+
+    assert Jason.decode!(response["output"]) == %{
+             "error" => %{
+               "message" => "`linear_graphql` only allows read-only queries by default. Set `SYMPHONY_ALLOW_LINEAR_GRAPHQL_MUTATIONS=true` for trusted mutation workflows."
+             }
+           }
+  end
+
+  test "linear_graphql permits mutations only when explicitly allowed" do
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{"query" => "mutation BadMutation { nope }"},
+        allow_mutations: true,
         linear_client: fn _query, _variables, _opts ->
           {:ok, %{"errors" => [%{"message" => "Unknown field `nope`"}], "data" => nil}}
         end

@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   @linear_graphql_tool "linear_graphql"
   @linear_graphql_description """
-  Execute a raw GraphQL query or mutation against Linear using Symphony's configured auth.
+  Execute a raw read-only GraphQL query against Linear using Symphony's configured auth.
   """
   @linear_graphql_input_schema %{
     "type" => "object",
@@ -16,7 +16,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     "properties" => %{
       "query" => %{
         "type" => "string",
-        "description" => "GraphQL query or mutation document to execute against Linear."
+        "description" => "Read-only GraphQL query document to execute against Linear."
       },
       "variables" => %{
         "type" => ["object", "null"],
@@ -57,6 +57,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     linear_client = Keyword.get(opts, :linear_client, &Client.graphql/3)
 
     with {:ok, query, variables} <- normalize_linear_graphql_arguments(arguments),
+         :ok <- authorize_linear_graphql_query(query, opts),
          {:ok, response} <- linear_client.(query, variables, []) do
       graphql_response(response)
     else
@@ -108,6 +109,26 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       variables when is_map(variables) -> {:ok, variables}
       _ -> {:error, :invalid_variables}
     end
+  end
+
+  defp authorize_linear_graphql_query(query, opts) when is_binary(query) do
+    cond do
+      not mutation_document?(query) ->
+        :ok
+
+      Keyword.get(opts, :allow_mutations, false) ->
+        :ok
+
+      System.get_env("SYMPHONY_ALLOW_LINEAR_GRAPHQL_MUTATIONS") == "true" ->
+        :ok
+
+      true ->
+        {:error, :linear_graphql_mutation_not_allowed}
+    end
+  end
+
+  defp mutation_document?(query) when is_binary(query) do
+    Regex.match?(~r/(^|[\s{])mutation\b/i, query)
   end
 
   defp graphql_response(response) do
@@ -164,6 +185,14 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     %{
       "error" => %{
         "message" => "`linear_graphql.variables` must be a JSON object when provided."
+      }
+    }
+  end
+
+  defp tool_error_payload(:linear_graphql_mutation_not_allowed) do
+    %{
+      "error" => %{
+        "message" => "`linear_graphql` only allows read-only queries by default. Set `SYMPHONY_ALLOW_LINEAR_GRAPHQL_MUTATIONS=true` for trusted mutation workflows."
       }
     }
   end

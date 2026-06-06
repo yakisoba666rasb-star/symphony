@@ -7,7 +7,17 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, GitHubPrPublisher, HermesDelegation, ReviewRunner, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{
+    AgentRunner,
+    Config,
+    GitHubPrPublisher,
+    HermesDelegation,
+    ReviewRunner,
+    StatusDashboard,
+    Tracker,
+    Workspace
+  }
+
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -217,22 +227,7 @@ defmodule SymphonyElixir.Orchestrator do
           )
 
         :missing ->
-          if has_workspace_path?(running_entry) do
-            error = "no branch name available for GitHub PR lookup"
-            Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
-            block_issue_from_entry(state, issue_id, running_entry, error)
-          else
-            Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
-
-            state
-            |> complete_issue(issue_id)
-            |> schedule_issue_retry(issue_id, 1, %{
-              identifier: running_entry.identifier,
-              delay_type: :continuation,
-              worker_host: Map.get(running_entry, :worker_host),
-              workspace_path: Map.get(running_entry, :workspace_path)
-            })
-          end
+          handle_normal_completion_without_branch(state, issue_id, running_entry, session_id)
       end
     end
   end
@@ -250,6 +245,27 @@ defmodule SymphonyElixir.Orchestrator do
 
       true ->
         retry_agent_down(state, issue_id, running_entry, session_id, reason)
+    end
+  end
+
+  defp handle_normal_completion_without_branch(state, issue_id, running_entry, session_id) do
+    if has_workspace_path?(running_entry) do
+      error = "no branch name available for GitHub PR lookup"
+
+      Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+
+      block_issue_from_entry(state, issue_id, running_entry, error)
+    else
+      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+      state
+      |> complete_issue(issue_id)
+      |> schedule_issue_retry(issue_id, 1, %{
+        identifier: running_entry.identifier,
+        delay_type: :continuation,
+        worker_host: Map.get(running_entry, :worker_host),
+        workspace_path: Map.get(running_entry, :workspace_path)
+      })
     end
   end
 
@@ -341,7 +357,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp publish_pr_for_branch(workspace_path, branch_name, running_entry)
        when is_binary(workspace_path) and is_binary(branch_name) do
-    github_pr_publisher_module().publish_workspace(workspace_path, branch_name, issue_for_publish(running_entry, branch_name))
+    github_pr_publisher_module().publish_workspace(
+      workspace_path,
+      branch_name,
+      issue_for_publish(running_entry, branch_name)
+    )
   end
 
   defp issue_for_publish(%{issue: %Issue{} = issue}, branch_name), do: %{issue | branch_name: issue.branch_name || branch_name}
@@ -1243,9 +1263,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp review_handoff_block_state do
     active_states = Config.settings!().tracker.active_states
 
-    Enum.find(active_states, "Backlog", fn state ->
-      normalize_issue_state(state) == "rework"
-    end)
+    Enum.find(active_states, fn state -> normalize_issue_state(state) == "rework" end) ||
+      Enum.find(active_states, "In Progress", fn state -> normalize_issue_state(state) == "in progress" end)
   end
 
   defp move_review_handoff_issue_to_block_state(issue_id, issue_identifier, target_state)
@@ -1334,7 +1353,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp comment_on_blocked_issue(issue_id, running_entry, error) when is_binary(issue_id) do
     identifier = Map.get(running_entry, :identifier, issue_id)
-    body = "Symphony blocked #{identifier}.\n\nReason: #{error}"
+    body = Config.blocked_issue_comment(identifier, error)
 
     case tracker_module().create_comment(issue_id, body) do
       :ok ->

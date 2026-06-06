@@ -3,14 +3,16 @@ defmodule SymphonyElixir.SSH do
 
   @spec run(String.t(), String.t(), keyword()) :: {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
   def run(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
-    with {:ok, executable} <- ssh_executable() do
-      {:ok, System.cmd(executable, ssh_args(host, command), opts)}
+    with {:ok, target} <- parse_target(host),
+         {:ok, executable} <- ssh_executable() do
+      {:ok, System.cmd(executable, ssh_args(target, command), opts)}
     end
   end
 
   @spec start_port(String.t(), String.t(), keyword()) :: {:ok, port()} | {:error, term()}
   def start_port(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
-    with {:ok, executable} <- ssh_executable() do
+    with {:ok, target} <- parse_target(host),
+         {:ok, executable} <- ssh_executable() do
       line_bytes = Keyword.get(opts, :line)
 
       port_opts =
@@ -18,7 +20,7 @@ defmodule SymphonyElixir.SSH do
           :binary,
           :exit_status,
           :stderr_to_stdout,
-          args: Enum.map(ssh_args(host, command), &String.to_charlist/1)
+          args: Enum.map(ssh_args(target, command), &String.to_charlist/1)
         ]
         |> maybe_put_line_option(line_bytes)
 
@@ -38,14 +40,12 @@ defmodule SymphonyElixir.SSH do
     end
   end
 
-  defp ssh_args(host, command) do
-    %{destination: destination, port: port} = parse_target(host)
-
+  defp ssh_args(%{destination: destination, port: port}, command) do
     []
     |> maybe_put_config()
     |> Kernel.++(["-T"])
     |> maybe_put_port(port)
-    |> Kernel.++([destination, remote_shell_command(command)])
+    |> Kernel.++(["--", destination, remote_shell_command(command)])
   end
 
   defp maybe_put_line_option(port_opts, nil), do: port_opts
@@ -67,25 +67,47 @@ defmodule SymphonyElixir.SSH do
   defp parse_target(target) when is_binary(target) do
     trimmed_target = String.trim(target)
 
+    if invalid_destination?(trimmed_target) do
+      {:error, {:invalid_ssh_target, target}}
+    else
+      parse_valid_target(trimmed_target)
+    end
+  end
+
+  defp parse_valid_target(trimmed_target) do
     # OpenSSH does not interpret bare "host:port" as "host + port"; it treats the
     # whole value as a hostname and leaves the port at 22. We split that shorthand
     # here so worker config can use "localhost:2222" without requiring ssh:// URIs.
     case Regex.run(~r/^(.*):(\d+)$/, trimmed_target, capture: :all_but_first) do
-      [destination, port] ->
-        if valid_port_destination?(destination) do
-          %{destination: destination, port: port}
-        else
-          %{destination: trimmed_target, port: nil}
-        end
+      [destination, port] -> parse_host_port_target(trimmed_target, destination, port)
+      _ -> {:ok, %{destination: trimmed_target, port: nil}}
+    end
+  end
 
-      _ ->
-        %{destination: trimmed_target, port: nil}
+  defp parse_host_port_target(trimmed_target, destination, port) do
+    if valid_port_destination?(destination) and valid_port?(port) do
+      {:ok, %{destination: destination, port: port}}
+    else
+      {:ok, %{destination: trimmed_target, port: nil}}
     end
   end
 
   defp valid_port_destination?(destination) when is_binary(destination) do
-    destination != "" and
+    not invalid_destination?(destination) and
       (not String.contains?(destination, ":") or bracketed_host?(destination))
+  end
+
+  defp invalid_destination?(destination) when is_binary(destination) do
+    destination == "" or
+      String.starts_with?(destination, "-") or
+      String.contains?(destination, ["\n", "\r", <<0>>])
+  end
+
+  defp valid_port?(port) when is_binary(port) do
+    case Integer.parse(port) do
+      {value, ""} -> value in 1..65_535
+      _ -> false
+    end
   end
 
   defp bracketed_host?(destination) when is_binary(destination) do

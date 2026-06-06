@@ -637,6 +637,36 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "snapshot_unavailable"
   end
 
+  test "observability API requires local access or bearer token" do
+    snapshot = static_snapshot()
+    orchestrator_name = Module.concat(__MODULE__, :ProtectedApiOrchestrator)
+
+    start_supervised!({StaticOrchestrator, name: orchestrator_name, snapshot: snapshot})
+
+    start_test_endpoint(
+      orchestrator: orchestrator_name,
+      observability_token: "test-observability-token",
+      snapshot_timeout_ms: 50
+    )
+
+    forbidden_conn =
+      build_conn()
+      |> Map.put(:remote_ip, {203, 0, 113, 10})
+      |> get("/api/v1/state")
+
+    assert forbidden_conn.status == 403
+    assert Jason.decode!(forbidden_conn.resp_body)["error"]["code"] == "forbidden"
+
+    authorized_conn =
+      build_conn()
+      |> Map.put(:remote_ip, {203, 0, 113, 10})
+      |> Plug.Conn.put_req_header("authorization", "Bearer test-observability-token")
+      |> get("/api/v1/state")
+
+    assert authorized_conn.status == 200
+    assert Jason.decode!(authorized_conn.resp_body)["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1}
+  end
+
   test "http server serves embedded assets, accepts form posts, and rejects invalid hosts" do
     spec = HttpServer.child_spec(port: 0)
     assert spec.id == HttpServer
@@ -698,6 +728,9 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert method_not_allowed_response.status == 405
     assert method_not_allowed_response.body["error"]["code"] == "method_not_allowed"
+
+    assert {:error, {:public_observability_bind_requires_opt_in, "0.0.0.0"}} =
+             HttpServer.start_link(host: "0.0.0.0", port: 0)
 
     assert {:error, _reason} = HttpServer.start_link(host: "bad host", port: 0)
   end

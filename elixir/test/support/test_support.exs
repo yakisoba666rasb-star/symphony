@@ -131,6 +131,7 @@ defmodule SymphonyElixir.TestSupport do
           observability_render_interval_ms: 16,
           server_port: nil,
           server_host: nil,
+          review_blocked_comment_template: nil,
           prompt: @workflow_prompt
         ],
         overrides
@@ -175,6 +176,7 @@ defmodule SymphonyElixir.TestSupport do
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
+    review_blocked_comment_template = Keyword.get(config, :review_blocked_comment_template)
     prompt = Keyword.get(config, :prompt)
 
     sections =
@@ -212,6 +214,7 @@ defmodule SymphonyElixir.TestSupport do
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
+        review_yaml(review_blocked_comment_template),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
         "---",
@@ -284,6 +287,16 @@ defmodule SymphonyElixir.TestSupport do
       "  clone_protocol: #{yaml_value(clone_protocol)}"
     ]
     |> Enum.reject(&(&1 in [nil, false]))
+    |> Enum.join("\n")
+  end
+
+  defp review_yaml(nil), do: nil
+
+  defp review_yaml(blocked_comment_template) do
+    [
+      "review:",
+      "  blocked_comment_template: #{yaml_value(blocked_comment_template)}"
+    ]
     |> Enum.join("\n")
   end
 

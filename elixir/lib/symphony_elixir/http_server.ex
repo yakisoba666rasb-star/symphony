@@ -24,7 +24,8 @@ defmodule SymphonyElixir.HttpServer do
         orchestrator = Keyword.get(opts, :orchestrator, Orchestrator)
         snapshot_timeout_ms = Keyword.get(opts, :snapshot_timeout_ms, 15_000)
 
-        with {:ok, ip} <- parse_host(host) do
+        with :ok <- authorize_bind_host(host),
+             {:ok, ip} <- parse_host(host) do
           endpoint_opts = [
             server: true,
             http: [ip: ip, port: port],
@@ -81,6 +82,19 @@ defmodule SymphonyElixir.HttpServer do
   defp normalize_host(host) when host in ["", nil], do: "127.0.0.1"
   defp normalize_host(host) when is_binary(host), do: host
   defp normalize_host(host), do: to_string(host)
+
+  defp authorize_bind_host(host) do
+    if local_bind_host?(host) or System.get_env("SYMPHONY_ALLOW_PUBLIC_OBSERVABILITY") == "true" do
+      :ok
+    else
+      {:error, {:public_observability_bind_requires_opt_in, host}}
+    end
+  end
+
+  defp local_bind_host?(host) when host in [nil, "", "localhost", "127.0.0.1", "::1", "[::1]"], do: true
+  defp local_bind_host?({127, _, _, _}), do: true
+  defp local_bind_host?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  defp local_bind_host?(_host), do: false
 
   defp secret_key_base do
     Base.encode64(:crypto.strong_rand_bytes(@secret_key_bytes), padding: false)

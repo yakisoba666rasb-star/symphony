@@ -166,8 +166,28 @@ defmodule SymphonyElixir.Config.Schema do
     def changeset(schema, attrs) do
       schema
       |> cast(attrs, [:ssh_hosts, :max_concurrent_agents_per_host], empty_values: [])
+      |> validate_change(:ssh_hosts, &validate_ssh_hosts/2)
       |> validate_number(:max_concurrent_agents_per_host, greater_than: 0)
     end
+
+    defp validate_ssh_hosts(field, values) when is_list(values) do
+      values
+      |> Enum.reject(&valid_ssh_host?/1)
+      |> case do
+        [] -> []
+        _invalid -> [{field, "must contain non-empty SSH destinations that do not start with '-' or contain control characters"}]
+      end
+    end
+
+    defp valid_ssh_host?(value) when is_binary(value) do
+      trimmed = String.trim(value)
+
+      trimmed != "" and
+        not String.starts_with?(trimmed, "-") and
+        not String.contains?(trimmed, ["\n", "\r", <<0>>])
+    end
+
+    defp valid_ssh_host?(_value), do: false
   end
 
   defmodule Agent do
@@ -235,6 +255,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:reviewer_model, :string)
       field(:implementer_profile, :string)
       field(:reviewer_profile, :string)
+      field(:blocked_comment_template, :string, default: "Symphony blocked {{ identifier }}.\n\nReason: {{ reason }}")
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -255,7 +276,8 @@ defmodule SymphonyElixir.Config.Schema do
           :implementer_model,
           :reviewer_model,
           :implementer_profile,
-          :reviewer_profile
+          :reviewer_profile,
+          :blocked_comment_template
         ],
         empty_values: []
       )

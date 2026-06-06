@@ -121,14 +121,14 @@ defmodule SymphonyElixir.Workspace do
   defp cleanup_created_workspace_after_create_failure(_workspace, _worker_host, false, _reason), do: :ok
 
   defp cleanup_created_workspace_after_create_failure(workspace, nil, true, reason) do
-    Logger.warning("Removing newly-created workspace after after_create failure workspace=#{workspace} reason=#{inspect(reason)}")
+    Logger.warning("Removing newly-created workspace after after_create failure workspace=#{workspace} reason=#{sanitize_reason_for_log(reason)}")
     File.rm_rf(workspace)
     :ok
   end
 
   defp cleanup_created_workspace_after_create_failure(workspace, worker_host, true, reason)
        when is_binary(worker_host) do
-    Logger.warning("Removing newly-created remote workspace after after_create failure workspace=#{workspace} worker_host=#{worker_host} reason=#{inspect(reason)}")
+    Logger.warning("Removing newly-created remote workspace after after_create failure workspace=#{workspace} worker_host=#{worker_host} reason=#{sanitize_reason_for_log(reason)}")
 
     script =
       [
@@ -149,7 +149,8 @@ defmodule SymphonyElixir.Workspace do
         :ok
 
       {:error, cleanup_reason} ->
-        Logger.warning("Failed to remove workspace after after_create failure workspace=#{workspace} worker_host=#{worker_host} reason=#{inspect(cleanup_reason)}")
+        Logger.warning("Failed to remove workspace after after_create failure workspace=#{workspace} worker_host=#{worker_host} reason=#{sanitize_reason_for_log(cleanup_reason)}")
+
         :ok
     end
   end
@@ -290,25 +291,28 @@ defmodule SymphonyElixir.Workspace do
 
       entries
       |> Enum.map(&Path.join(root, &1))
-      |> Enum.reduce({[], []}, fn path, {removed, kept} ->
-        case dirty_workspace_timestamp(path) do
-          {:ok, timestamp} ->
-            if DateTime.compare(timestamp, cutoff) == :lt do
-              File.rm_rf(path)
-              {[path | removed], kept}
-            else
-              {removed, [path | kept]}
-            end
-
-          :error ->
-            {removed, kept}
-        end
-      end)
+      |> Enum.reduce({[], []}, &remove_or_keep_dirty_workspace(&1, cutoff, &2))
       |> then(fn {removed, kept} -> {:ok, %{removed: Enum.reverse(removed), kept: Enum.reverse(kept)}} end)
     else
       false -> {:ok, %{removed: [], kept: []}}
       {:error, :enoent} -> {:ok, %{removed: [], kept: []}}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp remove_or_keep_dirty_workspace(path, cutoff, {removed, kept}) do
+    case dirty_workspace_timestamp(path) do
+      {:ok, timestamp} -> remove_or_keep_timestamped_workspace(path, timestamp, cutoff, {removed, kept})
+      :error -> {removed, kept}
+    end
+  end
+
+  defp remove_or_keep_timestamped_workspace(path, timestamp, cutoff, {removed, kept}) do
+    if DateTime.compare(timestamp, cutoff) == :lt do
+      File.rm_rf(path)
+      {[path | removed], kept}
+    else
+      {removed, [path | kept]}
     end
   end
 
@@ -507,7 +511,10 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp sanitize_hook_output_for_log(output, max_bytes \\ 2_048) do
-    binary_output = IO.iodata_to_binary(output)
+    binary_output =
+      output
+      |> IO.iodata_to_binary()
+      |> redact_secret_values()
 
     case byte_size(binary_output) <= max_bytes do
       true ->
@@ -516,6 +523,21 @@ defmodule SymphonyElixir.Workspace do
       false ->
         binary_part(binary_output, 0, max_bytes) <> "... (truncated)"
     end
+  end
+
+  defp redact_secret_values(output) when is_binary(output) do
+    output
+    |> then(&Regex.replace(~r/\b(authorization:\s*bearer\s+)[^\s"']+/i, &1, "\\1[REDACTED]"))
+    |> then(&Regex.replace(~r/\b((?:api[_-]?key|token|secret|password)=)[^\s"']+/i, &1, "\\1[REDACTED]"))
+    |> then(&Regex.replace(~r/\b(LINEAR_API_KEY=)[^\s"']+/i, &1, "\\1[REDACTED]"))
+    |> then(&Regex.replace(~r/\b(ghp_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)/, &1, "[REDACTED]"))
+    |> then(&Regex.replace(~r/\b(xox[baprs]-[A-Za-z0-9-]+)/, &1, "[REDACTED]"))
+  end
+
+  defp sanitize_reason_for_log(reason) do
+    reason
+    |> inspect()
+    |> redact_secret_values()
   end
 
   defp validate_workspace_path(workspace, nil) when is_binary(workspace) do

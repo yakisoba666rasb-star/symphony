@@ -14,7 +14,7 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
         send(parent, {:command, cmd, args, opts})
 
         case {cmd, args} do
-          {"/bin/git", ["-C", "/work/LAB-236", "status", "--porcelain"]} ->
+          {"/bin/git", ["-C", "/work/LAB-236", "status", "--porcelain", "--", "." | _pathspecs]} ->
             {:ok, {" M docs/file.md\n?? docs/new.md\n", 0}}
 
           {"/bin/git", ["-C", "/work/LAB-236", "remote", "get-url", "origin"]} ->
@@ -28,6 +28,9 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
 
           {"/bin/git", ["-C", "/work/LAB-236", "diff", "--cached", "--quiet"]} ->
             {:ok, {"", 1}}
+
+          {"/bin/git", ["-C", "/work/LAB-236", "rev-parse", "--git-dir"]} ->
+            {:ok, {".git\n", 0}}
 
           {"/bin/git", ["-C", "/work/LAB-236" | _rest]} ->
             {:ok, {"", 0}}
@@ -44,7 +47,8 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
                    "url" => "https://github.com/octo/repo/pull/236",
                    "headRefName" => "aenima611111/lab-236",
                    "isDraft" => true,
-                   "mergeStateStatus" => "UNKNOWN"
+                   "mergeStateStatus" => "UNKNOWN",
+                   "state" => "OPEN"
                  }
                ]),
                0
@@ -64,7 +68,8 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
              GitHubPrPublisher.publish_workspace("/work/LAB-236", "aenima611111/lab-236", issue, deps)
 
     assert_received {:command, "/bin/git", ["-C", "/work/LAB-236", "checkout", "-B", "aenima611111/lab-236"], _opts}
-    assert_received {:command, "/bin/git", ["-C", "/work/LAB-236", "push", "-u", "origin", "HEAD:refs/heads/aenima611111/lab-236"], _opts}
+    assert_received {:command, "/bin/git", ["-C", "/work/LAB-236", "add", "-A", "--", ".", ":!.symphony-review-verdict.json", ":!.symphony-review-verdict-*.json"], _opts}
+    assert_received {:command, "/bin/git", ["-C", "/work/LAB-236", "push", "--force-with-lease", "-u", "origin", "HEAD:refs/heads/aenima611111/lab-236"], _opts}
 
     assert_received {:command, "/bin/gh",
                      [
@@ -93,7 +98,7 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
       find_git_bin: fn -> "/bin/git" end,
       find_gh_bin: fn -> "/bin/gh" end,
       run_command: fn
-        "/bin/git", ["-C", "/work/clean", "status", "--porcelain"], _opts -> {:ok, {"", 0}}
+        "/bin/git", ["-C", "/work/clean", "status", "--porcelain", "--", "." | _pathspecs], _opts -> {:ok, {"", 0}}
       end
     }
 
@@ -111,7 +116,7 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
         send(parent, {:command, cmd, args, opts})
 
         case {cmd, args} do
-          {"/bin/git", ["-C", "/work/LAB-238", "status", "--porcelain"]} ->
+          {"/bin/git", ["-C", "/work/LAB-238", "status", "--porcelain", "--", "." | _pathspecs]} ->
             {:ok, {" M lib/file.ex\n", 0}}
 
           {"/bin/git", ["-C", "/work/LAB-238", "remote", "get-url", "origin"]} ->
@@ -125,6 +130,9 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
 
           {"/bin/git", ["-C", "/work/LAB-238", "diff", "--cached", "--quiet"]} ->
             {:ok, {"", 1}}
+
+          {"/bin/git", ["-C", "/work/LAB-238", "rev-parse", "--git-dir"]} ->
+            {:ok, {".git\n", 0}}
 
           {"/bin/git", ["-C", "/work/LAB-238" | _rest]} ->
             {:ok, {"", 0}}
@@ -141,7 +149,8 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
                    "url" => "https://github.com/octo/repo/pull/238",
                    "headRefName" => "feature/lab-238",
                    "isDraft" => true,
-                   "mergeStateStatus" => "UNKNOWN"
+                   "mergeStateStatus" => "UNKNOWN",
+                   "state" => "OPEN"
                  }
                ]),
                0
@@ -154,8 +163,106 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
              GitHubPrPublisher.publish_workspace("/work/LAB-238", "feature/lab-238", %Issue{identifier: "LAB-238"}, deps)
 
     assert_received {:command, "/bin/git", ["-C", "/work/LAB-238", "commit", "-m", "LAB-238: Automated changes"], _opts}
-    assert_received {:command, "/bin/git", ["-C", "/work/LAB-238", "push", "-u", "origin", "HEAD:refs/heads/feature/lab-238"], _opts}
+    assert_received {:command, "/bin/git", ["-C", "/work/LAB-238", "push", "--force-with-lease", "-u", "origin", "HEAD:refs/heads/feature/lab-238"], _opts}
     assert_received {:command, "/bin/gh", ["pr", "create" | _rest], _opts}
     assert_received {:command, "/bin/gh", ["pr", "list" | _rest], _opts}
+  end
+
+  test "falls back to GitHub default branch when origin HEAD is unavailable" do
+    parent = self()
+
+    deps = %{
+      find_git_bin: fn -> "/bin/git" end,
+      find_gh_bin: fn -> "/bin/gh" end,
+      run_command: fn cmd, args, opts ->
+        send(parent, {:command, cmd, args, opts})
+
+        case {cmd, args} do
+          {"/bin/git", ["-C", "/work/master-repo", "status", "--porcelain", "--", "." | _pathspecs]} ->
+            {:ok, {" M README.md\n", 0}}
+
+          {"/bin/git", ["-C", "/work/master-repo", "remote", "get-url", "origin"]} ->
+            {:ok, {"git@github.com:octo/repo.git\n", 0}}
+
+          {"/bin/git", ["-C", "/work/master-repo", "rev-parse", "--abbrev-ref", "origin/HEAD"]} ->
+            {:ok, {"origin/HEAD\n", 0}}
+
+          {"/bin/gh", ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]} ->
+            {:ok, {"master\n", 0}}
+
+          {"/bin/git", ["-C", "/work/master-repo", "config", "--get", _key]} ->
+            {:ok, {"Test User\n", 0}}
+
+          {"/bin/git", ["-C", "/work/master-repo", "rev-parse", "--git-dir"]} ->
+            {:ok, {".git\n", 0}}
+
+          {"/bin/git", ["-C", "/work/master-repo", "diff", "--cached", "--quiet"]} ->
+            {:ok, {"", 1}}
+
+          {"/bin/git", ["-C", "/work/master-repo" | _rest]} ->
+            {:ok, {"", 0}}
+
+          {"/bin/gh", ["pr", "create" | _rest]} ->
+            {:ok, {"https://github.com/octo/repo/pull/240\n", 0}}
+
+          {"/bin/gh", ["pr", "list" | _rest]} ->
+            {:ok,
+             {Jason.encode!([
+                %{
+                  "number" => 240,
+                  "url" => "https://github.com/octo/repo/pull/240",
+                  "headRefName" => "feature/master",
+                  "isDraft" => true,
+                  "mergeStateStatus" => "UNKNOWN",
+                  "state" => "OPEN"
+                }
+              ]), 0}}
+        end
+      end
+    }
+
+    assert {:ok, %{"number" => 240}} =
+             GitHubPrPublisher.publish_workspace("/work/master-repo", "feature/master", %Issue{identifier: "LAB-240"}, deps)
+
+    assert_received {:command, "/bin/gh", ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"], _opts}
+    assert_received {:command, "/bin/gh", ["pr", "create", "--repo", "octo/repo", "--head", "feature/master", "--base", "master" | _rest], _opts}
+  end
+
+  test "returns an error when gh create succeeds without a PR URL and no existing PR is found" do
+    deps = %{
+      find_git_bin: fn -> "/bin/git" end,
+      find_gh_bin: fn -> "/bin/gh" end,
+      run_command: fn
+        "/bin/git", ["-C", "/work/no-url", "status", "--porcelain", "--", "." | _pathspecs], _opts ->
+          {:ok, {" M file.txt\n", 0}}
+
+        "/bin/git", ["-C", "/work/no-url", "remote", "get-url", "origin"], _opts ->
+          {:ok, {"git@github.com:octo/repo.git\n", 0}}
+
+        "/bin/git", ["-C", "/work/no-url", "rev-parse", "--abbrev-ref", "origin/HEAD"], _opts ->
+          {:ok, {"origin/main\n", 0}}
+
+        "/bin/git", ["-C", "/work/no-url", "config", "--get", _key], _opts ->
+          {:ok, {"Test User\n", 0}}
+
+        "/bin/git", ["-C", "/work/no-url", "rev-parse", "--git-dir"], _opts ->
+          {:ok, {".git\n", 0}}
+
+        "/bin/git", ["-C", "/work/no-url", "diff", "--cached", "--quiet"], _opts ->
+          {:ok, {"", 1}}
+
+        "/bin/git", ["-C", "/work/no-url" | _rest], _opts ->
+          {:ok, {"", 0}}
+
+        "/bin/gh", ["pr", "create" | _rest], _opts ->
+          {:ok, {"Created pull request successfully\n", 0}}
+
+        "/bin/gh", ["pr", "list" | _rest], _opts ->
+          {:ok, {"[]", 0}}
+      end
+    }
+
+    assert {:error, :pr_url_not_found} =
+             GitHubPrPublisher.publish_workspace("/work/no-url", "feature/no-url", %Issue{identifier: "LAB-241"}, deps)
   end
 end

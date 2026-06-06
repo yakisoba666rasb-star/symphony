@@ -10,6 +10,11 @@ defmodule SymphonyElixir.GitHubPrPublisher do
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.RepositoryResolver
 
+  @runtime_control_pathspecs [
+    ":!.symphony-review-verdict.json",
+    ":!.symphony-review-verdict-*.json"
+  ]
+
   @type pr_map() :: %{String.t() => term()}
 
   @type command_result ::
@@ -33,10 +38,16 @@ defmodule SymphonyElixir.GitHubPrPublisher do
          {:ok, base_branch} <- default_base_branch(workspace_path, git_bin, deps),
          :ok <- ensure_git_identity(workspace_path, git_bin, deps),
          :ok <- git_ok(workspace_path, git_bin, ["checkout", "-B", head_branch], deps),
-         :ok <- git_ok(workspace_path, git_bin, ["add", "-A"], deps),
+         :ok <- git_ok(workspace_path, git_bin, ["add", "-A", "--", "." | @runtime_control_pathspecs], deps),
          :ok <- ensure_staged_changes(workspace_path, git_bin, deps),
          :ok <- git_ok(workspace_path, git_bin, ["commit", "-m", commit_message(issue)], deps),
-         :ok <- git_ok(workspace_path, git_bin, ["push", "-u", "origin", "HEAD:refs/heads/#{head_branch}"], deps) do
+         :ok <-
+           git_ok(
+             workspace_path,
+             git_bin,
+             ["push", "--force-with-lease", "-u", "origin", "HEAD:refs/heads/#{head_branch}"],
+             deps
+           ) do
       publish_or_refresh_pr(workspace_path, gh_bin, repo, head_branch, base_branch, issue, deps)
     end
   end
@@ -60,7 +71,7 @@ defmodule SymphonyElixir.GitHubPrPublisher do
   end
 
   defp ensure_workspace_has_changes(workspace_path, git_bin, deps) do
-    case git_output(workspace_path, git_bin, ["status", "--porcelain"], deps) do
+    case git_output(workspace_path, git_bin, ["status", "--porcelain", "--", "." | @runtime_control_pathspecs], deps) do
       {:ok, ""} -> {:error, :no_workspace_changes}
       {:ok, _status} -> :ok
       {:error, reason} -> {:error, reason}
@@ -69,16 +80,20 @@ defmodule SymphonyElixir.GitHubPrPublisher do
 
   defp default_base_branch(workspace_path, git_bin, deps) do
     case git_output(workspace_path, git_bin, ["rev-parse", "--abbrev-ref", "origin/HEAD"], deps) do
-      {:ok, "origin/" <> branch} when branch != "" -> {:ok, branch}
-      {:ok, branch} when branch != "" -> {:ok, branch}
-      _other -> {:ok, "main"}
+      {:ok, "origin/HEAD"} -> default_base_branch_from_github(workspace_path, deps)
+      {:ok, "origin/" <> branch} when branch not in ["", "HEAD"] -> {:ok, branch}
+      {:ok, branch} when branch not in ["", "HEAD"] -> {:ok, branch}
+      _other -> default_base_branch_from_github(workspace_path, deps)
     end
   end
 
   defp ensure_git_identity(workspace_path, git_bin, deps) do
-    with :ok <- ensure_git_config(workspace_path, git_bin, "user.name", "Symphony Runtime", deps),
-         :ok <- ensure_git_config(workspace_path, git_bin, "user.email", "symphony-runtime@users.noreply.github.com", deps) do
-      :ok
+    case ensure_git_config(workspace_path, git_bin, "user.name", "Symphony Runtime", deps) do
+      :ok ->
+        ensure_git_config(workspace_path, git_bin, "user.email", "symphony-runtime@users.noreply.github.com", deps)
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -116,7 +131,7 @@ defmodule SymphonyElixir.GitHubPrPublisher do
     ]
 
     case run_command(gh_bin, args, deps, cd: workspace_path, stderr_to_stdout: true) do
-      {:ok, {output, 0}} -> {:ok, extract_pr_url(output)}
+      {:ok, {output, 0}} -> extract_pr_url(output)
       {:ok, {output, status}} -> {:error, {:gh_pr_create_failed, status, output}}
       {:error, reason} -> {:error, {:gh_pr_create_failed, reason}}
     end
@@ -152,6 +167,26 @@ defmodule SymphonyElixir.GitHubPrPublisher do
       {:ok, {output, 0}} -> {:ok, String.trim(output)}
       {:ok, {output, status}} -> {:error, {:git_command_failed, args, status, output}}
       {:error, reason} -> {:error, {:git_command_failed, args, reason}}
+    end
+  end
+
+  defp default_base_branch_from_github(workspace_path, deps) do
+    with {:ok, gh_bin} <- find_binary(deps, :find_gh_bin, :gh_not_found),
+         {:ok, {output, 0}} <-
+           run_command(
+             gh_bin,
+             ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"],
+             deps,
+             cd: workspace_path,
+             stderr_to_stdout: true
+           ),
+         branch when branch != "" <- String.trim(output) do
+      {:ok, branch}
+    else
+      {:ok, {output, status}} -> {:error, {:gh_default_branch_failed, status, output}}
+      {:error, reason} -> {:error, {:gh_default_branch_failed, reason}}
+      "" -> {:error, :default_branch_not_found}
+      nil -> {:error, :default_branch_not_found}
     end
   end
 
@@ -235,6 +270,10 @@ defmodule SymphonyElixir.GitHubPrPublisher do
   defp extract_pr_url(output) do
     output
     |> String.split(~r/\s+/, trim: true)
-    |> Enum.find(String.trim(output), &String.starts_with?(&1, "https://"))
+    |> Enum.find(&String.starts_with?(&1, "https://"))
+    |> case do
+      nil -> {:error, :pr_url_not_found}
+      url -> {:ok, url}
+    end
   end
 end

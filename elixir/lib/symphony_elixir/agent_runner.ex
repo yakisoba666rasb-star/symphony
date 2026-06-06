@@ -115,7 +115,16 @@ defmodule SymphonyElixir.AgentRunner do
         Logger.info("Workspace has uncommitted changes after normal turn for #{issue_context(issue)}; stopping for runtime PR handoff")
         :ok
       else
-        continue_after_clean_turn(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns)
+        continue_after_clean_turn(
+          app_session,
+          workspace,
+          issue,
+          codex_update_recipient,
+          opts,
+          issue_state_fetcher,
+          turn_number,
+          max_turns
+        )
       end
     end
   end

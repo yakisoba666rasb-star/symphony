@@ -133,6 +133,7 @@ Notes:
   - `codex.thread_sandbox` defaults to `workspace-write`
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
+- Symphony does not auto-approve app-server approval requests from `codex.approval_policy: never` unless `SYMPHONY_ALLOW_UNSAFE_CODEX_AUTO_APPROVE=true` is set.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
@@ -168,6 +169,12 @@ codex:
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+- The JSON API only accepts loopback requests by default. For trusted remote API access, set
+  `SYMPHONY_OBSERVABILITY_TOKEN` and send `Authorization: Bearer <token>`.
+- Binding the observability server to a non-loopback host requires
+  `SYMPHONY_ALLOW_PUBLIC_OBSERVABILITY=true`.
+- The `linear_graphql` tool allows read-only GraphQL queries by default. Trusted mutation workflows
+  must opt in with `SYMPHONY_ALLOW_LINEAR_GRAPHQL_MUTATIONS=true`.
 
 ## Web dashboard
 
