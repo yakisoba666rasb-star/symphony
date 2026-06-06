@@ -1332,7 +1332,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       merge_decision: human_required_after_approve_equivalent
       auto_merge: false
       max_review_fix_loops: 5
-      implementer_model: gpt-5.3-codex-spark
+      implementer_model: gpt-5.5
       implementer_profile: implementer
       reviewer_model: gpt-5.5
       reviewer_profile: reviewer
@@ -1352,7 +1352,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.max_review_fix_loops() == 5
 
     assert Config.review_role_codex_options(:implementer) == [
-             codex_command: "codex --config 'model=\"gpt-5.3-codex-spark\"' --profile 'implementer' app-server"
+             codex_command: "codex --config 'model=\"gpt-5.5\"' --profile 'implementer' app-server"
            ]
 
     assert Config.review_role_codex_options(:reviewer) == [
@@ -1375,7 +1375,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         merge_decision: human_required_after_approve_equivalent
         auto_merge: false
         max_review_fix_loops: 7
-        implementer_model: gpt-5.3-codex-spark
+        implementer_model: gpt-5.5
         implementer_profile: implementer
         reviewer_model: gpt-5.5
         reviewer_profile: reviewer
@@ -1394,7 +1394,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.max_review_fix_loops() == 7
 
     assert Config.review_role_codex_options(:implementer) == [
-             codex_command: "codex --config 'model=\"gpt-5.3-codex-spark\"' --profile 'implementer' app-server"
+             codex_command: "codex --config 'model=\"gpt-5.5\"' --profile 'implementer' app-server"
            ]
 
     assert Config.review_role_codex_options(:reviewer) == [
