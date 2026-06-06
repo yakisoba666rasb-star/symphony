@@ -173,11 +173,27 @@ defmodule SymphonyElixir.CoreTest do
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
     assert Map.get(hooks, "after_create") =~ "git clone"
-    assert Map.get(hooks, "after_create") =~ "yakisoba666rasb-star/Symphony-Ryo-Lab"
+    assert Map.get(hooks, "after_create") =~ "your-org/your-repo"
+
+    workflow_text = File.read!(Path.expand("WORKFLOW.md", File.cwd!()))
+    refute workflow_text =~ "yakisoba666rasb-star/Symphony-Ryo-Lab"
+    refute workflow_text =~ "kasotuosawari-design/auto_template"
+    refute workflow_text =~ "symphony-ryo-fd7f55525d1a"
+    refute workflow_text =~ "danger-full-access"
+    refute workflow_text =~ "/home/ryo/"
+    refute workflow_text =~ "Slack"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
     assert Config.workflow_prompt() == prompt
+  end
+
+  test "README run examples include guardrails acknowledgement flag" do
+    readme = File.read!(Path.expand("README.md", File.cwd!()))
+
+    assert readme =~ "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
+    assert readme =~ "mise exec -- ./bin/symphony"
+    assert readme =~ "./bin/symphony \\\n  --i-understand-that-this-will-be-running-without-the-usual-guardrails \\\n  /path/to/custom/WORKFLOW.md"
   end
 
   test "linear api token resolves from LINEAR_API_KEY env var" do
@@ -1380,13 +1396,13 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
-    assert prompt =~ "Work on Linear issue `MT-616`"
-    assert prompt =~ "yakisoba666rasb-star/Symphony-Ryo-Lab"
+    assert prompt =~ "launched by Symphony for Linear issue"
+    assert prompt =~ "`MT-616`"
+    assert prompt =~ "your-org/your-repo"
     assert prompt =~ "Refs MT-616"
     assert prompt =~ "PR URL"
-    assert prompt =~ "Human"
-    assert prompt =~ "Do not merge any PR"
-    assert prompt =~ "final merge remains human-controlled"
+    assert prompt =~ "Leave final merge or closure to a human"
+    assert prompt =~ "Keep target-project code"
   end
 
   test "prompt builder adds continuation guidance for retries" do

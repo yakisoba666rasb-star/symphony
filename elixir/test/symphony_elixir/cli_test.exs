@@ -36,6 +36,7 @@ defmodule SymphonyElixir.CLITest do
     assert banner =~ "Codex will run without any guardrails."
     assert banner =~ "SymphonyElixir is not a supported product and is presented as-is."
     assert banner =~ @ack_flag
+    assert banner =~ "To proceed"
     refute_received :file_checked
     refute_received :workflow_set
     refute_received :logs_root_set
@@ -135,5 +136,11 @@ defmodule SymphonyElixir.CLITest do
     }
 
     assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
+  end
+
+  test "usage message includes the required guardrails acknowledgement flag" do
+    assert {:error, usage} = CLI.evaluate(["--unknown"])
+    assert usage =~ "Usage: symphony"
+    assert usage =~ @ack_flag
   end
 end
