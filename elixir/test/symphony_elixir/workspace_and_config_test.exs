@@ -1315,6 +1315,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "config parses review handoff and role runner settings" do
+    current_model = Config.current_codex_model()
+
     workflow = """
     ---
     tracker:
@@ -1332,9 +1334,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       merge_decision: human_required_after_approve_equivalent
       auto_merge: false
       max_review_fix_loops: 5
-      implementer_model: gpt-5.5
+      implementer_model: #{current_model}
       implementer_profile: implementer
-      reviewer_model: gpt-5.5
+      reviewer_model: #{current_model}
       reviewer_profile: reviewer
     ---
     """
@@ -1352,15 +1354,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.max_review_fix_loops() == 5
 
     assert Config.review_role_codex_options(:implementer) == [
-             codex_command: "codex --config 'model=\"gpt-5.5\"' --profile 'implementer' app-server"
+             codex_command: "codex --config 'model=\"#{current_model}\"' --profile 'implementer' app-server"
            ]
 
     assert Config.review_role_codex_options(:reviewer) == [
-             codex_command: "codex --config 'model=\"gpt-5.5\"' --profile 'reviewer' app-server"
+             codex_command: "codex --config 'model=\"#{current_model}\"' --profile 'reviewer' app-server"
            ]
   end
 
   test "config parses review workflow from x-lab-runtime" do
+    current_model = Config.current_codex_model()
+
     workflow = """
     ---
     review:
@@ -1375,9 +1379,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         merge_decision: human_required_after_approve_equivalent
         auto_merge: false
         max_review_fix_loops: 7
-        implementer_model: gpt-5.5
+        implementer_model: #{current_model}
         implementer_profile: implementer
-        reviewer_model: gpt-5.5
+        reviewer_model: #{current_model}
         reviewer_profile: reviewer
     ---
     """
@@ -1394,11 +1398,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.max_review_fix_loops() == 7
 
     assert Config.review_role_codex_options(:implementer) == [
-             codex_command: "codex --config 'model=\"gpt-5.5\"' --profile 'implementer' app-server"
+             codex_command: "codex --config 'model=\"#{current_model}\"' --profile 'implementer' app-server"
            ]
 
     assert Config.review_role_codex_options(:reviewer) == [
-             codex_command: "codex --config 'model=\"gpt-5.5\"' --profile 'reviewer' app-server"
+             codex_command: "codex --config 'model=\"#{current_model}\"' --profile 'reviewer' app-server"
            ]
   end
 
@@ -1422,6 +1426,32 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Config.blocked_issue_comment("LAB-2", "PRなし") ==
              "LAB-2 を停止しました。\n\n理由: PRなし"
+  end
+
+  test "config rejects retired Codex models in runtime command and review roles" do
+    [retired_model | _] = Config.retired_codex_models()
+
+    workflow = """
+    ---
+    tracker:
+      kind: linear
+      api_key: token
+      project_slug: project
+    codex:
+      command: codex --config 'model="#{retired_model}"' app-server
+    review:
+      implementer_model: #{retired_model}
+      reviewer_command: codex --config 'model="#{retired_model}"' --profile reviewer app-server
+    ---
+    """
+
+    File.write!(Workflow.workflow_file_path(), workflow)
+
+    assert {:error, {:retired_codex_model, message}} = Config.validate!()
+    assert message =~ retired_model
+    assert message =~ "codex.command"
+    assert message =~ "review.implementer_model"
+    assert message =~ "review.reviewer_command"
   end
 
   test "schema rejects unsupported review workflow policies" do
