@@ -163,6 +163,9 @@ defmodule SymphonyElixir.SSHTest do
 
     assert {:error, {:invalid_ssh_target, "localhost\nwhoami"}} =
              SSH.run("localhost\nwhoami", "printf ok")
+
+    assert {:error, {:invalid_ssh_target, "  "}} =
+             SSH.run("  ", "printf ok")
   end
 
   test "remote_shell_command/1 escapes embedded single quotes" do

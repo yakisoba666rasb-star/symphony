@@ -1162,6 +1162,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "worker.ssh_hosts"
 
+    write_workflow_file!(Workflow.workflow_file_path(), worker_ssh_hosts: ["worker-a", 123])
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "worker.ssh_hosts"
+
     write_workflow_file!(Workflow.workflow_file_path(), codex_turn_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.turn_timeout_ms"

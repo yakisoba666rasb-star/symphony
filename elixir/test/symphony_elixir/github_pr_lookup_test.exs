@@ -140,6 +140,26 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
              GitHubPrLookup.lookup_by_head("octo/repo", "feature/reused", deps)
   end
 
+  test "sorts candidate PRs by open state, draft status, merge state, and number" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn _gh, _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{"number" => 5, "state" => "CLOSED", "isDraft" => false, "mergeStateStatus" => "CLEAN"},
+            %{"number" => 6, "state" => "OPEN", "isDraft" => true, "mergeStateStatus" => "HAS_HOOKS"},
+            %{"number" => 7, "state" => "OPEN", "isDraft" => false, "mergeStateStatus" => "DIRTY"},
+            %{"number" => 8, "state" => "OPEN", "isDraft" => false, "mergeStateStatus" => "UNKNOWN"},
+            %{"number" => 9, "state" => "OPEN", "isDraft" => false, "mergeStateStatus" => "HAS_HOOKS"},
+            %{"number" => "10", "state" => "OPEN", "isDraft" => false, "mergeStateStatus" => "BLOCKED"}
+          ]), 0}}
+      end
+    }
+
+    assert {:ok, %{"number" => 9, "mergeStateStatus" => "HAS_HOOKS"}} =
+             GitHubPrLookup.lookup_by_head("octo/repo", "feature/sorted", deps)
+  end
+
   test "returns error when gh binary is missing" do
     deps = %{find_gh_bin: fn -> nil end, run_command: fn _gh, _args, _opts -> {:error, :unused} end}
 
@@ -154,6 +174,16 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
 
     assert {:error, {:gh_command_failed, :no_such_file}} =
              GitHubPrLookup.lookup_by_head("octo/repo", "feature/fail", deps)
+  end
+
+  test "returns error when gh command exits with a non-zero status" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn _gh, _args, _opts -> {:ok, {"bad credentials", 4}} end
+    }
+
+    assert {:error, {:gh_command_failed, 4}} =
+             GitHubPrLookup.lookup_by_head("octo/repo", "feature/fail-status", deps)
   end
 
   test "accepts raw {output, status} shape from run_command" do
@@ -190,6 +220,30 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
 
     assert {:error, {:gh_json_error, _}} =
              GitHubPrLookup.lookup_by_head("octo/repo", "feature/bad-json", deps)
+  end
+
+  test "returns error when gh JSON payload is not a PR list" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn _gh, _args, _opts ->
+        {:ok, {Jason.encode!(%{"message" => "not a list"}), 0}}
+      end
+    }
+
+    assert {:error, :invalid_pr_payload} =
+             GitHubPrLookup.lookup_by_head("octo/repo", "feature/bad-payload", deps)
+  end
+
+  test "returns error when gh JSON list contains no PR maps" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn _gh, _args, _opts ->
+        {:ok, {Jason.encode!(["not-a-pr"]), 0}}
+      end
+    }
+
+    assert {:error, :invalid_pr_payload} =
+             GitHubPrLookup.lookup_by_head("octo/repo", "feature/no-pr-maps", deps)
   end
 
   test "resolves repository from SSH GitHub remote URL" do
