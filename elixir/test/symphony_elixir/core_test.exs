@@ -481,6 +481,118 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "review issue state falls back to In Progress when Rework is not active" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-in-progress-fallback-#{System.unique_integer([:positive])}"
+      )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_publisher = Application.get_env(:symphony_elixir, :github_pr_publisher)
+    previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_test_pid = Application.get_env(:symphony_elixir, :test_pid)
+    issue_id = "issue-review-no-rework"
+    issue_identifier = "MT-REVIEW-NO-REWORK"
+    workspace = Path.join(test_root, issue_identifier)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        tracker_active_states: ["Todo", "In Progress"],
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+        tracker_review_state: "In Review"
+      )
+
+      Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupNone)
+      Application.put_env(:symphony_elixir, :github_pr_publisher, FakeGitHubPrPublisherError)
+      Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerRecordsUpdates)
+      Application.put_env(:symphony_elixir, :test_pid, self())
+
+      File.mkdir_p!(test_root)
+      File.mkdir_p!(workspace)
+
+      agent_pid =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      state = %Orchestrator.State{
+        running: %{
+          issue_id => %{
+            pid: agent_pid,
+            ref: nil,
+            identifier: issue_identifier,
+            issue: %Issue{
+              id: issue_id,
+              state: "In Progress",
+              identifier: issue_identifier,
+              branch_name: "feature/no-rework"
+            },
+            workspace_path: workspace,
+            started_at: DateTime.utc_now()
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "In Review",
+        title: "Premature review",
+        description: "Review state without PR",
+        labels: []
+      }
+
+      updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+      assert_receive {:tracker_state_update, ^issue_id, "In Progress"}
+      assert_receive {:tracker_comment, ^issue_id, comment_body}
+      assert comment_body =~ "Symphony blocked #{issue_identifier}"
+      assert comment_body =~ "without discoverable GitHub PR"
+      refute Map.has_key?(updated_state.running, issue_id)
+      assert MapSet.member?(updated_state.claimed, issue_id)
+      refute Process.alive?(agent_pid)
+
+      assert %{
+               identifier: ^issue_identifier,
+               issue: %Issue{state: "In Progress"},
+               error: "issue moved to In Review without discoverable GitHub PR for branch feature/no-rework; runtime publish failed: :publish_blocked"
+             } = updated_state.blocked[issue_id]
+    after
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_publisher) do
+        Application.delete_env(:symphony_elixir, :github_pr_publisher)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_publisher, previous_publisher)
+      end
+
+      if is_nil(previous_tracker) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker)
+      end
+
+      if is_nil(previous_test_pid) do
+        Application.delete_env(:symphony_elixir, :test_pid)
+      else
+        Application.put_env(:symphony_elixir, :test_pid, previous_test_pid)
+      end
+
+      File.rm_rf(test_root)
+    end
+  end
+
   test "review issue state without existing PR publishes draft PR before completing handoff" do
     test_root =
       Path.join(

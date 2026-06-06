@@ -16,7 +16,7 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
     assert {:ok, nil} = GitHubPrLookup.lookup_by_head("octo/repo", "feature/no-pr", deps)
   end
 
-  test "returns the first PR from gh JSON output" do
+  test "returns the first open PR from gh JSON output" do
     parent = self()
 
     deps = %{
@@ -31,14 +31,16 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
               "url" => "https://github.com/octo/repo/pull/123",
               "headRefName" => "feature/head-branch",
               "isDraft" => false,
-              "mergeStateStatus" => "CLEAN"
+              "mergeStateStatus" => "CLEAN",
+              "state" => "OPEN"
             },
             %{
               "number" => 456,
               "url" => "https://github.com/octo/repo/pull/456",
               "headRefName" => "feature/other-branch",
               "isDraft" => true,
-              "mergeStateStatus" => "UNKNOWN"
+              "mergeStateStatus" => "UNKNOWN",
+              "state" => "OPEN"
             }
           ])
 
@@ -54,7 +56,8 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
              "url" => "https://github.com/octo/repo/pull/123",
              "headRefName" => "feature/head-branch",
              "isDraft" => false,
-             "mergeStateStatus" => "CLEAN"
+             "mergeStateStatus" => "CLEAN",
+             "state" => "OPEN"
            }
 
     assert_received {
@@ -66,13 +69,75 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
         "--repo",
         "octo/repo",
         "--state",
-        "all",
+        "open",
         "--json",
-        "number,url,headRefName,isDraft,mergeStateStatus",
+        "number,url,headRefName,isDraft,mergeStateStatus,state",
         "--head",
         "feature/head-branch"
       ]
     }
+  end
+
+  test "falls back to all states only when no open PR exists" do
+    parent = self()
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn gh, args, _opts ->
+        send(parent, {:command, gh, args})
+
+        case Enum.at(args, Enum.find_index(args, &(&1 == "--state")) + 1) do
+          "open" ->
+            {:ok, {"[]", 0}}
+
+          "all" ->
+            {:ok,
+             {Jason.encode!([
+                %{
+                  "number" => 10,
+                  "url" => "https://github.com/octo/repo/pull/10",
+                  "headRefName" => "feature/reused",
+                  "isDraft" => false,
+                  "mergeStateStatus" => "CLEAN",
+                  "state" => "MERGED"
+                }
+              ]), 0}}
+        end
+      end
+    }
+
+    assert {:ok, %{"number" => 10}} = GitHubPrLookup.lookup_by_head("octo/repo", "feature/reused", deps)
+
+    assert_received {:command, "/tmp/fake-gh", ["pr", "list", "--repo", "octo/repo", "--state", "open" | _]}
+    assert_received {:command, "/tmp/fake-gh", ["pr", "list", "--repo", "octo/repo", "--state", "all" | _]}
+  end
+
+  test "open PR lookup avoids stale closed PRs from all-state results" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn _gh, args, _opts ->
+        case Enum.at(args, Enum.find_index(args, &(&1 == "--state")) + 1) do
+          "open" ->
+            {:ok,
+             {Jason.encode!([
+                %{
+                  "number" => 12,
+                  "url" => "https://github.com/octo/repo/pull/12",
+                  "headRefName" => "feature/reused",
+                  "isDraft" => true,
+                  "mergeStateStatus" => "UNKNOWN",
+                  "state" => "OPEN"
+                }
+              ]), 0}}
+
+          "all" ->
+            flunk("all-state lookup should not run when open lookup finds a PR")
+        end
+      end
+    }
+
+    assert {:ok, %{"number" => 12, "state" => "OPEN"}} =
+             GitHubPrLookup.lookup_by_head("octo/repo", "feature/reused", deps)
   end
 
   test "returns error when gh binary is missing" do
@@ -102,7 +167,8 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
               "url" => "https://github.com/octo/repo/pull/999",
               "headRefName" => "feature/raw-shape",
               "isDraft" => false,
-              "mergeStateStatus" => "CLEAN"
+              "mergeStateStatus" => "CLEAN",
+              "state" => "OPEN"
             }
           ]),
           0
@@ -138,7 +204,9 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
           {:ok, {"git@github.com:octo/repo.git", 0}}
 
         "/tmp/fake-gh", _args, _opts ->
-          {:ok, {Jason.encode!([%{"number" => 1, "url" => "https://github.com/octo/repo/pull/1", "headRefName" => "feature/branch", "isDraft" => false, "mergeStateStatus" => "CLEAN"}]), 0}}
+          {:ok,
+           {Jason.encode!([%{"number" => 1, "url" => "https://github.com/octo/repo/pull/1", "headRefName" => "feature/branch", "isDraft" => false, "mergeStateStatus" => "CLEAN", "state" => "OPEN"}]),
+            0}}
       end
     }
 
@@ -158,7 +226,8 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
           {:ok, {"https://github.com/octo/repo.git", 0}}
 
         "/tmp/fake-gh", _args, _opts ->
-          {:ok, {Jason.encode!([%{"number" => 2, "url" => "https://github.com/octo/repo/pull/2", "headRefName" => "feature/http", "isDraft" => false, "mergeStateStatus" => "CLEAN"}]), 0}}
+          {:ok,
+           {Jason.encode!([%{"number" => 2, "url" => "https://github.com/octo/repo/pull/2", "headRefName" => "feature/http", "isDraft" => false, "mergeStateStatus" => "CLEAN", "state" => "OPEN"}]), 0}}
       end
     }
 
@@ -178,7 +247,9 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
           {:ok, {"git@github-yakisoba:octo/repo.git", 0}}
 
         "/tmp/fake-gh", _args, _opts ->
-          {:ok, {Jason.encode!([%{"number" => 3, "url" => "https://github.com/octo/repo/pull/3", "headRefName" => "feature/alias", "isDraft" => false, "mergeStateStatus" => "CLEAN"}]), 0}}
+          {:ok,
+           {Jason.encode!([%{"number" => 3, "url" => "https://github.com/octo/repo/pull/3", "headRefName" => "feature/alias", "isDraft" => false, "mergeStateStatus" => "CLEAN", "state" => "OPEN"}]),
+            0}}
       end
     }
 

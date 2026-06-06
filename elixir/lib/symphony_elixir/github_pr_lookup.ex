@@ -16,12 +16,8 @@ defmodule SymphonyElixir.GitHubPrLookup do
   def lookup_by_head(repo, head_branch, deps \\ runtime_deps())
       when is_binary(repo) and is_binary(head_branch) do
     with {:ok, gh_bin} <- find_gh_binary(deps) do
-      command = github_pr_list_args(repo, head_branch)
-
-      case normalize_command_result(deps.run_command.(gh_bin, command, stderr_to_stdout: true)) do
-        {:ok, {output, 0}} -> parse_gh_response(output)
-        {:ok, {_output, status}} -> {:error, {:gh_command_failed, status}}
-        {:error, reason} -> {:error, {:gh_command_failed, reason}}
+      with {:ok, nil} <- lookup_by_head_state(gh_bin, repo, head_branch, "open", deps) do
+        lookup_by_head_state(gh_bin, repo, head_branch, "all", deps)
       end
     end
   end
@@ -119,27 +115,65 @@ defmodule SymphonyElixir.GitHubPrLookup do
   end
 
   defp parse_gh_response(output) do
-    with {:ok, parsed} <- Jason.decode(output) do
-      case parsed do
-        [] -> {:ok, nil}
-        [%{} = first | _] -> {:ok, first}
-        _ -> {:error, :invalid_pr_payload}
-      end
-    else
+    case Jason.decode(output) do
+      {:ok, []} -> {:ok, nil}
+      {:ok, values} when is_list(values) -> pick_pr(values)
+      {:ok, _other} -> {:error, :invalid_pr_payload}
       {:error, reason} -> {:error, {:gh_json_error, reason}}
     end
   end
 
-  defp github_pr_list_args(repo, head_branch) do
+  defp lookup_by_head_state(gh_bin, repo, head_branch, state, deps) do
+    command = github_pr_list_args(repo, head_branch, state)
+
+    case normalize_command_result(deps.run_command.(gh_bin, command, stderr_to_stdout: true)) do
+      {:ok, {output, 0}} -> parse_gh_response(output)
+      {:ok, {_output, status}} -> {:error, {:gh_command_failed, status}}
+      {:error, reason} -> {:error, {:gh_command_failed, reason}}
+    end
+  end
+
+  defp pick_pr(values) do
+    values
+    |> Enum.filter(&is_map/1)
+    |> Enum.sort_by(&pr_sort_key/1)
+    |> case do
+      [] -> {:error, :invalid_pr_payload}
+      [first | _] -> {:ok, first}
+    end
+  end
+
+  defp pr_sort_key(pr) do
+    {
+      if(pr_state(pr) == "OPEN", do: 0, else: 1),
+      if(pr["isDraft"] == true, do: 1, else: 0),
+      pr_merge_state_rank(pr["mergeStateStatus"]),
+      -pr_number(pr)
+    }
+  end
+
+  defp pr_state(%{"state" => state}) when is_binary(state), do: String.upcase(state)
+  defp pr_state(_pr), do: nil
+
+  defp pr_merge_state_rank("CLEAN"), do: 0
+  defp pr_merge_state_rank("HAS_HOOKS"), do: 1
+  defp pr_merge_state_rank("UNKNOWN"), do: 2
+  defp pr_merge_state_rank("DIRTY"), do: 3
+  defp pr_merge_state_rank(_state), do: 4
+
+  defp pr_number(%{"number" => number}) when is_integer(number), do: number
+  defp pr_number(_pr), do: 0
+
+  defp github_pr_list_args(repo, head_branch, state) do
     [
       "pr",
       "list",
       "--repo",
       repo,
       "--state",
-      "all",
+      state,
       "--json",
-      "number,url,headRefName,isDraft,mergeStateStatus",
+      "number,url,headRefName,isDraft,mergeStateStatus,state",
       "--head",
       head_branch
     ]

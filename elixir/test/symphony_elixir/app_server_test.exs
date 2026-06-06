@@ -390,7 +390,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server auto-approves command execution approval requests when approval policy is never" do
+  test "app server requires command execution approval when policy is never without unsafe opt-in" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -465,7 +465,8 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Handle approval request", issue)
+      assert {:error, {:approval_required, %{"id" => 99}}} =
+               AppServer.run(workspace, "Handle approval request", issue)
 
       trace = File.read!(trace_file)
       lines = String.split(trace, "\n", trim: true)
@@ -510,14 +511,14 @@ defmodule SymphonyElixir.AppServerTest do
                end
              end)
 
-      assert Enum.any?(lines, fn line ->
+      refute Enum.any?(lines, fn line ->
                if String.starts_with?(line, "JSON:") do
                  payload =
                    line
                    |> String.trim_leading("JSON:")
                    |> Jason.decode!()
 
-                 payload["id"] == 99 and get_in(payload, ["result", "decision"]) == "acceptForSession"
+                 payload["id"] == 99 and is_map(payload["result"])
                else
                  false
                end
@@ -527,7 +528,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server auto-approves MCP tool approval prompts when approval policy is never" do
+  test "app server gives non-interactive answer for MCP tool approval prompts without unsafe opt-in" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -616,7 +617,7 @@ defmodule SymphonyElixir.AppServerTest do
 
                  payload["id"] == 110 and
                    get_in(payload, ["result", "answers", "mcp_tool_call_approval_call-717", "answers"]) ==
-                     ["Approve this Session"]
+                     ["This is a non-interactive session. Operator input is unavailable."]
                else
                  false
                end
@@ -1425,7 +1426,7 @@ defmodule SymphonyElixir.AppServerTest do
       lines = String.split(trace, "\n", trim: true)
 
       assert argv_line = Enum.find(lines, &String.starts_with?(&1, "ARGV:"))
-      assert argv_line =~ "-T -p 2200 worker-01 bash -lc"
+      assert argv_line =~ "-T -p 2200 -- worker-01 bash -lc"
       assert argv_line =~ "cd "
       assert argv_line =~ remote_workspace
       assert argv_line =~ "exec "

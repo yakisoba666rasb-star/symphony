@@ -1,10 +1,10 @@
 defmodule SymphonyElixir.WorkspaceAndConfigTest do
   use SymphonyElixir.TestSupport
   alias Ecto.Changeset
-  alias SymphonyElixir.RepositoryResolver
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.RepositoryResolver
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -424,6 +424,37 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {:error, {:workspace_hook_failed, "after_create", 17, _output}} =
                Workspace.create_for_issue("MT-FAIL")
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace redacts common secret patterns in failed hook logs" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-hook-redaction-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "printf 'LINEAR_API_KEY=lin_secret token=abc123 authorization: bearer ghp_secretvalue\\n' && exit 17"
+      )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, {:workspace_hook_failed, "after_create", 17, output}} =
+                   Workspace.create_for_issue("MT-REDACT")
+
+          assert output =~ "lin_secret"
+        end)
+
+      assert log =~ "LINEAR_API_KEY=[REDACTED]"
+      assert log =~ "token=[REDACTED]"
+      assert log =~ "authorization: bearer [REDACTED]"
+      refute log =~ "lin_secret"
+      refute log =~ "ghp_secretvalue"
     after
       File.rm_rf(workspace_root)
     end
@@ -1127,6 +1158,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "worker.max_concurrent_agents_per_host"
 
+    write_workflow_file!(Workflow.workflow_file_path(), worker_ssh_hosts: ["worker-a", "-oProxyCommand=touch /tmp/nope"])
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "worker.ssh_hosts"
+
     write_workflow_file!(Workflow.workflow_file_path(), codex_turn_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.turn_timeout_ms"
@@ -1361,6 +1396,28 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.review_role_codex_options(:reviewer) == [
              codex_command: "codex --config 'model=\"gpt-5.5\"' --profile 'reviewer' app-server"
            ]
+  end
+
+  test "blocked issue comment defaults to English and supports workflow override" do
+    assert Config.blocked_issue_comment("LAB-1", "missing PR") ==
+             "Symphony blocked LAB-1.\n\nReason: missing PR"
+
+    File.write!(Workflow.workflow_file_path(), """
+    ---
+    tracker:
+      kind: linear
+      api_key: token
+      project_slug: project
+    review:
+      blocked_comment_template: |
+        {{ identifier }} を停止しました。
+
+        理由: {{ reason }}
+    ---
+    """)
+
+    assert Config.blocked_issue_comment("LAB-2", "PRなし") ==
+             "LAB-2 を停止しました。\n\n理由: PRなし"
   end
 
   test "schema rejects unsupported review workflow policies" do
@@ -1784,7 +1841,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WS", "worker-01:2200")
 
       trace = File.read!(trace_file)
-      assert trace =~ "-p 2200 worker-01 bash -lc"
+      assert trace =~ "-p 2200 -- worker-01 bash -lc"
       assert trace =~ "__SYMPHONY_WORKSPACE__"
       assert trace =~ "~/.symphony-remote-workspaces/MT-SSH-WS"
       assert trace =~ "${workspace#~/}"

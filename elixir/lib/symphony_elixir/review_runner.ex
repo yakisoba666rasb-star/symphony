@@ -13,7 +13,7 @@ defmodule SymphonyElixir.ReviewRunner do
   alias SymphonyElixir.{Codex.AppServer, Config}
   alias SymphonyElixir.Linear.Issue
 
-  @verdict_file ".symphony-review-verdict.json"
+  @verdict_file_prefix ".symphony-review-verdict"
 
   @type verdict :: %{
           approved_equivalent: boolean(),
@@ -31,35 +31,48 @@ defmodule SymphonyElixir.ReviewRunner do
   end
 
   defp do_run_loop(workspace_path, issue, pr, loop_index, max_loops, opts) do
-    with {:ok, verdict} <- run_reviewer_turn(workspace_path, issue, pr, loop_index, opts) do
-      cond do
-        verdict.approved_equivalent ->
-          {:ok, verdict}
+    case run_reviewer_turn(workspace_path, issue, pr, loop_index, opts) do
+      {:ok, verdict} -> continue_or_finish_review(workspace_path, issue, pr, verdict, loop_index, max_loops, opts)
+      {:error, _reason} = error -> error
+    end
+  end
 
-        loop_index >= max_loops ->
-          {:error, {:max_review_fix_loops_reached, max_loops, verdict}}
+  defp continue_or_finish_review(workspace_path, issue, pr, verdict, loop_index, max_loops, opts) do
+    cond do
+      verdict.approved_equivalent ->
+        {:ok, verdict}
 
-        true ->
-          Logger.info("Reviewer requested rework for #{issue_identifier(issue)} loop=#{loop_index + 1}/#{max_loops}")
+      loop_index >= max_loops ->
+        {:error, {:max_review_fix_loops_reached, max_loops, verdict}}
 
-          with :ok <- run_rework_turn(workspace_path, issue, pr, verdict, loop_index + 1, opts),
-               {:ok, updated_pr} <- publish_rework(opts, pr) do
-            do_run_loop(workspace_path, issue, updated_pr, loop_index + 1, max_loops, opts)
-          end
-      end
+      true ->
+        Logger.info("Reviewer requested rework for #{issue_identifier(issue)} loop=#{loop_index + 1}/#{max_loops}")
+        continue_rework_loop(workspace_path, issue, pr, verdict, loop_index, max_loops, opts)
+    end
+  end
+
+  defp continue_rework_loop(workspace_path, issue, pr, verdict, loop_index, max_loops, opts) do
+    with :ok <- run_rework_turn(workspace_path, issue, pr, verdict, loop_index + 1, opts),
+         {:ok, updated_pr} <- publish_rework(opts, pr) do
+      do_run_loop(workspace_path, issue, updated_pr, loop_index + 1, max_loops, opts)
     end
   end
 
   defp run_reviewer_turn(workspace_path, issue, pr, loop_index, opts) do
-    verdict_path = verdict_path(workspace_path)
+    verdict_path = verdict_path(workspace_path, loop_index, opts)
     File.rm(verdict_path)
 
-    prompt = reviewer_prompt(issue, pr, loop_index)
+    prompt = reviewer_prompt(issue, pr, loop_index, verdict_path)
 
-    with :ok <- run_codex_turn(workspace_path, prompt, issue, :reviewer, opts),
-         {:ok, verdict} <- read_verdict(verdict_path),
-         :ok <- remove_verdict_file(verdict_path) do
-      {:ok, verdict}
+    result =
+      case run_codex_turn(workspace_path, prompt, issue, :reviewer, opts) do
+        :ok -> read_verdict(verdict_path)
+        {:error, _reason} = error -> error
+      end
+
+    case remove_verdict_file(verdict_path) do
+      :ok -> result
+      {:error, _reason} = error -> error
     end
   end
 
@@ -82,17 +95,19 @@ defmodule SymphonyElixir.ReviewRunner do
       ])
       |> Keyword.merge(role_codex_options(role, opts))
 
-    with {:ok, session} <- app_server.start_session(workspace_path, turn_opts) do
-      try do
-        case app_server.run_turn(session, prompt, issue, turn_opts) do
-          {:ok, _result} -> :ok
-          {:error, reason} -> {:error, {:codex_turn_failed, reason}}
+    case app_server.start_session(workspace_path, turn_opts) do
+      {:ok, session} ->
+        try do
+          case app_server.run_turn(session, prompt, issue, turn_opts) do
+            {:ok, _result} -> :ok
+            {:error, reason} -> {:error, {:codex_turn_failed, reason}}
+          end
+        after
+          app_server.stop_session(session)
         end
-      after
-        app_server.stop_session(session)
-      end
-    else
-      {:error, reason} -> {:error, {:codex_session_failed, reason}}
+
+      {:error, reason} ->
+        {:error, {:codex_session_failed, reason}}
     end
   end
 
@@ -168,28 +183,47 @@ defmodule SymphonyElixir.ReviewRunner do
   defp string_value(value), do: to_string(value)
 
   defp finding_map_to_string(value) do
-    file = string_value(Map.get(value, "file") || Map.get(value, :file))
-    line = string_value(Map.get(value, "line") || Map.get(value, :line))
-    issue = string_value(Map.get(value, "issue") || Map.get(value, :issue) || Map.get(value, "message") || Map.get(value, :message))
-
-    location =
-      cond do
-        file != "" and line != "" -> "#{file}:#{line}"
-        file != "" -> file
-        true -> ""
-      end
-
     summary =
-      [location, issue]
+      [finding_location(value), finding_issue(value)]
       |> Enum.reject(&(&1 == ""))
       |> Enum.join(" - ")
 
     if summary == "", do: inspect(value), else: summary
   end
 
-  defp verdict_path(workspace_path), do: Path.join(workspace_path, @verdict_file)
+  defp finding_location(value) do
+    file = string_value(Map.get(value, "file") || Map.get(value, :file))
+    line = string_value(Map.get(value, "line") || Map.get(value, :line))
 
-  defp reviewer_prompt(issue, pr, loop_index) do
+    cond do
+      file != "" and line != "" -> "#{file}:#{line}"
+      file != "" -> file
+      true -> ""
+    end
+  end
+
+  defp finding_issue(value) do
+    string_value(
+      Map.get(value, "issue") ||
+        Map.get(value, :issue) ||
+        Map.get(value, "message") ||
+        Map.get(value, :message)
+    )
+  end
+
+  defp verdict_path(workspace_path, loop_index, opts) do
+    case Keyword.get(opts, :review_verdict_path) do
+      path when is_binary(path) and path != "" ->
+        path
+
+      _ ->
+        workspace_path
+        |> Path.dirname()
+        |> Path.join("#{@verdict_file_prefix}-#{Path.basename(workspace_path)}-#{loop_index}-#{System.unique_integer([:positive])}.json")
+    end
+  end
+
+  defp reviewer_prompt(issue, pr, loop_index, verdict_path) do
     """
     You are the independent reviewer in the Symphony runtime loop.
 
@@ -209,7 +243,7 @@ defmodule SymphonyElixir.ReviewRunner do
     - Inspect the diff and run focused validation where practical.
     - If there are blocking correctness, safety, CI, or spec issues, set approved_equivalent to false.
     - If the PR is ready for human final review, set approved_equivalent to true.
-    - Write the verdict JSON to #{@verdict_file}. Do not put the verdict anywhere else.
+    - Write the verdict JSON to #{verdict_path}. Do not put the verdict anywhere else.
 
     Required JSON shape:
     {

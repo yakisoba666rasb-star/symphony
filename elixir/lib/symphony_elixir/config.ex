@@ -73,6 +73,18 @@ defmodule SymphonyElixir.Config do
     settings.review.max_review_fix_loops || settings.agent.max_review_fix_loops
   end
 
+  @spec blocked_issue_comment(String.t(), String.t()) :: String.t()
+  def blocked_issue_comment(identifier, reason) do
+    settings!().review.blocked_comment_template
+    |> blank_to_nil()
+    |> case do
+      nil -> "Symphony blocked {{ identifier }}.\n\nReason: {{ reason }}"
+      template -> template
+    end
+    |> String.replace("{{ identifier }}", to_string(identifier))
+    |> String.replace("{{ reason }}", to_string(reason))
+  end
+
   @spec review_role_codex_options(:implementer | :reviewer) :: keyword()
   def review_role_codex_options(role) when role in [:implementer, :reviewer] do
     settings = settings!()

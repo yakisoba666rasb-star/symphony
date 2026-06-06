@@ -25,7 +25,7 @@ defmodule SymphonyElixir.ReviewRunnerTest do
                 %{"approved_equivalent" => true, "blocking_findings" => [], "tests_required" => [], "residual_risk" => ""}
             end
 
-          write_verdict!(workspace, verdict)
+          write_verdict!(verdict_path_from_prompt(prompt, workspace), verdict)
           {:ok, %{result: :turn_completed}}
 
         String.contains?(prompt, "implementer in the Symphony rework loop") ->
@@ -36,9 +36,16 @@ defmodule SymphonyElixir.ReviewRunnerTest do
 
     def stop_session(_session), do: :ok
 
-    defp write_verdict!(_workspace, :missing), do: :ok
-    defp write_verdict!(workspace, {:raw, raw}), do: File.write!(Path.join(workspace, ".symphony-review-verdict.json"), raw)
-    defp write_verdict!(workspace, verdict), do: File.write!(Path.join(workspace, ".symphony-review-verdict.json"), Jason.encode!(verdict))
+    defp write_verdict!(_path, :missing), do: :ok
+    defp write_verdict!(path, {:raw, raw}), do: File.write!(path, raw)
+    defp write_verdict!(path, verdict), do: File.write!(path, Jason.encode!(verdict))
+
+    defp verdict_path_from_prompt(prompt, workspace) do
+      case Regex.run(~r/Write the verdict JSON to (.+?)\. Do not put the verdict anywhere else\./, prompt) do
+        [_, path] -> path
+        _ -> Path.join(workspace, ".symphony-review-verdict.json")
+      end
+    end
 
     defp test_pid, do: Application.fetch_env!(:symphony_elixir, :test_pid)
   end
@@ -66,6 +73,7 @@ defmodule SymphonyElixir.ReviewRunnerTest do
 
       assert_receive {:codex_turn, prompt}
       assert prompt =~ "independent reviewer"
+      assert prompt =~ Path.dirname(test_root)
       refute File.exists?(Path.join(test_root, ".symphony-review-verdict.json"))
       refute_receive {:rework_turn, _prompt}, 100
     after
@@ -229,7 +237,8 @@ defmodule SymphonyElixir.ReviewRunnerTest do
                  app_server_module: FakeReviewLoopAppServer
                )
 
-      assert path == Path.join(test_root, ".symphony-review-verdict.json")
+      assert Path.dirname(path) == Path.dirname(test_root)
+      refute path == Path.join(test_root, ".symphony-review-verdict.json")
       refute_receive {:rework_turn, _prompt}, 100
     after
       restore_app_env(:test_pid, previous_test_pid)

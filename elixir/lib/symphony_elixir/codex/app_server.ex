@@ -52,7 +52,7 @@ defmodule SymphonyElixir.Codex.AppServer do
            port: port,
            metadata: metadata,
            approval_policy: session_policies.approval_policy,
-           auto_approve_requests: session_policies.approval_policy == "never",
+           auto_approve_requests: unsafe_auto_approve_requests?(session_policies.approval_policy),
            thread_sandbox: session_policies.thread_sandbox,
            turn_sandbox_policy: session_policies.turn_sandbox_policy,
            thread_id: thread_id,
@@ -754,6 +754,12 @@ defmodule SymphonyElixir.Codex.AppServer do
        ) do
     :approval_required
   end
+
+  defp unsafe_auto_approve_requests?("never") do
+    System.get_env("SYMPHONY_ALLOW_UNSAFE_CODEX_AUTO_APPROVE") == "true"
+  end
+
+  defp unsafe_auto_approve_requests?(_approval_policy), do: false
 
   defp maybe_auto_answer_tool_request_user_input(
          port,
