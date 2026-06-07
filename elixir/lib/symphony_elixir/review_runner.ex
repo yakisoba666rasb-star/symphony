@@ -217,9 +217,10 @@ defmodule SymphonyElixir.ReviewRunner do
         path
 
       _ ->
-        workspace_path
-        |> Path.dirname()
-        |> Path.join("#{@verdict_file_prefix}-#{Path.basename(workspace_path)}-#{loop_index}-#{System.unique_integer([:positive])}.json")
+        Path.join(
+          workspace_path,
+          "#{@verdict_file_prefix}-#{Path.basename(workspace_path)}-#{loop_index}-#{System.unique_integer([:positive])}.json"
+        )
     end
   end
 

@@ -403,12 +403,18 @@ defmodule SymphonyElixir.Orchestrator do
           {:ok, pr} when is_map(pr) ->
             move_issue_to_review_after_pr_discovery(state, issue_id, running_entry, session_id, pr)
 
-          _other ->
-            block_max_turns_without_pr(state, issue_id, running_entry, session_id)
+          {:ok, nil} ->
+            schedule_max_turns_continuation(state, issue_id, running_entry, session_id, nil)
+
+          {:error, reason} ->
+            schedule_max_turns_continuation(state, issue_id, running_entry, session_id, reason)
+
+          other ->
+            schedule_max_turns_continuation(state, issue_id, running_entry, session_id, {:unexpected_pr_lookup, other})
         end
 
       :missing ->
-        block_max_turns_without_pr(state, issue_id, running_entry, session_id)
+        schedule_max_turns_continuation(state, issue_id, running_entry, session_id, :missing_branch_or_workspace)
     end
   end
 
@@ -619,12 +625,21 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp block_max_turns_without_pr(state, issue_id, running_entry, session_id) do
-    error = "agent.max_turns reached while Linear issue stayed active"
+  defp schedule_max_turns_continuation(state, issue_id, running_entry, session_id, reason) do
+    error = "agent.max_turns reached while Linear issue stayed active; scheduling continuation"
+    error = if is_nil(reason), do: error, else: "#{error}: #{inspect(reason)}"
 
-    Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+    Logger.warning("Agent task reached max turns for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
 
-    block_issue_from_entry(state, issue_id, running_entry, error)
+    state
+    |> complete_issue(issue_id)
+    |> schedule_issue_retry(issue_id, next_retry_attempt_from_running(running_entry), %{
+      identifier: running_entry.identifier,
+      delay_type: :continuation,
+      error: error,
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    })
   end
 
   defp block_input_required_agent_down(state, issue_id, running_entry, session_id, reason) do

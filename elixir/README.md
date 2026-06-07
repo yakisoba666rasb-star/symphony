@@ -35,10 +35,12 @@ skills can make raw Linear GraphQL calls.
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 
-If Codex reports that operator input, approval, or MCP elicitation is required, Symphony keeps the
-issue claimed and exposes it as blocked in the runtime state, JSON API, and dashboard. Blocked
-entries are in memory only; restarting the orchestrator clears that blocked map, so any still-active
-Linear issue can become a dispatch candidate again after restart.
+If Codex reports that operator input or an unsupported approval is required, Symphony keeps the
+issue claimed and exposes it as blocked in the runtime state, JSON API, and dashboard. Trusted
+GitHub and Linear connector tool elicitations are auto-accepted by the app-server client; free-form
+MCP elicitations remain blocked because a non-interactive runtime cannot answer them safely.
+Blocked entries are in memory only; restarting the orchestrator clears that blocked map, so any
+still-active Linear issue can become a dispatch candidate again after restart.
 
 ## How to use it
 
@@ -133,7 +135,7 @@ Notes:
   - `codex.thread_sandbox` defaults to `workspace-write`
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
-- Symphony does not auto-approve app-server approval requests from `codex.approval_policy: never` unless `SYMPHONY_ALLOW_UNSAFE_CODEX_AUTO_APPROVE=true` is set.
+- Symphony does not auto-approve app-server command or file approval requests from `codex.approval_policy: never` unless `SYMPHONY_ALLOW_UNSAFE_CODEX_AUTO_APPROVE=true` is set. Trusted GitHub and Linear connector tool elicitations are handled separately.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
@@ -196,7 +198,8 @@ mise exec -- mix run -e 'SymphonyElixir.Workflow.set_workflow_file_path("/path/f
 - Binding the observability server to a non-loopback host requires
   `SYMPHONY_ALLOW_PUBLIC_OBSERVABILITY=true`.
 - The `linear_graphql` tool allows read-only GraphQL queries by default. Trusted mutation workflows
-  must opt in with `SYMPHONY_ALLOW_LINEAR_GRAPHQL_MUTATIONS=true`.
+  must opt in with `codex.allow_linear_graphql_mutations: true` or
+  `SYMPHONY_ALLOW_LINEAR_GRAPHQL_MUTATIONS=true`.
 
 ## Web dashboard
 

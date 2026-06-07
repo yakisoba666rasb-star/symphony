@@ -8,7 +8,10 @@ defmodule SymphonyElixir.Workspace do
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
   @remote_dirty_workspace_marker "__SYMPHONY_DIRTY_WORKSPACE__"
-  @ignored_dirty_status_pathspecs [":!.symphony-review-verdict.json"]
+  @ignored_dirty_status_pathspecs [
+    ":!.symphony-review-verdict.json",
+    ":!.symphony-review-verdict-*.json"
+  ]
 
   @type worker_host :: String.t() | nil
 
@@ -71,7 +74,7 @@ defmodule SymphonyElixir.Workspace do
         "  created=0",
         "  cd \"$workspace\"",
         "  if [ \"$allow_dirty_existing_workspace\" != \"1\" ] && [ -d .git ]; then",
-        "    dirty_status=$(git status --porcelain -- ':!.symphony-review-verdict.json')",
+        "    dirty_status=$(git status --porcelain -- ':!.symphony-review-verdict.json' ':!.symphony-review-verdict-*.json')",
         "    if [ -n \"$dirty_status\" ]; then",
         "      quarantine_workspace=\"$workspace.dirty-$(date -u +%Y%m%d-%H%M%S)\"",
         "      if [ -e \"$quarantine_workspace\" ]; then",

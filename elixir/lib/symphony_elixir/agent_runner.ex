@@ -7,7 +7,10 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
-  @ignored_dirty_status_pathspecs [":!.symphony-review-verdict.json"]
+  @ignored_dirty_status_pathspecs [
+    ":!.symphony-review-verdict.json",
+    ":!.symphony-review-verdict-*.json"
+  ]
 
   @type worker_host :: String.t() | nil
 
