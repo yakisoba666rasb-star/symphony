@@ -6,6 +6,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   alias SymphonyElixir.Linear.Client
 
   @linear_graphql_tool "linear_graphql"
+  @allowed_linear_mutation_fields MapSet.new(["commentCreate", "commentUpdate"])
   @linear_graphql_description """
   Execute a raw read-only GraphQL query against Linear using Symphony's configured auth.
   """
@@ -117,10 +118,10 @@ defmodule SymphonyElixir.Codex.DynamicTool do
         :ok
 
       Keyword.get(opts, :allow_mutations, false) ->
-        :ok
+        authorize_linear_mutation_fields(query)
 
       System.get_env("SYMPHONY_ALLOW_LINEAR_GRAPHQL_MUTATIONS") == "true" ->
-        :ok
+        authorize_linear_mutation_fields(query)
 
       true ->
         {:error, :linear_graphql_mutation_not_allowed}
@@ -129,6 +130,54 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   defp mutation_document?(query) when is_binary(query) do
     Regex.match?(~r/(^|[\s{])mutation\b/i, query)
+  end
+
+  defp authorize_linear_mutation_fields(query) do
+    field_names = linear_mutation_field_names(query)
+    disallowed = Enum.reject(field_names, &MapSet.member?(@allowed_linear_mutation_fields, &1))
+
+    cond do
+      field_names == [] ->
+        {:error, {:linear_graphql_mutation_fields_not_allowed, []}}
+
+      disallowed == [] ->
+        :ok
+
+      true ->
+        {:error, {:linear_graphql_mutation_fields_not_allowed, disallowed}}
+    end
+  end
+
+  defp linear_mutation_field_names(query) do
+    query
+    |> strip_graphql_comments()
+    |> strip_graphql_strings()
+    |> mutation_body()
+    |> scan_graphql_call_fields()
+  end
+
+  defp strip_graphql_comments(query) do
+    Regex.replace(~r/#.*$/m, query, "")
+  end
+
+  defp strip_graphql_strings(query) do
+    query
+    |> then(&Regex.replace(~r/"""(?:.|\n)*?"""/, &1, "\"\""))
+    |> then(&Regex.replace(~r/"(?:\\.|[^"\\])*"/, &1, "\"\""))
+  end
+
+  defp mutation_body(query) do
+    case Regex.run(~r/\bmutation\b(?:\s+[A-Za-z_][A-Za-z0-9_]*)?(?:\s*\([^{}]*\))?\s*\{(.*)\}\s*$/is, query) do
+      [_, body] -> body
+      _ -> query
+    end
+  end
+
+  defp scan_graphql_call_fields(body) do
+    ~r/(?:^|[{\s])([A-Za-z_][A-Za-z0-9_]*)\s*\(/
+    |> Regex.scan(body, capture: :all_but_first)
+    |> List.flatten()
+    |> Enum.uniq()
   end
 
   defp graphql_response(response) do
@@ -192,7 +241,16 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   defp tool_error_payload(:linear_graphql_mutation_not_allowed) do
     %{
       "error" => %{
-        "message" => "`linear_graphql` only allows read-only queries by default. Set `SYMPHONY_ALLOW_LINEAR_GRAPHQL_MUTATIONS=true` for trusted mutation workflows."
+        "message" => "`linear_graphql` only allows read-only queries by default. Set `SYMPHONY_ALLOW_LINEAR_GRAPHQL_MUTATIONS=true` for trusted comment mutation workflows."
+      }
+    }
+  end
+
+  defp tool_error_payload({:linear_graphql_mutation_fields_not_allowed, fields}) do
+    %{
+      "error" => %{
+        "message" => "`linear_graphql` mutation access is limited to commentCreate/commentUpdate; issue state and other Linear writes remain runtime-owned.",
+        "disallowedFields" => fields
       }
     }
   end

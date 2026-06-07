@@ -148,27 +148,50 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(response["output"]) == %{
              "error" => %{
-               "message" => "`linear_graphql` only allows read-only queries by default. Set `SYMPHONY_ALLOW_LINEAR_GRAPHQL_MUTATIONS=true` for trusted mutation workflows."
+               "message" => "`linear_graphql` only allows read-only queries by default. Set `SYMPHONY_ALLOW_LINEAR_GRAPHQL_MUTATIONS=true` for trusted comment mutation workflows."
              }
            }
   end
 
-  test "linear_graphql permits mutations only when explicitly allowed" do
+  test "linear_graphql permits comment mutations only when explicitly allowed" do
     response =
       DynamicTool.execute(
         "linear_graphql",
-        %{"query" => "mutation BadMutation { nope }"},
+        %{"query" => "mutation AddComment($issueId: String!) { commentCreate(input: { issueId: $issueId, body: \"ok\" }) { success } }"},
+        allow_mutations: true,
+        linear_client: fn query, _variables, _opts ->
+          send(self(), {:linear_client_called, query})
+          {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}
+        end
+      )
+
+    assert response["success"] == true
+    assert_received {:linear_client_called, query}
+    assert query =~ "commentCreate"
+
+    assert Jason.decode!(response["output"]) == %{
+             "data" => %{"commentCreate" => %{"success" => true}}
+           }
+  end
+
+  test "linear_graphql rejects issue state mutations even when mutations are enabled" do
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{"query" => "mutation ChangeState($id: String!) { issueUpdate(id: $id, input: { stateId: \"state-1\" }) { success } }"},
         allow_mutations: true,
         linear_client: fn _query, _variables, _opts ->
-          {:ok, %{"errors" => [%{"message" => "Unknown field `nope`"}], "data" => nil}}
+          flunk("linear client should not be called for disallowed mutations")
         end
       )
 
     assert response["success"] == false
 
     assert Jason.decode!(response["output"]) == %{
-             "data" => nil,
-             "errors" => [%{"message" => "Unknown field `nope`"}]
+             "error" => %{
+               "message" => "`linear_graphql` mutation access is limited to commentCreate/commentUpdate; issue state and other Linear writes remain runtime-owned.",
+               "disallowedFields" => ["issueUpdate"]
+             }
            }
   end
 
