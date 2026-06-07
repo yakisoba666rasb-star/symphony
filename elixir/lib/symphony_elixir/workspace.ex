@@ -12,17 +12,19 @@ defmodule SymphonyElixir.Workspace do
 
   @type worker_host :: String.t() | nil
 
-  @spec create_for_issue(map() | String.t() | nil, worker_host()) ::
+  @spec create_for_issue(map() | String.t() | nil, worker_host(), keyword()) ::
           {:ok, Path.t()} | {:error, term()}
-  def create_for_issue(issue_or_identifier, worker_host \\ nil) do
+  def create_for_issue(issue_or_identifier, worker_host \\ nil, opts \\ []) do
     issue_context = issue_context(issue_or_identifier)
+    allow_dirty_existing_workspace? = Keyword.get(opts, :allow_dirty_existing_workspace, false)
 
     try do
       safe_id = safe_identifier(issue_context.issue_identifier)
 
       with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
            :ok <- validate_workspace_path(workspace, worker_host),
-           {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host) do
+           {:ok, workspace, created?} <-
+             ensure_workspace(workspace, worker_host, allow_dirty_existing_workspace?) do
         case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
           :ok ->
             {:ok, workspace}
@@ -39,8 +41,11 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp ensure_workspace(workspace, nil) do
+  defp ensure_workspace(workspace, nil, allow_dirty_existing_workspace?) do
     cond do
+      File.dir?(workspace) and allow_dirty_existing_workspace? ->
+        {:ok, workspace, false}
+
       File.dir?(workspace) ->
         ensure_reusable_workspace(workspace)
 
@@ -53,15 +58,19 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp ensure_workspace(workspace, worker_host) when is_binary(worker_host) do
+  defp ensure_workspace(workspace, worker_host, allow_dirty_existing_workspace?)
+       when is_binary(worker_host) do
+    allow_dirty_flag = if allow_dirty_existing_workspace?, do: "1", else: "0"
+
     script =
       [
         "set -eu",
         remote_shell_assign("workspace", workspace),
+        remote_shell_assign("allow_dirty_existing_workspace", allow_dirty_flag),
         "if [ -d \"$workspace\" ]; then",
         "  created=0",
         "  cd \"$workspace\"",
-        "  if [ -d .git ]; then",
+        "  if [ \"$allow_dirty_existing_workspace\" != \"1\" ] && [ -d .git ]; then",
         "    dirty_status=$(git status --porcelain -- ':!.symphony-review-verdict.json')",
         "    if [ -n \"$dirty_status\" ]; then",
         "      quarantine_workspace=\"$workspace.dirty-$(date -u +%Y%m%d-%H%M%S)\"",

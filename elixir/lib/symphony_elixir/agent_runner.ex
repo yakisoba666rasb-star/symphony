@@ -39,12 +39,20 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case Workspace.create_for_issue(issue, worker_host) do
+    workspace_opts =
+      if Keyword.get(opts, :allow_dirty_existing_workspace, false) do
+        [allow_dirty_existing_workspace: true]
+      else
+        []
+      end
+
+    case Workspace.create_for_issue(issue, worker_host, workspace_opts) do
       {:ok, workspace} ->
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
+        dirty_resume? = Keyword.get(workspace_opts, :allow_dirty_existing_workspace, false) and workspace_has_changes?(workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
+          with :ok <- maybe_run_before_run_hook(workspace, issue, worker_host, dirty_resume?) do
             run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
           end
         after
@@ -54,6 +62,15 @@ defmodule SymphonyElixir.AgentRunner do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp maybe_run_before_run_hook(workspace, issue, worker_host, true) do
+    Logger.info("Skipping before_run hook for dirty workspace resume #{issue_context(issue)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)}")
+    :ok
+  end
+
+  defp maybe_run_before_run_hook(workspace, issue, worker_host, false) do
+    Workspace.run_before_run_hook(workspace, issue, worker_host)
   end
 
   defp codex_message_handler(recipient, issue) do

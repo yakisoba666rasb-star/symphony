@@ -158,26 +158,42 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_semantics(settings) do
-    cond do
-      is_nil(settings.tracker.kind) ->
-        {:error, :missing_tracker_kind}
-
-      settings.tracker.kind not in ["linear", "memory"] ->
-        {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
-
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
-        {:error, :missing_linear_api_token}
-
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
-        {:error, :missing_linear_project_slug}
-
-      retired_model_message(settings) ->
-        {:error, {:retired_codex_model, retired_model_message(settings)}}
-
-      true ->
-        :ok
+    with :ok <- validate_tracker_settings(settings.tracker) do
+      validate_retired_models(settings)
     end
   end
+
+  defp validate_tracker_settings(%{kind: nil}), do: {:error, :missing_tracker_kind}
+
+  defp validate_tracker_settings(%{kind: kind}) when kind not in ["linear", "memory"] do
+    {:error, {:unsupported_tracker_kind, kind}}
+  end
+
+  defp validate_tracker_settings(%{kind: "linear"} = tracker), do: validate_linear_tracker(tracker)
+
+  defp validate_tracker_settings(_tracker), do: :ok
+
+  defp validate_linear_tracker(%{api_key: api_key}) when not is_binary(api_key),
+    do: {:error, :missing_linear_api_token}
+
+  defp validate_linear_tracker(%{all_projects: true, team_key: team_key}) do
+    if non_blank_binary?(team_key), do: :ok, else: {:error, :missing_linear_team_key}
+  end
+
+  defp validate_linear_tracker(%{project_slug: project_slug}) when not is_binary(project_slug),
+    do: {:error, :missing_linear_project_slug}
+
+  defp validate_linear_tracker(_tracker), do: :ok
+
+  defp validate_retired_models(settings) do
+    case retired_model_message(settings) do
+      nil -> :ok
+      message -> {:error, {:retired_codex_model, message}}
+    end
+  end
+
+  defp non_blank_binary?(value) when is_binary(value), do: String.trim(value) != ""
+  defp non_blank_binary?(_value), do: false
 
   defp retired_model_message(settings) do
     settings
@@ -189,9 +205,7 @@ defmodule SymphonyElixir.Config do
 
       matches ->
         details =
-          matches
-          |> Enum.map(fn {field, model} -> "#{field}=#{model}" end)
-          |> Enum.join(", ")
+          Enum.map_join(matches, ", ", fn {field, model} -> "#{field}=#{model}" end)
 
         "Retired Codex model reference found. Use #{current_codex_model()} instead of: #{details}"
     end
