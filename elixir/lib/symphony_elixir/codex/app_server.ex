@@ -12,6 +12,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
+  @safe_mcp_tool_title_pattern ~r/(branch|comment|create|edit|issue|label|pull[_\s-]?request|pr|review|save|state|status|update|write)/i
+  @unsafe_mcp_tool_title_pattern ~r/(archive|billing|close|delete|destructive|force|invite|merge|payment|remove|reset|transfer)/i
 
   @type session :: %{
           port: port(),
@@ -86,7 +88,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
-        DynamicTool.execute(tool, arguments)
+        DynamicTool.execute(tool, arguments, allow_mutations: Config.settings!().codex.allow_linear_graphql_mutations)
       end)
 
     case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
@@ -670,6 +672,33 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp maybe_handle_approval_request(
+         port,
+         "mcpServer/elicitation/request",
+         %{"id" => id, "params" => params} = payload,
+         payload_string,
+         on_message,
+         metadata,
+         _tool_executor,
+         _auto_approve_requests
+       )
+       when is_map(params) do
+    if trusted_mcp_tool_elicitation?(params) do
+      send_message(port, %{"id" => id, "result" => %{"action" => "accept", "content" => %{}}})
+
+      emit_message(
+        on_message,
+        :approval_auto_approved,
+        %{payload: payload, raw: payload_string, decision: "accept_mcp_tool_call"},
+        metadata
+      )
+
+      :approved
+    else
+      :input_required
+    end
+  end
+
+  defp maybe_handle_approval_request(
          _port,
          _method,
          _payload,
@@ -760,6 +789,36 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp unsafe_auto_approve_requests?(_approval_policy), do: false
+
+  defp trusted_mcp_tool_elicitation?(params) when is_map(params) do
+    meta = Map.get(params, "_meta") || %{}
+    connector_name = normalized_meta_text(meta, "connector_name")
+    tool_title = normalized_meta_text(meta, "tool_title") || normalized_meta_text(meta, "tool_name")
+
+    Map.get(meta, "codex_approval_kind") == "mcp_tool_call" and
+      connector_name in ["github", "linear"] and
+      safe_mcp_tool_title?(tool_title)
+  end
+
+  defp normalized_meta_text(meta, key) when is_map(meta) do
+    case Map.get(meta, key) || Map.get(meta, String.to_atom(key)) do
+      value when is_binary(value) ->
+        case String.trim(value) do
+          "" -> nil
+          trimmed -> String.downcase(trimmed)
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp safe_mcp_tool_title?(title) when is_binary(title) do
+    String.match?(title, @safe_mcp_tool_title_pattern) and
+      not String.match?(title, @unsafe_mcp_tool_title_pattern)
+  end
+
+  defp safe_mcp_tool_title?(_title), do: false
 
   defp maybe_auto_answer_tool_request_user_input(
          port,

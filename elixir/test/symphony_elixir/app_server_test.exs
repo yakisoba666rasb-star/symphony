@@ -262,7 +262,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server treats MCP elicitation requests as hard input blockers" do
+  test "app server treats non-approval MCP elicitation requests as hard input blockers" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -322,6 +322,104 @@ defmodule SymphonyElixir.AppServerTest do
                AppServer.run(workspace, "Needs MCP input", issue)
 
       assert payload["method"] == "mcpServer/elicitation/request"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server auto-accepts trusted connector tool MCP elicitations" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-mcp-tool-approval-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-189")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "trace.log")
+      previous_trace = System.get_env("SYMP_TEST_CODEX_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEX_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEX_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEX_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_TRACE:-/tmp/codex-mcp-tool-approval.trace}"
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-189"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-189"}}}'
+            printf '%s\\n' '{"id":117,"method":"mcpServer/elicitation/request","params":{"message":"Allow Linear to run tool?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","connector_name":"Linear","tool_title":"save_comment","tool_params":{"issueId":"LAB-1","body":"ok"}}}}'
+            ;;
+          5)
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-mcp-tool-approval",
+        identifier: "MT-189",
+        title: "MCP tool approval",
+        description: "Auto-accept safe connector approval",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-189",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Approve connector tool", issue)
+
+      trace = File.read!(trace_file)
+      lines = String.split(trace, "\n", trim: true)
+
+      assert Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 payload =
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+
+                 payload["id"] == 117 and
+                   get_in(payload, ["result", "action"]) == "accept" and
+                   get_in(payload, ["result", "content"]) == %{}
+               else
+                 false
+               end
+             end)
     after
       File.rm_rf(test_root)
     end

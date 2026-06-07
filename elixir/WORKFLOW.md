@@ -59,10 +59,10 @@ No description provided.
 
 ## Operating Contract
 
-Symphony owns scheduling, workspace creation, and launching Codex. Codex owns
-the work inside the issue workspace: read the issue, design the change,
-implement it, validate it, commit, push, and open or update a GitHub PR when the
-task requires code changes.
+Symphony owns scheduling, workspace creation, runtime GitHub PR publication, and
+Linear state transitions. Codex owns the work inside the issue workspace: read
+the issue, design the change, implement it, validate it, and prepare local
+repository changes for the runtime handoff.
 
 Keep target-project code, deployment secrets, production logs, and private run
 evidence outside this public engine fork. Store those artifacts in the target
@@ -71,15 +71,18 @@ repository or in operator-managed runtime storage.
 ## Workflow
 
 1. Confirm the Linear issue requirements and target repository.
-2. If the issue is `Todo`, move it to `In Progress` before editing.
+2. Do not use GitHub or Linear app connector write tools unless the runtime
+   explicitly asks for them; Symphony handles PR publication and issue state
+   handoff after the workspace is ready.
 3. Sync the workspace from the target repository's default branch.
 4. Make the smallest complete change that satisfies the issue.
 5. Run focused validation that matches the change.
 6. Commit with the Linear key visible.
-7. Push a branch and open or update a GitHub PR.
-8. Include `Refs {{ issue.identifier }}` in the PR body.
-9. Move the Linear issue to `In Review` only after the PR is ready for a human
-   decision.
+7. Leave branch push, PR creation or update, and `In Review` transition to the
+   Symphony runtime publisher.
+8. Include `Refs {{ issue.identifier }}` in any local commit or PR body text you
+   prepare.
+9. Report whether the workspace is ready for runtime publication.
 10. Leave final merge or closure to a human unless the workflow explicitly says
     otherwise.
 

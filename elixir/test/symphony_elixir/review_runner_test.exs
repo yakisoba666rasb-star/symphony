@@ -73,7 +73,7 @@ defmodule SymphonyElixir.ReviewRunnerTest do
 
       assert_receive {:codex_turn, prompt}
       assert prompt =~ "independent reviewer"
-      assert prompt =~ Path.dirname(test_root)
+      assert prompt =~ test_root
       refute File.exists?(Path.join(test_root, ".symphony-review-verdict.json"))
       refute_receive {:rework_turn, _prompt}, 100
     after
@@ -237,7 +237,7 @@ defmodule SymphonyElixir.ReviewRunnerTest do
                  app_server_module: FakeReviewLoopAppServer
                )
 
-      assert Path.dirname(path) == Path.dirname(test_root)
+      assert Path.dirname(path) == test_root
       refute path == Path.join(test_root, ".symphony-review-verdict.json")
       refute_receive {:rework_turn, _prompt}, 100
     after

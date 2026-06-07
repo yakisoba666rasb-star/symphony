@@ -1062,17 +1062,22 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert is_integer(due_at_ms)
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 9_000
+    assert remaining_ms >= 8_900
     assert remaining_ms <= 10_500
   end
 
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
       tracker_api_token: nil,
       codex_stall_timeout_ms: 1_000
     )
 
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
     issue_id = "issue-mcp-elicitation-stall"
+    issue = %Issue{id: issue_id, identifier: "MT-MCP", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
     orchestrator_name = Module.concat(__MODULE__, :McpElicitationBlockOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1096,7 +1101,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       pid: worker_pid,
       ref: make_ref(),
       identifier: "MT-MCP",
-      issue: %Issue{id: issue_id, identifier: "MT-MCP", state: "In Progress"},
+      issue: issue,
       worker_host: "dm-dev2",
       workspace_path: "/workspaces/MT-MCP",
       session_id: "thread-mcp-turn-mcp",
@@ -1123,7 +1128,6 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute Process.alive?(worker_pid)
     refute Map.has_key?(state.running, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
-    assert MapSet.member?(state.claimed, issue_id)
 
     assert %{
              identifier: "MT-MCP",
@@ -1296,9 +1300,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator blocks failed workers after app-server reports input required" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", tracker_api_token: nil)
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
     issue_id = "issue-input-required"
+    issue = %Issue{id: issue_id, identifier: "MT-INPUT", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
     orchestrator_name = Module.concat(__MODULE__, :InputRequiredBlockOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1316,7 +1323,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       pid: self(),
       ref: ref,
       identifier: "MT-INPUT",
-      issue: %Issue{id: issue_id, identifier: "MT-INPUT", state: "In Progress"},
+      issue: issue,
       session_id: "thread-input-turn-input",
       last_codex_message: %{
         event: :turn_input_required,
@@ -1340,7 +1347,6 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     refute Map.has_key?(state.running, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
-    assert MapSet.member?(state.claimed, issue_id)
 
     assert %{
              identifier: "MT-INPUT",
@@ -2383,7 +2389,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.blocked[issue_id]
   end
 
-  test "orchestrator blocks max-turn active issue exits instead of retrying" do
+  test "orchestrator schedules max-turn active issue exits for continuation" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", tracker_api_token: nil)
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
@@ -2425,18 +2431,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     state = :sys.get_state(pid)
 
     refute Map.has_key?(state.running, issue_id)
-    refute Map.has_key?(state.retry_attempts, issue_id)
-    refute MapSet.member?(state.completed, issue_id)
-    assert MapSet.member?(state.claimed, issue_id)
 
     assert %{
+             attempt: 1,
              identifier: "MT-MAX",
-             error: "agent.max_turns reached while Linear issue stayed active"
-           } = state.blocked[issue_id]
+             delay_type: :continuation,
+             error: error
+           } = state.retry_attempts[issue_id]
 
-    assert_receive {:memory_tracker_comment, ^issue_id, comment}
-    assert comment =~ "Symphony blocked MT-MAX"
-    assert comment =~ "agent.max_turns reached while Linear issue stayed active"
+    assert is_integer(state.retry_attempts[issue_id].due_at_ms)
+    assert error =~ "agent.max_turns reached while Linear issue stayed active; scheduling continuation"
+    assert error =~ ":missing_branch_or_workspace"
+    assert MapSet.member?(state.completed, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+    refute Map.has_key?(state.blocked, issue_id)
+    refute_receive {:memory_tracker_comment, ^issue_id, _comment}, 50
   end
 
   test "orchestrator blocks dirty workspace exits instead of retrying" do

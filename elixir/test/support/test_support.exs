@@ -123,6 +123,7 @@ defmodule SymphonyElixir.TestSupport do
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
+          codex_allow_linear_graphql_mutations: false,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -170,6 +171,7 @@ defmodule SymphonyElixir.TestSupport do
     codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
+    codex_allow_linear_graphql_mutations = Keyword.get(config, :codex_allow_linear_graphql_mutations)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -219,6 +221,7 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
+        "  allow_linear_graphql_mutations: #{yaml_value(codex_allow_linear_graphql_mutations)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         review_yaml(review_blocked_comment_template),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
