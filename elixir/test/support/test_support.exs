@@ -112,6 +112,7 @@ defmodule SymphonyElixir.TestSupport do
           worker_max_concurrent_agents_per_host: nil,
           max_concurrent_agents: 10,
           max_turns: 20,
+          max_continuations: 3,
           max_retry_backoff_ms: 300_000,
           same_review_fingerprint_limit: 4,
           same_test_failure_fingerprint_limit: 4,
@@ -160,6 +161,7 @@ defmodule SymphonyElixir.TestSupport do
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
+    max_continuations = Keyword.get(config, :max_continuations)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     same_review_fingerprint_limit = Keyword.get(config, :same_review_fingerprint_limit)
     same_test_failure_fingerprint_limit = Keyword.get(config, :same_test_failure_fingerprint_limit)
@@ -209,6 +211,7 @@ defmodule SymphonyElixir.TestSupport do
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",
+        "  max_continuations: #{yaml_value(max_continuations)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  same_review_fingerprint_limit: #{yaml_value(same_review_fingerprint_limit)}",
         "  same_test_failure_fingerprint_limit: #{yaml_value(same_test_failure_fingerprint_limit)}",

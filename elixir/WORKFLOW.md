@@ -29,6 +29,7 @@ hooks:
 agent:
   max_concurrent_agents: 1
   max_turns: 20
+  max_continuations: 3
 codex:
   command: codex app-server
   thread_sandbox: workspace-write

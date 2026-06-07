@@ -214,6 +214,7 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
+      field(:max_continuations, :integer, default: 3)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_review_fix_loops, :integer, default: 3)
       field(:same_review_fingerprint_limit, :integer, default: 4)
@@ -229,6 +230,7 @@ defmodule SymphonyElixir.Config.Schema do
         [
           :max_concurrent_agents,
           :max_turns,
+          :max_continuations,
           :max_retry_backoff_ms,
           :max_review_fix_loops,
           :same_review_fingerprint_limit,
@@ -239,6 +241,7 @@ defmodule SymphonyElixir.Config.Schema do
       )
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
+      |> validate_number(:max_continuations, greater_than_or_equal_to: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> validate_number(:max_review_fix_loops, greater_than_or_equal_to: 0)
       |> validate_number(:same_review_fingerprint_limit, greater_than_or_equal_to: 0)

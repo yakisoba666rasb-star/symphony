@@ -118,6 +118,7 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
+  max_continuations: 3
 codex:
   command: codex app-server
 ---
@@ -142,6 +143,8 @@ Notes:
   Symphony validation.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- `agent.max_continuations` caps how many max-turn continuations Symphony schedules before blocking
+  the issue and leaving a tracker comment. Default: `3`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
@@ -199,7 +202,8 @@ mise exec -- mix run -e 'SymphonyElixir.Workflow.set_workflow_file_path("/path/f
   `SYMPHONY_ALLOW_PUBLIC_OBSERVABILITY=true`.
 - The `linear_graphql` tool allows read-only GraphQL queries by default. Trusted mutation workflows
   must opt in with `codex.allow_linear_graphql_mutations: true` or
-  `SYMPHONY_ALLOW_LINEAR_GRAPHQL_MUTATIONS=true`.
+  `SYMPHONY_ALLOW_LINEAR_GRAPHQL_MUTATIONS=true`; even then, mutations are limited to
+  `commentCreate` and `commentUpdate` so issue state changes remain runtime-owned.
 
 ## Web dashboard
 

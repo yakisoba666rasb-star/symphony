@@ -12,8 +12,23 @@ defmodule SymphonyElixir.Codex.AppServer do
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
-  @safe_mcp_tool_title_pattern ~r/(branch|comment|create|edit|issue|label|pull[_\s-]?request|pr|review|save|state|status|update|write)/i
-  @unsafe_mcp_tool_title_pattern ~r/(archive|billing|close|delete|destructive|force|invite|merge|payment|remove|reset|transfer)/i
+  @trusted_mcp_connector_tools %{
+    "github" =>
+      MapSet.new([
+        "create_branch",
+        "create_comment",
+        "create_issue",
+        "create_pull_request",
+        "update_comment",
+        "update_pull_request"
+      ]),
+    "linear" =>
+      MapSet.new([
+        "create_comment",
+        "save_comment",
+        "update_comment"
+      ])
+  }
 
   @type session :: %{
           port: port(),
@@ -792,12 +807,11 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp trusted_mcp_tool_elicitation?(params) when is_map(params) do
     meta = Map.get(params, "_meta") || %{}
-    connector_name = normalized_meta_text(meta, "connector_name")
-    tool_title = normalized_meta_text(meta, "tool_title") || normalized_meta_text(meta, "tool_name")
+    connector_name = normalized_meta_text(meta, "connector_name") || normalized_meta_text(params, "serverName")
+    tool_name = normalized_mcp_tool_name(meta)
 
     Map.get(meta, "codex_approval_kind") == "mcp_tool_call" and
-      connector_name in ["github", "linear"] and
-      safe_mcp_tool_title?(tool_title)
+      trusted_mcp_tool?(connector_name, tool_name)
   end
 
   defp normalized_meta_text(meta, key) when is_map(meta) do
@@ -813,12 +827,33 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp safe_mcp_tool_title?(title) when is_binary(title) do
-    String.match?(title, @safe_mcp_tool_title_pattern) and
-      not String.match?(title, @unsafe_mcp_tool_title_pattern)
+  defp normalized_mcp_tool_name(meta) when is_map(meta) do
+    meta
+    |> mcp_tool_name_candidate()
+    |> normalize_mcp_tool_name()
   end
 
-  defp safe_mcp_tool_title?(_title), do: false
+  defp mcp_tool_name_candidate(meta) do
+    normalized_meta_text(meta, "tool_title") || normalized_meta_text(meta, "tool_name")
+  end
+
+  defp normalize_mcp_tool_name(nil), do: nil
+
+  defp normalize_mcp_tool_name(value) when is_binary(value) do
+    value
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9]+/, "_")
+    |> String.trim("_")
+  end
+
+  defp trusted_mcp_tool?(connector_name, tool_name) when is_binary(connector_name) and is_binary(tool_name) do
+    case Map.get(@trusted_mcp_connector_tools, connector_name) do
+      %MapSet{} = trusted_tools -> MapSet.member?(trusted_tools, tool_name)
+      _ -> false
+    end
+  end
+
+  defp trusted_mcp_tool?(_connector_name, _tool_name), do: false
 
   defp maybe_auto_answer_tool_request_user_input(
          port,

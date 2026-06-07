@@ -2436,6 +2436,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              attempt: 1,
              identifier: "MT-MAX",
              delay_type: :continuation,
+             continuation_count: 1,
              error: error
            } = state.retry_attempts[issue_id]
 
@@ -2446,6 +2447,70 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert MapSet.member?(state.claimed, issue_id)
     refute Map.has_key?(state.blocked, issue_id)
     refute_receive {:memory_tracker_comment, ^issue_id, _comment}, 50
+  end
+
+  test "orchestrator blocks max-turn active issue exits after continuation limit" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      max_continuations: 1
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-max-turn-continuation-limit"
+    issue = %Issue{id: issue_id, identifier: "MT-MAX-LIMIT", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :MaxTurnContinuationLimitOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-MAX-LIMIT",
+      issue: issue,
+      session_id: "thread-max-turns-limit",
+      continuation_count: 1,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), {:max_turns_reached_active_issue, issue_id}})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    refute MapSet.member?(state.completed, issue_id)
+
+    assert %{
+             identifier: "MT-MAX-LIMIT",
+             error: error
+           } = state.blocked[issue_id]
+
+    assert error =~ "agent.max_turns continuation limit reached (1); blocking active issue"
+    assert error =~ ":missing_branch_or_workspace"
+
+    assert_receive {:memory_tracker_comment, ^issue_id, comment}, 250
+    assert comment =~ "Symphony blocked MT-MAX-LIMIT."
+    assert comment =~ "agent.max_turns continuation limit reached (1); blocking active issue"
   end
 
   test "orchestrator blocks dirty workspace exits instead of retrying" do

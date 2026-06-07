@@ -626,20 +626,33 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp schedule_max_turns_continuation(state, issue_id, running_entry, session_id, reason) do
-    error = "agent.max_turns reached while Linear issue stayed active; scheduling continuation"
-    error = if is_nil(reason), do: error, else: "#{error}: #{inspect(reason)}"
+    next_continuation_count = next_continuation_count_from_running(running_entry)
+    max_continuations = Config.settings!().agent.max_continuations
 
-    Logger.warning("Agent task reached max turns for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+    if next_continuation_count > max_continuations do
+      error = "agent.max_turns continuation limit reached (#{max_continuations}); blocking active issue"
+      error = if is_nil(reason), do: error, else: "#{error}: #{inspect(reason)}"
 
-    state
-    |> complete_issue(issue_id)
-    |> schedule_issue_retry(issue_id, next_retry_attempt_from_running(running_entry), %{
-      identifier: running_entry.identifier,
-      delay_type: :continuation,
-      error: error,
-      worker_host: Map.get(running_entry, :worker_host),
-      workspace_path: Map.get(running_entry, :workspace_path)
-    })
+      Logger.warning("Agent task blocked after max-turn continuations for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+
+      block_issue_from_entry(state, issue_id, running_entry, error)
+    else
+      error = "agent.max_turns reached while Linear issue stayed active; scheduling continuation"
+      error = if is_nil(reason), do: error, else: "#{error}: #{inspect(reason)}"
+
+      Logger.warning("Agent task reached max turns for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+
+      state
+      |> complete_issue(issue_id)
+      |> schedule_issue_retry(issue_id, next_retry_attempt_from_running(running_entry), %{
+        identifier: running_entry.identifier,
+        delay_type: :continuation,
+        continuation_count: next_continuation_count,
+        error: error,
+        worker_host: Map.get(running_entry, :worker_host),
+        workspace_path: Map.get(running_entry, :workspace_path)
+      })
+    end
   end
 
   defp block_input_required_agent_down(state, issue_id, running_entry, session_id, reason) do
@@ -1700,6 +1713,7 @@ defmodule SymphonyElixir.Orchestrator do
             codex_last_reported_total_tokens: 0,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
+            continuation_count: normalize_continuation_count(Keyword.get(agent_opts, :continuation_count)),
             started_at: DateTime.utc_now()
           })
 
@@ -1765,6 +1779,7 @@ defmodule SymphonyElixir.Orchestrator do
     pr_number = pick_retry_pr_number(previous_retry, metadata)
     pr_url = pick_retry_pr_url(previous_retry, metadata)
     delay_type = pick_retry_delay_type(previous_retry, metadata)
+    continuation_count = pick_retry_continuation_count(previous_retry, metadata)
 
     if is_reference(old_timer) do
       Process.cancel_timer(old_timer)
@@ -1790,7 +1805,8 @@ defmodule SymphonyElixir.Orchestrator do
             pr_url: pr_url,
             worker_host: worker_host,
             workspace_path: workspace_path,
-            delay_type: delay_type
+            delay_type: delay_type,
+            continuation_count: continuation_count
           })
     }
   end
@@ -1805,7 +1821,8 @@ defmodule SymphonyElixir.Orchestrator do
           workspace_path: Map.get(retry_entry, :workspace_path),
           pr_number: Map.get(retry_entry, :pr_number),
           pr_url: Map.get(retry_entry, :pr_url),
-          delay_type: Map.get(retry_entry, :delay_type)
+          delay_type: Map.get(retry_entry, :delay_type),
+          continuation_count: Map.get(retry_entry, :continuation_count)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -1914,7 +1931,10 @@ defmodule SymphonyElixir.Orchestrator do
          worker_slots_available?(state, metadata[:worker_host]) do
       agent_opts =
         if continuation_retry?(metadata) do
-          [allow_dirty_existing_workspace: true]
+          [
+            allow_dirty_existing_workspace: true,
+            continuation_count: metadata[:continuation_count]
+          ]
         else
           []
         end
@@ -1961,6 +1981,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp normalize_retry_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt
   defp normalize_retry_attempt(_attempt), do: 0
 
+  defp normalize_continuation_count(count) when is_integer(count) and count > 0, do: count
+  defp normalize_continuation_count(_count), do: 0
+
+  defp next_continuation_count_from_running(running_entry) do
+    normalize_continuation_count(Map.get(running_entry, :continuation_count)) + 1
+  end
+
   defp next_retry_attempt_from_running(running_entry) do
     case Map.get(running_entry, :retry_attempt) do
       attempt when is_integer(attempt) and attempt > 0 -> attempt + 1
@@ -1994,6 +2021,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp pick_retry_delay_type(previous_retry, metadata) do
     metadata[:delay_type] || Map.get(previous_retry, :delay_type)
+  end
+
+  defp pick_retry_continuation_count(previous_retry, metadata) do
+    metadata[:continuation_count] || Map.get(previous_retry, :continuation_count)
   end
 
   defp continuation_retry?(metadata) when is_map(metadata) do
