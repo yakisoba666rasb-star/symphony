@@ -12,6 +12,7 @@ defmodule SymphonyElixir.Orchestrator do
     Config,
     GitHubPrPublisher,
     HermesDelegation,
+    RepositoryResolver,
     ReviewRunner,
     StatusDashboard,
     Tracker,
@@ -1456,11 +1457,56 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     issue_routable_to_worker?(issue) and
+      issue_routable_to_repository?(issue) and
       active_issue_state?(state_name, active_states) and
       !terminal_issue_state?(state_name, terminal_states)
   end
 
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
+
+  defp issue_routable_to_repository?(%Issue{} = issue) do
+    settings = Config.settings!()
+
+    if settings.tracker.all_projects do
+      issue_matches_all_projects_repository_route?(issue, settings)
+    else
+      true
+    end
+  end
+
+  defp issue_matches_all_projects_repository_route?(%Issue{} = issue, settings) do
+    with true <- RepositoryResolver.repository_hint?(issue),
+         {:ok, %{slug: slug, name: repo_name}} when is_binary(slug) and is_binary(repo_name) <-
+           RepositoryResolver.resolve(issue, settings),
+         true <- linear_project_matches_repository?(issue, repo_name) do
+      true
+    else
+      _not_routable -> false
+    end
+  end
+
+  defp linear_project_matches_repository?(%Issue{} = issue, repo_name) when is_binary(repo_name) do
+    repo_token = route_token(repo_name)
+
+    if repo_token == "" do
+      false
+    else
+      [issue.project_name, issue.project_slug]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map(&route_token/1)
+      |> Enum.any?(fn project_token ->
+        project_token == repo_token or String.starts_with?(project_token, repo_token)
+      end)
+    end
+  end
+
+  defp route_token(value) when is_binary(value) do
+    value
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9]/, "")
+  end
+
+  defp route_token(_value), do: ""
 
   defp issue_routable_to_worker?(%Issue{assigned_to_worker: assigned_to_worker})
        when is_boolean(assigned_to_worker),
@@ -1513,10 +1559,16 @@ defmodule SymphonyElixir.Orchestrator do
     |> MapSet.new()
   end
 
-  defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
+  defp dispatch_issue(
+         %State{} = state,
+         issue,
+         attempt \\ nil,
+         preferred_worker_host \\ nil,
+         agent_opts \\ []
+       ) do
     case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
-        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
+        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host, agent_opts)
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
@@ -1533,9 +1585,10 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
+  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host, agent_opts) do
     recipient = self()
     preferred_worker_host = preferred_worker_host_for_issue(issue, preferred_worker_host)
+    agent_opts = maybe_allow_dirty_existing_workspace_for_active_resume(agent_opts, issue, attempt)
 
     case select_worker_host(state, preferred_worker_host) do
       :no_worker_capacity ->
@@ -1545,7 +1598,14 @@ defmodule SymphonyElixir.Orchestrator do
       worker_host ->
         case claim_issue_for_dispatch(issue, &Tracker.update_issue_state/2) do
           {:ok, claimed_issue} ->
-            spawn_issue_on_worker_host(state, claimed_issue, attempt, recipient, worker_host)
+            spawn_issue_on_worker_host(
+              state,
+              claimed_issue,
+              attempt,
+              recipient,
+              worker_host,
+              agent_opts
+            )
 
           {:error, reason} ->
             Logger.warning("Skipping dispatch after claim failure for #{issue_context(issue)}: #{inspect(reason)}")
@@ -1584,9 +1644,20 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+  defp spawn_issue_on_worker_host(
+         %State{} = state,
+         issue,
+         attempt,
+         recipient,
+         worker_host,
+         agent_opts
+       ) do
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(
+             issue,
+             recipient,
+             [attempt: attempt, worker_host: worker_host] ++ agent_opts
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -1678,6 +1749,7 @@ defmodule SymphonyElixir.Orchestrator do
     workspace_path = pick_retry_workspace_path(previous_retry, metadata)
     pr_number = pick_retry_pr_number(previous_retry, metadata)
     pr_url = pick_retry_pr_url(previous_retry, metadata)
+    delay_type = pick_retry_delay_type(previous_retry, metadata)
 
     if is_reference(old_timer) do
       Process.cancel_timer(old_timer)
@@ -1702,7 +1774,8 @@ defmodule SymphonyElixir.Orchestrator do
             pr_number: pr_number,
             pr_url: pr_url,
             worker_host: worker_host,
-            workspace_path: workspace_path
+            workspace_path: workspace_path,
+            delay_type: delay_type
           })
     }
   end
@@ -1716,7 +1789,8 @@ defmodule SymphonyElixir.Orchestrator do
           worker_host: Map.get(retry_entry, :worker_host),
           workspace_path: Map.get(retry_entry, :workspace_path),
           pr_number: Map.get(retry_entry, :pr_number),
-          pr_url: Map.get(retry_entry, :pr_url)
+          pr_url: Map.get(retry_entry, :pr_url),
+          delay_type: Map.get(retry_entry, :delay_type)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -1823,7 +1897,14 @@ defmodule SymphonyElixir.Orchestrator do
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) and
          worker_slots_available?(state, metadata[:worker_host]) do
-      {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
+      agent_opts =
+        if continuation_retry?(metadata) do
+          [allow_dirty_existing_workspace: true]
+        else
+          []
+        end
+
+      {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host], agent_opts)}
     else
       Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
 
@@ -1895,6 +1976,31 @@ defmodule SymphonyElixir.Orchestrator do
   defp pick_retry_pr_url(previous_retry, metadata) do
     metadata[:pr_url] || Map.get(previous_retry, :pr_url)
   end
+
+  defp pick_retry_delay_type(previous_retry, metadata) do
+    metadata[:delay_type] || Map.get(previous_retry, :delay_type)
+  end
+
+  defp continuation_retry?(metadata) when is_map(metadata) do
+    metadata[:delay_type] == :continuation
+  end
+
+  defp maybe_allow_dirty_existing_workspace_for_active_resume(agent_opts, %Issue{} = issue, _attempt) do
+    if already_active_resume_issue?(issue) do
+      Keyword.put(agent_opts, :allow_dirty_existing_workspace, true)
+    else
+      agent_opts
+    end
+  end
+
+  defp already_active_resume_issue?(%Issue{state: state_name}) when is_binary(state_name) do
+    normalized_state = normalize_issue_state(state_name)
+
+    normalized_state != "todo" and
+      active_issue_state?(state_name, active_state_set())
+  end
+
+  defp already_active_resume_issue?(_issue), do: false
 
   defp maybe_put_runtime_value(running_entry, _key, nil), do: running_entry
 

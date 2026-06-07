@@ -68,15 +68,35 @@ defmodule SymphonyElixir.RepositoryResolver do
     source_github_url(text) || first_github_issue_url(text)
   end
 
+  @spec repository_hint?(map() | String.t() | nil) :: boolean()
+  def repository_hint?(issue_or_identifier) do
+    text = issue_text(issue_or_identifier)
+    not is_nil(repo_from_explicit_line(text)) or github_slugs(text) != []
+  end
+
   defp issue_text(%Issue{} = issue) do
-    [issue.title, issue.description, issue.url]
+    [issue.title, issue.description, issue.url | issue.attachment_urls || []]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
   end
 
   defp issue_text(%{} = issue) do
-    ["title", "description", "body", "url", :title, :description, :body, :url]
+    [
+      "title",
+      "description",
+      "body",
+      "url",
+      "attachment_urls",
+      "attachmentUrls",
+      :title,
+      :description,
+      :body,
+      :url,
+      :attachment_urls,
+      :attachmentUrls
+    ]
     |> Enum.map(&Map.get(issue, &1))
+    |> List.flatten()
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
   end

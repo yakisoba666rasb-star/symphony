@@ -9,10 +9,7 @@ defmodule SymphonyElixir.Linear.Client do
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
 
-  @query """
-  query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
-    issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
-      nodes {
+  @issue_fields """
         id
         identifier
         title
@@ -23,12 +20,21 @@ defmodule SymphonyElixir.Linear.Client do
         }
         branchName
         url
+        project {
+          name
+          slugId
+        }
         assignee {
           id
         }
         labels {
           nodes {
             name
+          }
+        }
+        attachments(first: $relationFirst) {
+          nodes {
+            url
           }
         }
         inverseRelations(first: $relationFirst) {
@@ -45,6 +51,27 @@ defmodule SymphonyElixir.Linear.Client do
         }
         createdAt
         updatedAt
+  """
+
+  @query """
+  query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
+    issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
+      nodes {
+  #{@issue_fields}
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+  """
+
+  @all_projects_query """
+  query SymphonyLinearPollAllProjects($teamKey: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
+    issues(filter: {team: {key: {eq: $teamKey}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
+      nodes {
+  #{@issue_fields}
       }
       pageInfo {
         hasNextPage
@@ -58,38 +85,7 @@ defmodule SymphonyElixir.Linear.Client do
   query SymphonyLinearIssuesById($ids: [ID!]!, $first: Int!, $relationFirst: Int!) {
     issues(filter: {id: {in: $ids}}, first: $first) {
       nodes {
-        id
-        identifier
-        title
-        description
-        priority
-        state {
-          name
-        }
-        branchName
-        url
-        assignee {
-          id
-        }
-        labels {
-          nodes {
-            name
-          }
-        }
-        inverseRelations(first: $relationFirst) {
-          nodes {
-            type
-            issue {
-              id
-              identifier
-              state {
-                name
-              }
-            }
-          }
-        }
-        createdAt
-        updatedAt
+  #{@issue_fields}
       }
     }
   }
@@ -107,10 +103,19 @@ defmodule SymphonyElixir.Linear.Client do
   def fetch_candidate_issues do
     tracker = Config.settings!().tracker
     project_slug = tracker.project_slug
+    team_key = tracker.team_key
 
     cond do
       is_nil(tracker.api_key) ->
         {:error, :missing_linear_api_token}
+
+      tracker.all_projects and blank?(team_key) ->
+        {:error, :missing_linear_team_key}
+
+      tracker.all_projects ->
+        with {:ok, assignee_filter} <- routing_assignee_filter() do
+          do_fetch_by_team_states(team_key, tracker.active_states, assignee_filter)
+        end
 
       is_nil(project_slug) ->
         {:error, :missing_linear_project_slug}
@@ -131,10 +136,17 @@ defmodule SymphonyElixir.Linear.Client do
     else
       tracker = Config.settings!().tracker
       project_slug = tracker.project_slug
+      team_key = tracker.team_key
 
       cond do
         is_nil(tracker.api_key) ->
           {:error, :missing_linear_api_token}
+
+        tracker.all_projects and blank?(team_key) ->
+          {:error, :missing_linear_team_key}
+
+        tracker.all_projects ->
+          do_fetch_by_team_states(team_key, normalized_states, nil)
 
         is_nil(project_slug) ->
           {:error, :missing_linear_project_slug}
@@ -255,6 +267,35 @@ defmodule SymphonyElixir.Linear.Client do
       case next_page_cursor(page_info) do
         {:ok, next_cursor} ->
           do_fetch_by_states_page(project_slug, state_names, assignee_filter, next_cursor, updated_acc)
+
+        :done ->
+          {:ok, finalize_paginated_issues(updated_acc)}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp do_fetch_by_team_states(team_key, state_names, assignee_filter) do
+    do_fetch_by_team_states_page(team_key, state_names, assignee_filter, nil, [])
+  end
+
+  defp do_fetch_by_team_states_page(team_key, state_names, assignee_filter, after_cursor, acc_issues) do
+    with {:ok, body} <-
+           graphql(@all_projects_query, %{
+             teamKey: team_key,
+             stateNames: state_names,
+             first: @issue_page_size,
+             relationFirst: @issue_page_size,
+             after: after_cursor
+           }),
+         {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter) do
+      updated_acc = prepend_page_issues(issues, acc_issues)
+
+      case next_page_cursor(page_info) do
+        {:ok, next_cursor} ->
+          do_fetch_by_team_states_page(team_key, state_names, assignee_filter, next_cursor, updated_acc)
 
         :done ->
           {:ok, finalize_paginated_issues(updated_acc)}
@@ -457,7 +498,10 @@ defmodule SymphonyElixir.Linear.Client do
       state: get_in(issue, ["state", "name"]),
       branch_name: issue["branchName"],
       url: issue["url"],
+      project_name: project_field(issue["project"], "name"),
+      project_slug: project_field(issue["project"], "slugId"),
       assignee_id: assignee_field(assignee, "id"),
+      attachment_urls: extract_attachment_urls(issue),
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
@@ -470,6 +514,9 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp assignee_field(%{} = assignee, field) when is_binary(field), do: assignee[field]
   defp assignee_field(_assignee, _field), do: nil
+
+  defp project_field(%{} = project, field) when is_binary(field), do: project[field]
+  defp project_field(_project, _field), do: nil
 
   defp assigned_to_worker?(_assignee, nil), do: true
 
@@ -547,6 +594,17 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp extract_labels(_), do: []
 
+  defp extract_attachment_urls(%{"attachments" => %{"nodes" => attachments}}) when is_list(attachments) do
+    attachments
+    |> Enum.flat_map(fn
+      %{"url" => url} when is_binary(url) -> [url]
+      _attachment -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp extract_attachment_urls(_issue), do: []
+
   defp extract_blockers(%{"inverseRelations" => %{"nodes" => inverse_relations}})
        when is_list(inverse_relations) do
     inverse_relations
@@ -583,4 +641,8 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp parse_priority(priority) when is_integer(priority), do: priority
   defp parse_priority(_priority), do: nil
+
+  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blank?(nil), do: true
+  defp blank?(_value), do: false
 end

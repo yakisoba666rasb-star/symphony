@@ -202,6 +202,69 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert repository.slug == "kasotuosawari-design/auto_template"
   end
 
+  test "repository resolver uses GitHub attachment URLs as metadata hints" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "allowed" => ["ryo1111-qqq/Remote-mouse_v1"]
+               }
+             })
+
+    issue = %Issue{
+      identifier: "LAB-369",
+      title: "Bluetooth HID: refresh support after runtime permission result",
+      url: "https://linear.app/ryo-work/issue/LAB-369/bluetooth-hid-refresh-support-after-runtime-permission-result",
+      attachment_urls: ["https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/62"]
+    }
+
+    assert RepositoryResolver.repository_hint?(issue)
+    assert {:ok, repository} = RepositoryResolver.resolve(issue, settings)
+    assert repository.slug == "ryo1111-qqq/Remote-mouse_v1"
+    assert repository.github_issue_url == "https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/62"
+  end
+
+  test "all-projects dispatch requires repository hint and matching Linear project" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_team_key: "LAB",
+      tracker_project_slug: nil,
+      tracker_all_projects: true,
+      repository_default: "yakisoba666rasb-star/Symphony-Ryo-Lab",
+      repository_allowed: ["yakisoba666rasb-star/Symphony-Ryo-Lab", "ryo1111-qqq/Remote-mouse_v1"]
+    )
+
+    state = %Orchestrator.State{running: %{}, claimed: MapSet.new(), blocked: %{}, max_concurrent_agents: 3}
+
+    remote_issue = %Issue{
+      id: "issue-369",
+      identifier: "LAB-369",
+      title: "Bluetooth HID: refresh support after runtime permission result",
+      state: "Todo",
+      project_name: "Remote-mouse_v1",
+      attachment_urls: ["https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/62"]
+    }
+
+    mismatched_project_issue = %Issue{
+      id: "issue-370",
+      identifier: "LAB-370",
+      title: "Bluetooth HID: track host connection separately from app registration",
+      state: "Todo",
+      project_name: "Symphony-Ryo-Lab",
+      attachment_urls: ["https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/63"]
+    }
+
+    no_hint_issue = %Issue{
+      id: "issue-371",
+      identifier: "LAB-371",
+      title: "Unlinked project issue",
+      state: "Todo",
+      project_name: "Symphony-Ryo-Lab"
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(remote_issue, state)
+    refute Orchestrator.should_dispatch_issue_for_test(mismatched_project_issue, state)
+    refute Orchestrator.should_dispatch_issue_for_test(no_hint_issue, state)
+  end
+
   test "workspace path is deterministic per issue identifier" do
     workspace_root =
       Path.join(
@@ -291,6 +354,34 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert File.read!(Path.join(quarantined_workspace, "README.md")) == "changed\n"
       assert File.read!(Path.join(quarantined_workspace, "local-progress.txt")) == "untracked\n"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace can explicitly resume an existing dirty git workspace" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-dirty-resume-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git init -b main && git config user.name Test && git config user.email test@example.com && echo first > README.md && git add README.md && git commit -m initial"
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-DIRTY-RESUME")
+      File.write!(Path.join(workspace, "README.md"), "changed\n")
+      File.write!(Path.join(workspace, "local-progress.txt"), "untracked\n")
+
+      assert {:ok, ^workspace} =
+               Workspace.create_for_issue("MT-DIRTY-RESUME", nil, allow_dirty_existing_workspace: true)
+
+      refute File.exists?(Path.join(workspace_root, "MT-DIRTY-RESUME.dirty-reason.log"))
+      assert File.read!(Path.join(workspace, "README.md")) == "changed\n"
+      assert File.read!(Path.join(workspace, "local-progress.txt")) == "untracked\n"
     after
       File.rm_rf(workspace_root)
     end
@@ -614,10 +705,20 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       "state" => %{"name" => "Todo"},
       "branchName" => "mt-1",
       "url" => "https://example.org/issues/MT-1",
+      "project" => %{
+        "name" => "Remote-mouse_v1",
+        "slugId" => "remote-mouse-v1-a61ad84f7ad0"
+      },
       "assignee" => %{
         "id" => "user-1"
       },
       "labels" => %{"nodes" => [%{"name" => "Backend"}]},
+      "attachments" => %{
+        "nodes" => [
+          %{"url" => "https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/62"},
+          %{"url" => nil}
+        ]
+      },
       "inverseRelations" => %{
         "nodes" => [
           %{
@@ -648,6 +749,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.labels == ["backend"]
     assert issue.priority == 2
     assert issue.state == "Todo"
+    assert issue.project_name == "Remote-mouse_v1"
+    assert issue.project_slug == "remote-mouse-v1-a61ad84f7ad0"
+    assert issue.attachment_urls == ["https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/62"]
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
   end
@@ -1821,6 +1925,66 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert trace =~ "quarantine_workspace"
       assert trace =~ ".dirty-$(date -u +%Y%m%d-%H%M%S)"
       assert trace =~ ~s(mv "$workspace" "$quarantine_workspace")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote workspace creation can explicitly resume existing dirty git workspaces" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-dirty-resume-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_root = "~/.symphony-remote-workspaces"
+      workspace_path = "/remote/home/.symphony-remote-workspaces/MT-SSH-DIRTY-RESUME"
+      dirty_status = " M README.md\n?? local-progress.txt\n"
+      escaped_dirty_status = String.replace(dirty_status, "\n", "\\n")
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'ARGV:%s\n' "$*" >> "$trace_file"
+
+      case "$*" in
+        *"allow_dirty_existing_workspace"*)
+          printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '0' '#{workspace_path}'
+          exit 0
+          ;;
+      esac
+
+      printf '%s\\t%s\\t%s\\n' '__SYMPHONY_DIRTY_WORKSPACE__' '#{workspace_path}' '#{escaped_dirty_status}'
+      exit 72
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        worker_ssh_hosts: ["worker-01:2200"]
+      )
+
+      assert {:ok, ^workspace_path} =
+               Workspace.create_for_issue("MT-SSH-DIRTY-RESUME", "worker-01:2200", allow_dirty_existing_workspace: true)
+
+      trace = File.read!(trace_file)
+      assert trace =~ "allow_dirty_existing_workspace"
     after
       File.rm_rf(test_root)
     end

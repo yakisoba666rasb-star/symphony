@@ -116,6 +116,24 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, :missing_linear_project_slug} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: "token",
+      tracker_project_slug: nil,
+      tracker_team_key: nil,
+      tracker_all_projects: true
+    )
+
+    assert {:error, :missing_linear_team_key} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: "token",
+      tracker_project_slug: nil,
+      tracker_team_key: "LAB",
+      tracker_all_projects: true
+    )
+
+    assert :ok = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
       tracker_project_slug: "project",
       codex_command: ""
     )
@@ -1077,7 +1095,10 @@ defmodule SymphonyElixir.CoreTest do
 
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
-    assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
+
+    assert %{attempt: 1, due_at_ms: due_at_ms, delay_type: :continuation} =
+             state.retry_attempts[issue_id]
+
     assert is_integer(due_at_ms)
     assert_due_in_range(due_at_ms, 500, 1_100)
   end
@@ -2099,7 +2120,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "agent runner exits with explicit dirty workspace reason" do
+  test "agent runner quarantines dirty workspace before rerun" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -2108,26 +2129,139 @@ defmodule SymphonyElixir.CoreTest do
 
     try do
       workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+
+      File.mkdir_p!(test_root)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_TRACE:-/tmp/codex.trace}"
+      printf 'RUN\\n' >> "$trace_file"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-dirty-rerun"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-dirty-rerun-1"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEX_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEX_TRACE") end)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "git init -b main && git config user.name Test && git config user.email test@example.com && echo first > README.md && git add README.md && git commit -m initial"
+        hook_after_create: "git init -b main && git config user.name Test && git config user.email test@example.com && echo first > README.md && git add README.md && git commit -m initial",
+        codex_command: "#{codex_binary} app-server"
       )
 
       issue = %Issue{
         id: "issue-dirty-workspace",
         identifier: "MT-DIRTY-RUNNER",
         title: "Dirty workspace",
-        description: "Existing dirty workspace should block explicitly",
+        description: "Existing dirty workspace should be quarantined before rerun",
         state: "In Progress"
       }
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       File.write!(Path.join(workspace, "agent-output.txt"), "created but not committed\n")
 
-      assert catch_exit(AgentRunner.run(issue)) ==
-               {:dirty_workspace, workspace, "?? agent-output.txt\n"}
+      state_fetcher = fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      refute File.exists?(Path.join(workspace, "agent-output.txt"))
+      assert File.exists?(Path.join(workspace_root, "MT-DIRTY-RUNNER.dirty-reason.log"))
+      assert File.read!(trace_file) =~ "RUN"
     after
+      System.delete_env("SYMP_TEST_CODEX_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner skips before_run hook when explicitly resuming dirty workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-dirty-resume-before-run-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+
+      File.mkdir_p!(test_root)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex.trace}"
+      printf 'RUN\\n' >> "$trace_file"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-dirty-resume"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-dirty-resume-1"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git init -b main && git config user.name Test && git config user.email test@example.com && echo first > README.md && git add README.md && git commit -m initial",
+        hook_before_run: "touch before-run-called && exit 99",
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-dirty-resume-before-run",
+        identifier: "MT-DIRTY-BEFORE",
+        title: "Dirty resume skips before run",
+        description: "Existing dirty workspace should resume without rebase",
+        state: "In Progress"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      File.write!(Path.join(workspace, "agent-output.txt"), "created but not committed\n")
+
+      assert :ok = AgentRunner.run(issue, nil, allow_dirty_existing_workspace: true)
+      refute File.exists?(Path.join(workspace, "before-run-called"))
+      assert File.read!(trace_file) =~ "RUN"
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
       File.rm_rf(test_root)
     end
   end
