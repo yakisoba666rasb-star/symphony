@@ -223,7 +223,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert repository.github_issue_url == "https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/62"
   end
 
-  test "all-projects dispatch requires repository hint and matching Linear project" do
+  test "all-projects dispatch allows unprojected issues with repository hints" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_team_key: "LAB",
       tracker_project_slug: nil,
@@ -252,6 +252,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       attachment_urls: ["https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/63"]
     }
 
+    unprojected_remote_issue = %Issue{
+      id: "issue-372",
+      identifier: "LAB-372",
+      title: "Server dev extra does not install os input adapter",
+      state: "Todo",
+      project_name: nil,
+      project_slug: nil,
+      attachment_urls: ["https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/74"]
+    }
+
     no_hint_issue = %Issue{
       id: "issue-371",
       identifier: "LAB-371",
@@ -261,6 +271,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     assert Orchestrator.should_dispatch_issue_for_test(remote_issue, state)
+    assert Orchestrator.should_dispatch_issue_for_test(unprojected_remote_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(mismatched_project_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(no_hint_issue, state)
   end
