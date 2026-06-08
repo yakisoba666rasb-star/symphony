@@ -1347,7 +1347,6 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(),
       repository_default: "yakisoba666rasb-star/Symphony-Ryo-Lab",
-      repository_allowed: ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"],
       prompt: workflow_prompt
     )
 

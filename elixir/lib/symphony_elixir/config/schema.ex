@@ -124,16 +124,14 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:default, :string)
-      field(:allowed, {:array, :string}, default: [])
       field(:clone_protocol, :string, default: "https")
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:default, :allowed, :clone_protocol], empty_values: [])
+      |> cast(attrs, [:default, :clone_protocol], empty_values: [])
       |> validate_change(:default, &validate_optional_repository_slug/2)
-      |> validate_change(:allowed, &validate_repository_slug_list/2)
       |> validate_inclusion(:clone_protocol, ["https", "ssh"])
     end
 
@@ -145,15 +143,6 @@ defmodule SymphonyElixir.Config.Schema do
         []
       else
         [{field, "must be a GitHub repository slug like owner/name"}]
-      end
-    end
-
-    defp validate_repository_slug_list(field, values) when is_list(values) do
-      values
-      |> Enum.reject(&valid_repository_slug?/1)
-      |> case do
-        [] -> []
-        _invalid -> [{field, "must contain GitHub repository slugs like owner/name"}]
       end
     end
 

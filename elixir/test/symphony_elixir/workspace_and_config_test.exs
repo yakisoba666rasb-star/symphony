@@ -86,7 +86,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         repository_default: "yakisoba666rasb-star/Symphony-Ryo-Lab",
-        repository_allowed: ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"],
         hook_after_create: """
         printf '%s' "$SYMPHONY_REPOSITORY" > repo.txt
         printf '%s' "$SYMPHONY_REPOSITORY_OWNER" > owner.txt
@@ -117,7 +116,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
-  test "repository resolver falls back to workflow default and enforces allowlist" do
+  test "repository resolver falls back to workflow default and ignores deprecated allowed list" do
     assert {:ok, settings} =
              Schema.parse(%{
                "repository" => %{
@@ -136,8 +135,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       description: "https://github.com/kasotuosawari-design/auto_template/issues/338"
     }
 
-    assert {:error, {:repository_not_allowed, "kasotuosawari-design/auto_template", _allowed}} =
-             RepositoryResolver.resolve(issue, settings)
+    assert {:ok, repository} = RepositoryResolver.resolve(issue, settings)
+    assert repository.slug == "kasotuosawari-design/auto_template"
   end
 
   test "repository resolver rejects conflicting explicit repo and GitHub source URL" do
@@ -319,8 +318,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       tracker_team_key: "LAB",
       tracker_project_slug: nil,
       tracker_all_projects: true,
-      repository_default: "yakisoba666rasb-star/Symphony-Ryo-Lab",
-      repository_allowed: []
+      repository_default: "yakisoba666rasb-star/Symphony-Ryo-Lab"
     )
 
     state = %Orchestrator.State{running: %{}, claimed: MapSet.new(), blocked: %{}, max_concurrent_agents: 3}
