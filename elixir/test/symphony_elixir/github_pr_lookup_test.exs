@@ -289,6 +289,163 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
              GitHubPrLookup.lookup_workspace_head(workspace, "feature/http", deps)
   end
 
+  test "workspace handoff lookup uses linked PR attachment when branch lookup misses" do
+    workspace = "/tmp/owner-workspace-linked-pr"
+    parent = self()
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", args, _opts ->
+          send(parent, {:command, :git, args})
+          {:ok, {"https://github.com/octo/repo.git", 0}}
+
+        "/tmp/fake-gh", args, _opts ->
+          send(parent, {:command, :gh, args})
+
+          case args do
+            ["pr", "list", "--repo", "octo/repo", "--state", _state, "--json", _fields, "--head", "feature/linear"] ->
+              {:ok, {"[]", 0}}
+
+            ["pr", "view", "79", "--repo", "octo/repo", "--json", _fields] ->
+              {:ok,
+               {Jason.encode!(%{
+                  "number" => 79,
+                  "url" => "https://github.com/octo/repo/pull/79",
+                  "headRefName" => "feature/actual-pr",
+                  "isDraft" => false,
+                  "mergeStateStatus" => "CLEAN",
+                  "state" => "OPEN"
+                }), 0}}
+          end
+      end
+    }
+
+    assert {:ok,
+            %{
+              "number" => 79,
+              "headRefName" => "feature/actual-pr",
+              "__symphonyLookupSource" => "linked_pull_request",
+              "__symphonyExpectedBranch" => "feature/linear"
+            }} =
+             GitHubPrLookup.lookup_workspace_handoff_pr(
+               workspace,
+               "feature/linear",
+               ["https://github.com/octo/repo/pull/79"],
+               deps
+             )
+
+    assert_received {:command, :git, ["-C", ^workspace, "remote", "get-url", "origin"]}
+    assert_received {:command, :gh, ["pr", "list", "--repo", "octo/repo", "--state", "open" | _]}
+    assert_received {:command, :gh, ["pr", "list", "--repo", "octo/repo", "--state", "all" | _]}
+    assert_received {:command, :gh, ["pr", "view", "79", "--repo", "octo/repo", "--json", _fields]}
+  end
+
+  test "workspace handoff lookup keeps branch PR as the primary source" do
+    workspace = "/tmp/owner-workspace-branch-primary"
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", _args, _opts ->
+          {:ok, {"https://github.com/octo/repo.git", 0}}
+
+        "/tmp/fake-gh", ["pr", "list" | _args], _opts ->
+          {:ok,
+           {Jason.encode!([
+              %{
+                "number" => 80,
+                "url" => "https://github.com/octo/repo/pull/80",
+                "headRefName" => "feature/linear",
+                "isDraft" => false,
+                "mergeStateStatus" => "CLEAN",
+                "state" => "OPEN"
+              }
+            ]), 0}}
+
+        "/tmp/fake-gh", ["pr", "view" | _args], _opts ->
+          flunk("linked PR fallback should not run when branch lookup finds a PR")
+      end
+    }
+
+    assert {:ok,
+            %{
+              "number" => 80,
+              "__symphonyLookupSource" => "branch",
+              "__symphonyExpectedBranch" => "feature/linear"
+            }} =
+             GitHubPrLookup.lookup_workspace_handoff_pr(
+               workspace,
+               "feature/linear",
+               ["https://github.com/octo/repo/pull/79"],
+               deps
+             )
+  end
+
+  test "workspace handoff lookup rejects multiple linked PR attachments" do
+    workspace = "/tmp/owner-workspace-ambiguous-linked-pr"
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", _args, _opts ->
+          {:ok, {"https://github.com/octo/repo.git", 0}}
+
+        "/tmp/fake-gh", ["pr", "list" | _args], _opts ->
+          {:ok, {"[]", 0}}
+
+        "/tmp/fake-gh", ["pr", "view" | _args], _opts ->
+          flunk("ambiguous linked PRs should not be viewed")
+      end
+    }
+
+    assert {:error, {:ambiguous_linked_pull_requests, ["https://github.com/octo/repo/pull/79", "https://github.com/octo/repo/pull/80"]}} =
+             GitHubPrLookup.lookup_workspace_handoff_pr(
+               workspace,
+               "feature/linear",
+               ["https://github.com/octo/repo/pull/79", "https://github.com/octo/repo/pull/80"],
+               deps
+             )
+  end
+
+  test "workspace handoff lookup rejects draft linked PR attachments" do
+    workspace = "/tmp/owner-workspace-draft-linked-pr"
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", _args, _opts ->
+          {:ok, {"https://github.com/octo/repo.git", 0}}
+
+        "/tmp/fake-gh", ["pr", "list" | _args], _opts ->
+          {:ok, {"[]", 0}}
+
+        "/tmp/fake-gh", ["pr", "view", "79" | _args], _opts ->
+          {:ok,
+           {Jason.encode!(%{
+              "number" => 79,
+              "url" => "https://github.com/octo/repo/pull/79",
+              "headRefName" => "feature/draft",
+              "isDraft" => true,
+              "mergeStateStatus" => "CLEAN",
+              "state" => "OPEN"
+            }), 0}}
+      end
+    }
+
+    assert {:error, {:linked_pull_request_is_draft, 79}} =
+             GitHubPrLookup.lookup_workspace_handoff_pr(
+               workspace,
+               "feature/linear",
+               ["https://github.com/octo/repo/pull/79"],
+               deps
+             )
+  end
+
   test "resolves repository from SSH host-alias GitHub remote URL" do
     workspace = "/tmp/owner-workspace-alias"
 

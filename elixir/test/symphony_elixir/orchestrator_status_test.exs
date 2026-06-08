@@ -13,6 +13,25 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     def lookup_workspace_head(_workspace_path, _branch_name), do: {:error, :missing_auth}
   end
 
+  defmodule FakeGitHubPrLookupLinkedPrFallback do
+    def lookup_workspace_handoff_pr(_workspace_path, branch_name, attachment_urls) do
+      if "https://github.example/pull/79" in attachment_urls do
+        {:ok,
+         %{
+           "number" => 79,
+           "url" => "https://github.example/pull/79",
+           "headRefName" => "feature/actual-pr",
+           "__symphonyLookupSource" => "linked_pull_request",
+           "__symphonyExpectedBranch" => branch_name
+         }}
+      else
+        {:ok, nil}
+      end
+    end
+
+    def lookup_workspace_head(_workspace_path, _branch_name), do: {:ok, nil}
+  end
+
   defmodule FakeGitHubPrPublisherError do
     def publish_workspace(_workspace_path, _branch_name, _issue), do: {:error, :publish_blocked}
   end
@@ -1476,7 +1495,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert %{
              identifier: "MT-NO-PR",
-             error: "no GitHub PR found for branch feature/no-pr; agent-owned PR is required before In Review handoff"
+             error: "no GitHub PR found for branch feature/no-pr or linked PR attachments; agent-owned PR is required before In Review handoff"
            } = state.blocked[issue_id]
   end
 
@@ -1643,6 +1662,122 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert comment =~ "Symphony automated review decision: approve-equivalent"
     assert comment =~ "Merge judgment: ready for human final merge decision"
     assert comment =~ "The runtime will not approve on GitHub and will not merge automatically."
+
+    assert MapSet.member?(state.completed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert state.blocked == %{}
+  end
+
+  test "orchestrator accepts linked PR attachment fallback when Linear branch lookup misses" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_review_runner = Application.get_env(:symphony_elixir, :review_runner)
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+
+    previous_tracker_state_update_recipient =
+      Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
+
+    previous_tracker_comment_recipient =
+      Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_review_runner) do
+        Application.delete_env(:symphony_elixir, :review_runner)
+      else
+        Application.put_env(:symphony_elixir, :review_runner, previous_review_runner)
+      end
+
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+
+      if is_nil(previous_tracker_state_update_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_state_update_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_state_update_recipient,
+          previous_tracker_state_update_recipient
+        )
+      end
+
+      if is_nil(previous_tracker_comment_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_comment_recipient,
+          previous_tracker_comment_recipient
+        )
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupLinkedPrFallback)
+    Application.put_env(:symphony_elixir, :review_runner, FakeReviewRunnerApproved)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-normal-linked-pr-found"
+    orchestrator_name = Module.concat(__MODULE__, :NormalLinkedPrFoundOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-LINKED-PR",
+      branch_name: "feature/linear-branch",
+      attachment_urls: ["https://github.example/pull/79"],
+      state: "In Progress"
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      workspace_path: "/tmp/mt-linked-pr-found",
+      session_id: "thread-linked-pr-found",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 200
+    assert_receive {:tracker_comment_called, ^issue_id, comment}, 200
+    assert comment =~ "PR: https://github.example/pull/79"
+    assert comment =~ "source: linked GitHub PR attachment"
+    assert comment =~ "expected Linear branch: feature/linear-branch"
+    assert comment =~ "actual PR branch: feature/actual-pr"
 
     assert MapSet.member?(state.completed, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
