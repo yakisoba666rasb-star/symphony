@@ -693,11 +693,11 @@ defmodule SymphonyElixir.AppServerTest do
                        },
                        %{
                          "description" => brainstorming_description,
-                         "name" => "superpowers:brainstorming"
+                         "name" => "superpowers_brainstorming"
                        },
                        %{
                          "description" => writing_plans_description,
-                         "name" => "superpowers:writing-plans"
+                         "name" => "superpowers_writing_plans"
                        }
                      ] ->
                        description =~ "Linear" and
@@ -1271,7 +1271,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-90c\"}}}'
-            printf '%s\\n' '{\"id\":104,\"method\":\"item/tool/call\",\"params\":{\"name\":\"superpowers:brainstorming\",\"callId\":\"call-90c\",\"threadId\":\"thread-90c\",\"turnId\":\"turn-90c\",\"arguments\":{\"issue_identifier\":\"MT-90C\",\"title\":\"Superpowers tool\",\"requirements_summary\":[\"Expose the planning gate as a dynamic tool.\"]}}}'
+            printf '%s\\n' '{\"id\":104,\"method\":\"item/tool/call\",\"params\":{\"name\":\"superpowers_brainstorming\",\"callId\":\"call-90c\",\"threadId\":\"thread-90c\",\"turnId\":\"turn-90c\",\"arguments\":{\"issue_identifier\":\"MT-90C\",\"title\":\"Superpowers tool\",\"requirements_summary\":[\"Expose the planning gate as a dynamic tool.\"]}}}'
             ;;
           5)
             printf '%s\\n' '{\"method\":\"turn/completed\"}'

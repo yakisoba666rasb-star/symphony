@@ -6,8 +6,10 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   alias SymphonyElixir.Linear.Client
 
   @linear_graphql_tool "linear_graphql"
-  @superpowers_brainstorming_tool "superpowers:brainstorming"
-  @superpowers_writing_plans_tool "superpowers:writing-plans"
+  @superpowers_brainstorming_tool "superpowers_brainstorming"
+  @superpowers_writing_plans_tool "superpowers_writing_plans"
+  @legacy_superpowers_brainstorming_tool "superpowers:brainstorming"
+  @legacy_superpowers_writing_plans_tool "superpowers:writing-plans"
   @allowed_linear_mutation_fields MapSet.new(["commentCreate", "commentUpdate"])
   @linear_graphql_description """
   Execute a raw read-only GraphQL query against Linear using Symphony's configured auth.
@@ -80,7 +82,13 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       @superpowers_brainstorming_tool ->
         execute_superpowers_tool(@superpowers_brainstorming_tool, arguments)
 
+      @legacy_superpowers_brainstorming_tool ->
+        execute_superpowers_tool(@superpowers_brainstorming_tool, arguments)
+
       @superpowers_writing_plans_tool ->
+        execute_superpowers_tool(@superpowers_writing_plans_tool, arguments)
+
+      @legacy_superpowers_writing_plans_tool ->
         execute_superpowers_tool(@superpowers_writing_plans_tool, arguments)
 
       other ->
@@ -167,7 +175,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     #{bullet_section(arguments, "open_questions_or_blockers", ["None recorded by the tool caller."])}
 
     ## Next step
-    Call `superpowers:writing-plans` with the clarified requirements before editing code.
+    Call `superpowers_writing_plans` with the clarified requirements before editing code.
     """
     |> String.trim()
   end
@@ -194,7 +202,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     #{bullet_section(arguments, "open_questions_or_blockers", ["None recorded by the tool caller."])}
 
     ## Planning gate status
-    This artifact was produced by the `superpowers:writing-plans` dynamic tool and can be recorded in Linear, a PR body, or a workpad before implementation.
+    This artifact was produced by the `superpowers_writing_plans` dynamic tool and can be recorded in Linear, a PR body, or a workpad before implementation.
     """
     |> String.trim()
   end
