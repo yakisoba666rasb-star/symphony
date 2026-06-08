@@ -28,7 +28,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                  },
                  "type" => "object"
                },
-               "name" => "superpowers:brainstorming"
+               "name" => "superpowers_brainstorming"
              },
              %{
                "description" => writing_plans_description,
@@ -39,7 +39,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                  },
                  "type" => "object"
                },
-               "name" => "superpowers:writing-plans"
+               "name" => "superpowers_writing_plans"
              }
            ] = specs
 
@@ -58,8 +58,8 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                "message" => ~s(Unsupported dynamic tool: "not_a_real_tool".),
                "supportedTools" => [
                  "linear_graphql",
-                 "superpowers:brainstorming",
-                 "superpowers:writing-plans"
+                 "superpowers_brainstorming",
+                 "superpowers_writing_plans"
                ]
              }
            }
@@ -74,7 +74,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
   test "superpowers brainstorming returns a planning artifact" do
     response =
-      DynamicTool.execute("superpowers:brainstorming", %{
+      DynamicTool.execute("superpowers_brainstorming", %{
         "issue_identifier" => "LAB-999",
         "title" => "Expose Superpowers tools",
         "requirements_summary" => ["Make the planning gate callable."],
@@ -91,7 +91,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
   test "superpowers writing-plans returns a concrete plan artifact" do
     response =
-      DynamicTool.execute("superpowers:writing-plans", %{
+      DynamicTool.execute("superpowers_writing_plans", %{
         "issue_identifier" => "LAB-1000",
         "title" => "Plan Superpowers gate",
         "implementation_steps" => ["Add tool specs.", "Run tests."],
@@ -103,6 +103,16 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert response["output"] =~ "1. Add tool specs."
     assert response["output"] =~ "2. Run tests."
     assert response["output"] =~ "Inspect dynamicTools."
+  end
+
+  test "legacy superpowers names remain executable but are not advertised" do
+    specs = DynamicTool.tool_specs()
+
+    refute Enum.any?(specs, &(&1["name"] == "superpowers:brainstorming"))
+    refute Enum.any?(specs, &(&1["name"] == "superpowers:writing-plans"))
+
+    assert DynamicTool.execute("superpowers:brainstorming", %{})["success"] == true
+    assert DynamicTool.execute("superpowers:writing-plans", %{})["success"] == true
   end
 
   test "linear_graphql returns successful GraphQL responses as tool text" do
