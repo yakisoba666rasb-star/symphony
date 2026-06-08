@@ -19,8 +19,6 @@ workspace:
   root: ~/symphony-workspaces
 repository:
   default: your-org/your-repo
-  allowed:
-    - your-org/your-repo
   clone_protocol: https
 hooks:
   after_create: |

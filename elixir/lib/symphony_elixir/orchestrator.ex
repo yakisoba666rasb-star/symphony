@@ -1462,20 +1462,11 @@ defmodule SymphonyElixir.Orchestrator do
     with true <- RepositoryResolver.repository_hint?(issue),
          {:ok, %{slug: slug, name: repo_name}} when is_binary(slug) and is_binary(repo_name) <-
            RepositoryResolver.resolve(issue, settings),
-         true <- issue_has_no_linear_project?(issue) or linear_project_matches_repository?(issue, repo_name) do
+         true <- linear_project_matches_repository?(issue, repo_name) do
       true
     else
       _not_routable -> false
     end
-  end
-
-  defp issue_has_no_linear_project?(%Issue{} = issue) do
-    [issue.project_name, issue.project_slug]
-    |> Enum.all?(fn
-      value when is_binary(value) -> String.trim(value) == ""
-      nil -> true
-      _other -> false
-    end)
   end
 
   defp linear_project_matches_repository?(%Issue{} = issue, repo_name) when is_binary(repo_name) do
