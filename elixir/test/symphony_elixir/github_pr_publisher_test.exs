@@ -93,12 +93,57 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
     assert body =~ "Source GitHub issue: https://github.com/octo/repo/issues/236"
   end
 
-  test "does not publish when workspace has no changes" do
+  test "returns issue-linked PR when workspace is clean and head branch lookup would miss it" do
+    parent = self()
+
+    deps = %{
+      find_git_bin: fn -> "/bin/git" end,
+      find_gh_bin: fn -> "/bin/gh" end,
+      run_command: fn cmd, args, opts ->
+        send(parent, {:command, cmd, args, opts})
+
+        case {cmd, args} do
+          {"/bin/git", ["-C", "/work/clean", "status", "--porcelain", "--", "." | _pathspecs]} ->
+            {:ok, {"", 0}}
+
+          {"/bin/git", ["-C", "/work/clean", "remote", "get-url", "origin"]} ->
+            {:ok, {"git@github.com:octo/repo.git\n", 0}}
+
+          {"/bin/gh", ["pr", "list" | rest]} ->
+            assert Enum.member?(rest, "--search")
+            assert Enum.member?(rest, "LAB-374 in:title,body")
+
+            {:ok,
+             {Jason.encode!([
+                %{
+                  "number" => 73,
+                  "url" => "https://github.com/octo/repo/pull/73",
+                  "headRefName" => "LAB-374-android-release-config",
+                  "isDraft" => false,
+                  "mergeStateStatus" => "CLEAN",
+                  "state" => "OPEN"
+                }
+              ]), 0}}
+        end
+      end
+    }
+
+    assert {:ok, %{"number" => 73, "headRefName" => "LAB-374-android-release-config"}} =
+             GitHubPrPublisher.publish_workspace("/work/clean", "aenima611111/lab-374", %Issue{identifier: "LAB-374"}, deps)
+
+    refute_received {:command, "/bin/git", ["-C", "/work/clean", "checkout" | _rest], _opts}
+    refute_received {:command, "/bin/git", ["-C", "/work/clean", "commit" | _rest], _opts}
+    refute_received {:command, "/bin/git", ["-C", "/work/clean", "push" | _rest], _opts}
+  end
+
+  test "does not publish clean workspace when no issue-linked PR is found" do
     deps = %{
       find_git_bin: fn -> "/bin/git" end,
       find_gh_bin: fn -> "/bin/gh" end,
       run_command: fn
         "/bin/git", ["-C", "/work/clean", "status", "--porcelain", "--", "." | _pathspecs], _opts -> {:ok, {"", 0}}
+        "/bin/git", ["-C", "/work/clean", "remote", "get-url", "origin"], _opts -> {:ok, {"git@github.com:octo/repo.git\n", 0}}
+        "/bin/gh", ["pr", "list" | _rest], _opts -> {:ok, {"[]", 0}}
       end
     }
 

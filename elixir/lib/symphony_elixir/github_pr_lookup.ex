@@ -22,6 +22,22 @@ defmodule SymphonyElixir.GitHubPrLookup do
     end
   end
 
+  @spec lookup_by_issue(String.t(), String.t(), deps()) :: {:ok, nil | pr_map()} | {:error, term()}
+  def lookup_by_issue(repo, issue_identifier, deps \\ runtime_deps())
+      when is_binary(repo) and is_binary(issue_identifier) do
+    issue_identifier = String.trim(issue_identifier)
+
+    if issue_identifier == "" do
+      {:error, :invalid_issue_identifier}
+    else
+      with {:ok, gh_bin} <- find_gh_binary(deps) do
+        with {:ok, nil} <- lookup_by_issue_state(gh_bin, repo, issue_identifier, "open", deps) do
+          lookup_by_issue_state(gh_bin, repo, issue_identifier, "all", deps)
+        end
+      end
+    end
+  end
+
   @spec lookup_workspace_head(String.t(), String.t(), deps()) :: {:ok, nil | pr_map()} | {:error, term()}
   def lookup_workspace_head(workspace_path, head_branch, deps \\ runtime_deps())
       when is_binary(workspace_path) and is_binary(head_branch) do
@@ -133,6 +149,16 @@ defmodule SymphonyElixir.GitHubPrLookup do
     end
   end
 
+  defp lookup_by_issue_state(gh_bin, repo, issue_identifier, state, deps) do
+    command = github_pr_search_args(repo, issue_identifier, state)
+
+    case normalize_command_result(deps.run_command.(gh_bin, command, stderr_to_stdout: true)) do
+      {:ok, {output, 0}} -> parse_gh_response(output)
+      {:ok, {_output, status}} -> {:error, {:gh_command_failed, status}}
+      {:error, reason} -> {:error, {:gh_command_failed, reason}}
+    end
+  end
+
   defp pick_pr(values) do
     values
     |> Enum.filter(&is_map/1)
@@ -176,6 +202,21 @@ defmodule SymphonyElixir.GitHubPrLookup do
       "number,url,headRefName,isDraft,mergeStateStatus,state",
       "--head",
       head_branch
+    ]
+  end
+
+  defp github_pr_search_args(repo, issue_identifier, state) do
+    [
+      "pr",
+      "list",
+      "--repo",
+      repo,
+      "--state",
+      state,
+      "--json",
+      "number,url,headRefName,isDraft,mergeStateStatus,state",
+      "--search",
+      "#{issue_identifier} in:title,body"
     ]
   end
 end

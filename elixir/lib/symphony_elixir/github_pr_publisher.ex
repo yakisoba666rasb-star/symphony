@@ -32,10 +32,23 @@ defmodule SymphonyElixir.GitHubPrPublisher do
       when is_binary(workspace_path) and is_binary(head_branch) do
     with {:ok, git_bin} <- find_binary(deps, :find_git_bin, :git_not_found),
          {:ok, gh_bin} <- find_binary(deps, :find_gh_bin, :gh_not_found),
-         :ok <- ensure_workspace_has_changes(workspace_path, git_bin, deps),
          {:ok, remote_url} <- git_output(workspace_path, git_bin, ["remote", "get-url", "origin"], deps),
-         {:ok, repo} <- parse_remote_url(remote_url),
-         {:ok, base_branch} <- default_base_branch(workspace_path, git_bin, deps),
+         {:ok, repo} <- parse_remote_url(remote_url) do
+      case ensure_workspace_has_changes(workspace_path, git_bin, deps) do
+        :ok ->
+          publish_dirty_workspace(workspace_path, head_branch, issue, git_bin, gh_bin, repo, deps)
+
+        {:error, :no_workspace_changes} ->
+          lookup_existing_issue_pr(repo, issue, deps)
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp publish_dirty_workspace(workspace_path, head_branch, issue, git_bin, gh_bin, repo, deps) do
+    with {:ok, base_branch} <- default_base_branch(workspace_path, git_bin, deps),
          :ok <- ensure_git_identity(workspace_path, git_bin, deps),
          :ok <- git_ok(workspace_path, git_bin, ["checkout", "-B", head_branch], deps),
          :ok <- git_ok(workspace_path, git_bin, ["add", "-A", "--", "." | @runtime_control_pathspecs], deps),
@@ -137,6 +150,14 @@ defmodule SymphonyElixir.GitHubPrPublisher do
     end
   end
 
+  defp lookup_existing_issue_pr(repo, issue, deps) do
+    case GitHubPrLookup.lookup_by_issue(repo, issue_identifier(issue), deps) do
+      {:ok, %{} = pr} -> {:ok, pr}
+      {:ok, nil} -> {:error, :no_workspace_changes}
+      {:error, _reason} -> {:error, :no_workspace_changes}
+    end
+  end
+
   defp publish_or_refresh_pr(workspace_path, gh_bin, repo, head_branch, base_branch, issue, deps) do
     case create_draft_pr(workspace_path, gh_bin, repo, head_branch, base_branch, issue, deps) do
       {:ok, pr_url} ->
@@ -149,8 +170,15 @@ defmodule SymphonyElixir.GitHubPrPublisher do
       {:error, create_reason} ->
         case GitHubPrLookup.lookup_by_head(repo, head_branch, deps) do
           {:ok, %{} = pr} -> {:ok, pr}
-          _other -> {:error, create_reason}
+          _other -> fallback_issue_pr_or_error(repo, issue, create_reason, deps)
         end
+    end
+  end
+
+  defp fallback_issue_pr_or_error(repo, issue, create_reason, deps) do
+    case GitHubPrLookup.lookup_by_issue(repo, issue_identifier(issue), deps) do
+      {:ok, %{} = pr} -> {:ok, pr}
+      _other -> {:error, create_reason}
     end
   end
 

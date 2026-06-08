@@ -140,6 +140,72 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
              GitHubPrLookup.lookup_by_head("octo/repo", "feature/reused", deps)
   end
 
+  test "looks up PRs by Linear issue key when head branch differs" do
+    parent = self()
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn gh, args, _opts ->
+        send(parent, {:command, gh, args})
+
+        assert Enum.member?(args, "--search")
+        assert Enum.member?(args, "LAB-374 in:title,body")
+
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 73,
+              "url" => "https://github.com/octo/repo/pull/73",
+              "headRefName" => "LAB-374-android-release-config",
+              "isDraft" => false,
+              "mergeStateStatus" => "CLEAN",
+              "state" => "OPEN"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:ok, %{"number" => 73, "headRefName" => "LAB-374-android-release-config"}} =
+             GitHubPrLookup.lookup_by_issue("octo/repo", "LAB-374", deps)
+
+    assert_received {:command, "/tmp/fake-gh", ["pr", "list", "--repo", "octo/repo", "--state", "open" | _]}
+  end
+
+  test "issue-key lookup falls back to all states only when no open PR exists" do
+    parent = self()
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn gh, args, _opts ->
+        send(parent, {:command, gh, args})
+
+        case Enum.at(args, Enum.find_index(args, &(&1 == "--state")) + 1) do
+          "open" ->
+            {:ok, {"[]", 0}}
+
+          "all" ->
+            {:ok,
+             {Jason.encode!([
+                %{
+                  "number" => 72,
+                  "url" => "https://github.com/octo/repo/pull/72",
+                  "headRefName" => "feature/old-lab-374",
+                  "isDraft" => false,
+                  "mergeStateStatus" => "CLEAN",
+                  "state" => "MERGED"
+                }
+              ]), 0}}
+        end
+      end
+    }
+
+    assert {:ok, %{"number" => 72, "state" => "MERGED"}} =
+             GitHubPrLookup.lookup_by_issue("octo/repo", "LAB-374", deps)
+
+    assert_received {:command, "/tmp/fake-gh", ["pr", "list", "--repo", "octo/repo", "--state", "open" | _]}
+    assert_received {:command, "/tmp/fake-gh", ["pr", "list", "--repo", "octo/repo", "--state", "all" | _]}
+  end
+
   test "sorts candidate PRs by open state, draft status, merge state, and number" do
     deps = %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,
