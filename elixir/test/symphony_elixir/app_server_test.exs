@@ -690,9 +690,19 @@ defmodule SymphonyElixir.AppServerTest do
                          "description" => description,
                          "inputSchema" => %{"required" => ["query"]},
                          "name" => "linear_graphql"
+                       },
+                       %{
+                         "description" => brainstorming_description,
+                         "name" => "superpowers:brainstorming"
+                       },
+                       %{
+                         "description" => writing_plans_description,
+                         "name" => "superpowers:writing-plans"
                        }
                      ] ->
-                       description =~ "Linear"
+                       description =~ "Linear" and
+                         brainstorming_description =~ "brainstorming" and
+                         writing_plans_description =~ "writing-plans"
 
                      _ ->
                        false
@@ -1208,6 +1218,111 @@ defmodule SymphonyElixir.AppServerTest do
                    get_in(payload, ["result", "success"]) == true and
                    get_in(payload, ["result", "output"]) ==
                      ~s({"data":{"viewer":{"id":"usr_123"}}})
+               else
+                 false
+               end
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server executes superpowers dynamic tool calls" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-superpowers-tool-call-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-90C")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-superpowers-tool-call.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEx_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEx_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-superpowers-tool-call.trace}"
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' \"$line\" >> \"$trace_file\"
+
+        case \"$count\" in
+          1)
+            printf '%s\\n' '{\"id\":1,\"result\":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-90c\"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-90c\"}}}'
+            printf '%s\\n' '{\"id\":104,\"method\":\"item/tool/call\",\"params\":{\"name\":\"superpowers:brainstorming\",\"callId\":\"call-90c\",\"threadId\":\"thread-90c\",\"turnId\":\"turn-90c\",\"arguments\":{\"issue_identifier\":\"MT-90C\",\"title\":\"Superpowers tool\",\"requirements_summary\":[\"Expose the planning gate as a dynamic tool.\"]}}}'
+            ;;
+          5)
+            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-superpowers-tool-call",
+        identifier: "MT-90C",
+        title: "Superpowers tool",
+        description: "Ensure superpowers dynamic tool calls return planning artifacts",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-90C",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Handle superpowers tool calls", issue)
+
+      trace = File.read!(trace_file)
+      lines = String.split(trace, "\n", trim: true)
+
+      assert Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 payload =
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+
+                 payload["id"] == 104 and
+                   get_in(payload, ["result", "success"]) == true and
+                   String.contains?(
+                     get_in(payload, ["result", "output"]),
+                     "# Superpowers Brainstorming Artifact"
+                   ) and
+                   String.contains?(
+                     get_in(payload, ["result", "output"]),
+                     "Expose the planning gate as a dynamic tool."
+                   )
                else
                  false
                end

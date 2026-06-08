@@ -3,7 +3,9 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
   alias SymphonyElixir.Codex.DynamicTool
 
-  test "tool_specs advertises the linear_graphql input contract" do
+  test "tool_specs advertises the linear_graphql and superpowers input contracts" do
+    specs = DynamicTool.tool_specs()
+
     assert [
              %{
                "description" => description,
@@ -16,10 +18,34 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                  "type" => "object"
                },
                "name" => "linear_graphql"
+             },
+             %{
+               "description" => brainstorming_description,
+               "inputSchema" => %{
+                 "properties" => %{
+                   "requirements_summary" => _,
+                   "acceptance_criteria" => _
+                 },
+                 "type" => "object"
+               },
+               "name" => "superpowers:brainstorming"
+             },
+             %{
+               "description" => writing_plans_description,
+               "inputSchema" => %{
+                 "properties" => %{
+                   "implementation_steps" => _,
+                   "verification_method" => _
+                 },
+                 "type" => "object"
+               },
+               "name" => "superpowers:writing-plans"
              }
-           ] = DynamicTool.tool_specs()
+           ] = specs
 
     assert description =~ "Linear"
+    assert brainstorming_description =~ "brainstorming"
+    assert writing_plans_description =~ "writing-plans"
   end
 
   test "unsupported tools return a failure payload with the supported tool list" do
@@ -30,7 +56,11 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert Jason.decode!(response["output"]) == %{
              "error" => %{
                "message" => ~s(Unsupported dynamic tool: "not_a_real_tool".),
-               "supportedTools" => ["linear_graphql"]
+               "supportedTools" => [
+                 "linear_graphql",
+                 "superpowers:brainstorming",
+                 "superpowers:writing-plans"
+               ]
              }
            }
 
@@ -40,6 +70,39 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                "text" => response["output"]
              }
            ]
+  end
+
+  test "superpowers brainstorming returns a planning artifact" do
+    response =
+      DynamicTool.execute("superpowers:brainstorming", %{
+        "issue_identifier" => "LAB-999",
+        "title" => "Expose Superpowers tools",
+        "requirements_summary" => ["Make the planning gate callable."],
+        "acceptance_criteria" => ["Codex sees the brainstorming tool."],
+        "risks" => ["Tool output must be deterministic."]
+      })
+
+    assert response["success"] == true
+    assert response["output"] =~ "# Superpowers Brainstorming Artifact"
+    assert response["output"] =~ "LAB-999 - Expose Superpowers tools"
+    assert response["output"] =~ "Make the planning gate callable."
+    assert response["contentItems"] == [%{"type" => "inputText", "text" => response["output"]}]
+  end
+
+  test "superpowers writing-plans returns a concrete plan artifact" do
+    response =
+      DynamicTool.execute("superpowers:writing-plans", %{
+        "issue_identifier" => "LAB-1000",
+        "title" => "Plan Superpowers gate",
+        "implementation_steps" => ["Add tool specs.", "Run tests."],
+        "verification_method" => ["Inspect dynamicTools."]
+      })
+
+    assert response["success"] == true
+    assert response["output"] =~ "# Superpowers Writing Plan Artifact"
+    assert response["output"] =~ "1. Add tool specs."
+    assert response["output"] =~ "2. Run tests."
+    assert response["output"] =~ "Inspect dynamicTools."
   end
 
   test "linear_graphql returns successful GraphQL responses as tool text" do
