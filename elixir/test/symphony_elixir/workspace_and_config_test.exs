@@ -268,13 +268,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert repository.github_issue_url == "https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/62"
   end
 
-  test "all-projects dispatch allows unprojected issues with repository hints" do
+  test "all-projects dispatch requires GitHub hint and matching Linear project" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_team_key: "LAB",
       tracker_project_slug: nil,
       tracker_all_projects: true,
       repository_default: "yakisoba666rasb-star/Symphony-Ryo-Lab",
-      repository_allowed: ["yakisoba666rasb-star/Symphony-Ryo-Lab", "ryo1111-qqq/Remote-mouse_v1"]
+      repository_allowed: []
     )
 
     state = %Orchestrator.State{running: %{}, claimed: MapSet.new(), blocked: %{}, max_concurrent_agents: 3}
@@ -286,6 +286,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       state: "Todo",
       project_name: "Remote-mouse_v1",
       attachment_urls: ["https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/62"]
+    }
+
+    synced_project_issue = %Issue{
+      id: "issue-378",
+      identifier: "LAB-378",
+      title: "Dedupe Slack handoff text",
+      state: "Todo",
+      project_name: "orcclaw",
+      attachment_urls: ["https://github.com/kasotuosawari-design/orcclaw/issues/197"]
     }
 
     mismatched_project_issue = %Issue{
@@ -316,7 +325,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     assert Orchestrator.should_dispatch_issue_for_test(remote_issue, state)
-    assert Orchestrator.should_dispatch_issue_for_test(unprojected_remote_issue, state)
+    assert Orchestrator.should_dispatch_issue_for_test(synced_project_issue, state)
+    refute Orchestrator.should_dispatch_issue_for_test(unprojected_remote_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(mismatched_project_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(no_hint_issue, state)
   end
