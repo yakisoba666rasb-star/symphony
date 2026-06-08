@@ -10,7 +10,6 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.{
     AgentRunner,
     Config,
-    GitHubPrPublisher,
     HermesDelegation,
     RepositoryResolver,
     ReviewRunner,
@@ -283,7 +282,9 @@ defmodule SymphonyElixir.Orchestrator do
         move_issue_to_review_after_pr_discovery(state, issue_id, running_entry, session_id, pr)
 
       {:ok, nil} ->
-        publish_pr_after_normal_completion(state, issue_id, running_entry, session_id, branch_name, workspace_path)
+        error = "no GitHub PR found for branch #{branch_name}; agent-owned PR is required before In Review handoff"
+        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+        block_issue_from_entry(state, issue_id, running_entry, error)
 
       {:error, reason} ->
         error = "GitHub PR lookup failed for branch #{branch_name}: #{inspect(reason)}"
@@ -330,49 +331,8 @@ defmodule SymphonyElixir.Orchestrator do
     Application.get_env(:symphony_elixir, :github_pr_lookup, SymphonyElixir.GitHubPrLookup)
   end
 
-  defp github_pr_publisher_module do
-    Application.get_env(:symphony_elixir, :github_pr_publisher, GitHubPrPublisher)
-  end
-
   defp review_runner_module do
     Application.get_env(:symphony_elixir, :review_runner, ReviewRunner)
-  end
-
-  defp publish_pr_after_normal_completion(state, issue_id, running_entry, session_id, branch_name, workspace_path) do
-    case publish_pr_for_branch(workspace_path, branch_name, running_entry) do
-      {:ok, pr} when is_map(pr) ->
-        Logger.info("Published GitHub PR for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} branch=#{branch_name} url=#{inspect(pr["url"] || pr[:url])}")
-        move_issue_to_review_after_pr_discovery(state, issue_id, running_entry, session_id, pr)
-
-      {:error, reason} ->
-        error = "no GitHub PR found for branch #{branch_name}; runtime publish failed: #{inspect(reason)}"
-        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
-        block_issue_from_entry(state, issue_id, running_entry, error)
-
-      other ->
-        error = "no GitHub PR found for branch #{branch_name}; runtime publish returned unexpected result: #{inspect(other)}"
-        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
-        block_issue_from_entry(state, issue_id, running_entry, error)
-    end
-  end
-
-  defp publish_pr_for_branch(workspace_path, branch_name, running_entry)
-       when is_binary(workspace_path) and is_binary(branch_name) do
-    github_pr_publisher_module().publish_workspace(
-      workspace_path,
-      branch_name,
-      issue_for_publish(running_entry, branch_name)
-    )
-  end
-
-  defp issue_for_publish(%{issue: %Issue{} = issue}, branch_name), do: %{issue | branch_name: issue.branch_name || branch_name}
-
-  defp issue_for_publish(running_entry, branch_name) when is_map(running_entry) do
-    %Issue{
-      identifier: Map.get(running_entry, :identifier),
-      title: Map.get(running_entry, :identifier, "Automated changes"),
-      branch_name: branch_name
-    }
   end
 
   defp max_turns_reached_active_issue?({:max_turns_reached_active_issue, _issue_id}), do: true
@@ -563,11 +523,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp review_pr_before_handoff(running_entry, pr) do
     case Map.get(running_entry, :workspace_path) do
       workspace_path when is_binary(workspace_path) ->
-        review_opts =
-          [
-            max_review_fix_loops: Config.max_review_fix_loops()
-          ]
-          |> maybe_put_rework_publisher(running_entry)
+        review_opts = [
+          max_review_fix_loops: Config.max_review_fix_loops()
+        ]
 
         review_runner_module().run_loop(
           workspace_path,
@@ -578,18 +536,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       _other ->
         {:error, :missing_workspace_path_for_review_loop}
-    end
-  end
-
-  defp maybe_put_rework_publisher(opts, running_entry) do
-    case branch_name_and_workspace(running_entry) do
-      {:ok, branch_name, workspace_path} ->
-        Keyword.put(opts, :publish_rework, fn ->
-          publish_pr_for_branch(workspace_path, branch_name, running_entry)
-        end)
-
-      :missing ->
-        opts
     end
   end
 
@@ -906,7 +852,9 @@ defmodule SymphonyElixir.Orchestrator do
         review_premature_handoff_pr(state, issue, running_entry, session_id, pr)
 
       {:ok, nil} ->
-        stop_and_publish_review_handoff_issue(state, issue, running_entry, branch_name, workspace_path, session_id)
+        error = "issue moved to #{issue.state} without discoverable GitHub PR for branch #{branch_name}; agent-owned PR is required before handoff"
+        Logger.warning("Agent task blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
+        stop_and_block_review_handoff_issue(state, issue, running_entry, error)
 
       {:error, reason} ->
         error = "issue moved to #{issue.state} but GitHub PR lookup failed for branch #{branch_name}: #{inspect(reason)}"
@@ -1238,40 +1186,6 @@ defmodule SymphonyElixir.Orchestrator do
       end)
 
     stop_and_block_issue(state, issue.id, running_entry, error)
-  end
-
-  defp stop_and_publish_review_handoff_issue(
-         %State{} = state,
-         %Issue{} = issue,
-         running_entry,
-         branch_name,
-         workspace_path,
-         session_id
-       ) do
-    stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref))
-
-    state = %{
-      state
-      | running: Map.delete(state.running, issue.id),
-        retry_attempts: Map.delete(state.retry_attempts, issue.id),
-        claimed: MapSet.delete(state.claimed, issue.id)
-    }
-
-    case publish_pr_for_branch(workspace_path, branch_name, running_entry) do
-      {:ok, pr} when is_map(pr) ->
-        Logger.info("Published GitHub PR after premature review handoff for issue_id=#{issue.id} issue_identifier=#{issue.identifier} branch=#{branch_name} url=#{inspect(pr["url"] || pr[:url])}")
-        review_premature_handoff_pr(state, issue, running_entry, session_id, pr)
-
-      {:error, reason} ->
-        error = "issue moved to #{issue.state} without discoverable GitHub PR for branch #{branch_name}; runtime publish failed: #{inspect(reason)}"
-        Logger.warning("Agent task blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
-        stop_and_block_review_handoff_issue(state, issue, running_entry, error)
-
-      other ->
-        error = "issue moved to #{issue.state} without discoverable GitHub PR for branch #{branch_name}; runtime publish returned unexpected result: #{inspect(other)}"
-        Logger.warning("Agent task blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
-        stop_and_block_review_handoff_issue(state, issue, running_entry, error)
-    end
   end
 
   defp review_premature_handoff_pr(%State{} = state, %Issue{} = issue, running_entry, session_id, pr) do

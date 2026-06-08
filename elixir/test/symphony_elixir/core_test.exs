@@ -470,7 +470,7 @@ defmodule SymphonyElixir.CoreTest do
       assert %{
                identifier: ^issue_identifier,
                issue: %Issue{state: "Rework"},
-               error: "issue moved to In Review without discoverable GitHub PR for branch feature/no-pr; runtime publish failed: :publish_blocked"
+               error: "issue moved to In Review without discoverable GitHub PR for branch feature/no-pr; agent-owned PR is required before handoff"
              } = updated_state.blocked[issue_id]
     after
       if is_nil(previous_lookup) do
@@ -582,7 +582,7 @@ defmodule SymphonyElixir.CoreTest do
       assert %{
                identifier: ^issue_identifier,
                issue: %Issue{state: "In Progress"},
-               error: "issue moved to In Review without discoverable GitHub PR for branch feature/no-rework; runtime publish failed: :publish_blocked"
+               error: "issue moved to In Review without discoverable GitHub PR for branch feature/no-rework; agent-owned PR is required before handoff"
              } = updated_state.blocked[issue_id]
     after
       if is_nil(previous_lookup) do
@@ -613,7 +613,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "review issue state without existing PR publishes draft PR before completing handoff" do
+  test "review issue state without existing PR blocks instead of runtime publishing" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -686,13 +686,20 @@ defmodule SymphonyElixir.CoreTest do
 
       updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
 
-      assert_receive {:tracker_state_update, ^issue_id, "In Review"}
+      assert_receive {:tracker_state_update, ^issue_id, "Rework"}
       assert_receive {:tracker_comment, ^issue_id, body}
-      assert body =~ "Symphony automated review decision: approve-equivalent"
-      assert body =~ "PR: https://github.example/pull/237"
+      assert body =~ "Symphony blocked #{issue_identifier}"
+      assert body =~ "agent-owned PR is required before handoff"
       refute Map.has_key?(updated_state.running, issue_id)
-      assert MapSet.member?(updated_state.completed, issue_id)
-      refute Map.has_key?(updated_state.blocked, issue_id)
+      refute MapSet.member?(updated_state.completed, issue_id)
+      assert MapSet.member?(updated_state.claimed, issue_id)
+
+      assert %{
+               identifier: ^issue_identifier,
+               issue: %Issue{state: "Rework"},
+               error: "issue moved to In Review without discoverable GitHub PR for branch feature/runtime-publish; agent-owned PR is required before handoff"
+             } = updated_state.blocked[issue_id]
+
       refute Process.alive?(agent_pid)
     after
       if is_nil(previous_lookup) do
