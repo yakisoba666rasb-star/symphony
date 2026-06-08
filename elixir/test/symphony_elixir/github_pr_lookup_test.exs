@@ -342,6 +342,74 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
     assert_received {:command, :gh, ["pr", "view", "79", "--repo", "octo/repo", "--json", _fields]}
   end
 
+  test "workspace handoff lookup uses workspace branch when Linear branch lookup misses" do
+    workspace = "/tmp/owner-workspace-branch-fallback"
+    parent = self()
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", args, _opts ->
+          send(parent, {:command, :git, args})
+
+          case args do
+            ["-C", ^workspace, "remote", "get-url", "origin"] ->
+              {:ok, {"https://github.com/octo/repo.git", 0}}
+
+            ["-C", ^workspace, "branch", "--show-current"] ->
+              {:ok, {"lab-379-brace-expansion-audit\n", 0}}
+
+            ["-C", ^workspace, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"] ->
+              {:ok, {"origin/lab-379-brace-expansion-audit\n", 0}}
+          end
+
+        "/tmp/fake-gh", args, _opts ->
+          send(parent, {:command, :gh, args})
+
+          case args do
+            ["pr", "list", "--repo", "octo/repo", "--state", _state, "--json", _fields, "--head", "feature/linear"] ->
+              {:ok, {"[]", 0}}
+
+            ["pr", "list", "--repo", "octo/repo", "--state", "open", "--json", _fields, "--head", "lab-379-brace-expansion-audit"] ->
+              {:ok,
+               {Jason.encode!([
+                  %{
+                    "number" => 200,
+                    "url" => "https://github.com/octo/repo/pull/200",
+                    "headRefName" => "lab-379-brace-expansion-audit",
+                    "isDraft" => false,
+                    "mergeStateStatus" => "CLEAN",
+                    "state" => "OPEN"
+                  }
+                ]), 0}}
+          end
+      end
+    }
+
+    assert {:ok,
+            %{
+              "number" => 200,
+              "headRefName" => "lab-379-brace-expansion-audit",
+              "__symphonyLookupSource" => "workspace_branch",
+              "__symphonyExpectedBranch" => "feature/linear",
+              "__symphonyMatchedBranch" => "lab-379-brace-expansion-audit"
+            }} =
+             GitHubPrLookup.lookup_workspace_handoff_pr(
+               workspace,
+               "feature/linear",
+               [],
+               deps
+             )
+
+    assert_received {:command, :git, ["-C", ^workspace, "remote", "get-url", "origin"]}
+    assert_received {:command, :git, ["-C", ^workspace, "branch", "--show-current"]}
+    assert_received {:command, :git, ["-C", ^workspace, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]}
+    assert_received {:command, :gh, ["pr", "list", "--repo", "octo/repo", "--state", "open", "--json", _fields, "--head", "feature/linear"]}
+    assert_received {:command, :gh, ["pr", "list", "--repo", "octo/repo", "--state", "all", "--json", _fields, "--head", "feature/linear"]}
+    assert_received {:command, :gh, ["pr", "list", "--repo", "octo/repo", "--state", "open", "--json", _fields, "--head", "lab-379-brace-expansion-audit"]}
+  end
+
   test "workspace handoff lookup keeps branch PR as the primary source" do
     workspace = "/tmp/owner-workspace-branch-primary"
 

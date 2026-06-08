@@ -35,9 +35,11 @@ defmodule SymphonyElixir.GitHubPrLookup do
   def lookup_workspace_handoff_pr(workspace_path, head_branch, attachment_urls, deps \\ runtime_deps())
       when is_binary(workspace_path) and is_binary(head_branch) and is_list(attachment_urls) do
     with {:ok, repo} <- workspace_repo(workspace_path, deps) do
-      case lookup_by_head(repo, head_branch, deps) do
-        {:ok, %{} = pr} ->
-          {:ok, tag_lookup_source(pr, "branch", head_branch)}
+      branch_candidates = handoff_branch_candidates(workspace_path, head_branch, deps)
+
+      case lookup_by_head_candidates(repo, branch_candidates, deps) do
+        {:ok, {%{} = pr, source, matched_branch}} ->
+          {:ok, tag_lookup_source(pr, source, head_branch, matched_branch)}
 
         {:ok, nil} ->
           lookup_linked_pull_request(repo, head_branch, attachment_urls, deps)
@@ -89,6 +91,72 @@ defmodule SymphonyElixir.GitHubPrLookup do
       {:error, reason} -> {:error, {:git_command_failed, reason}}
     end
   end
+
+  defp handoff_branch_candidates(workspace_path, expected_branch, deps) do
+    [{"branch", expected_branch} | workspace_branch_candidates(workspace_path, deps)]
+    |> Enum.map(fn {source, branch} -> {source, normalize_branch_candidate(branch)} end)
+    |> Enum.filter(fn {_source, branch} -> valid_branch_candidate?(branch) end)
+    |> Enum.uniq_by(fn {_source, branch} -> branch end)
+  end
+
+  defp workspace_branch_candidates(workspace_path, deps) do
+    with {:ok, git_bin} <- find_git_binary(deps) do
+      [
+        {"workspace_branch", query_current_branch(workspace_path, git_bin, deps)},
+        {"workspace_upstream_branch", query_upstream_branch(workspace_path, git_bin, deps)}
+      ]
+      |> Enum.flat_map(fn
+        {source, {:ok, branch}} -> [{source, branch}]
+        {_source, :none} -> []
+      end)
+    else
+      {:error, _reason} -> []
+    end
+  end
+
+  defp query_current_branch(workspace_path, git_bin, deps) do
+    query_git_branch(workspace_path, git_bin, ["branch", "--show-current"], deps)
+  end
+
+  defp query_upstream_branch(workspace_path, git_bin, deps) do
+    case query_git_branch(workspace_path, git_bin, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], deps) do
+      {:ok, upstream} -> {:ok, strip_remote_prefix(upstream)}
+      :none -> :none
+    end
+  end
+
+  defp query_git_branch(workspace_path, git_bin, git_args, deps) do
+    args = ["-C", workspace_path | git_args]
+
+    case normalize_command_result(deps.run_command.(git_bin, args, stderr_to_stdout: true)) do
+      {:ok, {output, 0}} -> {:ok, String.trim(output)}
+      {:ok, {_output, _status}} -> :none
+      {:error, _reason} -> :none
+    end
+  end
+
+  defp strip_remote_prefix(branch) when is_binary(branch) do
+    case String.split(String.trim(branch), "/", parts: 2) do
+      [_remote, rest] when rest != "" -> rest
+      [value] -> value
+    end
+  end
+
+  defp normalize_branch_candidate(branch) when is_binary(branch), do: String.trim(branch)
+  defp normalize_branch_candidate(_branch), do: nil
+
+  defp valid_branch_candidate?(branch) when is_binary(branch) do
+    branch != "" and
+      branch != "HEAD" and
+      not String.starts_with?(branch, "/") and
+      not String.starts_with?(branch, ["http://", "https://", "git@"]) and
+      not String.contains?(branch, "github.com/") and
+      not String.ends_with?(branch, ".git") and
+      not String.starts_with?(branch, "fatal:") and
+      not String.contains?(branch, ["\n", "\r", <<0>>])
+  end
+
+  defp valid_branch_candidate?(_branch), do: false
 
   defp workspace_repo(workspace_path, deps) do
     with {:ok, git_bin} <- find_git_binary(deps),
@@ -164,6 +232,16 @@ defmodule SymphonyElixir.GitHubPrLookup do
     end
   end
 
+  defp lookup_by_head_candidates(_repo, [], _deps), do: {:ok, nil}
+
+  defp lookup_by_head_candidates(repo, [{source, branch} | rest], deps) do
+    case lookup_by_head(repo, branch, deps) do
+      {:ok, %{} = pr} -> {:ok, {pr, source, branch}}
+      {:ok, nil} -> lookup_by_head_candidates(repo, rest, deps)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp lookup_linked_pull_request(repo, expected_branch, attachment_urls, deps) do
     with {:ok, gh_bin} <- find_gh_binary(deps),
          {:ok, pull_number} <- linked_pull_number(repo, attachment_urls),
@@ -221,11 +299,17 @@ defmodule SymphonyElixir.GitHubPrLookup do
 
   defp validate_linked_pull_request(pr), do: {:error, {:invalid_linked_pull_request, pr}}
 
-  defp tag_lookup_source(pr, source, expected_branch) when is_map(pr) do
+  defp tag_lookup_source(pr, source, expected_branch, matched_branch \\ nil) when is_map(pr) do
     pr
     |> Map.put("__symphonyLookupSource", source)
     |> Map.put("__symphonyExpectedBranch", expected_branch)
+    |> maybe_put_matched_branch(matched_branch)
   end
+
+  defp maybe_put_matched_branch(pr, branch) when is_binary(branch),
+    do: Map.put(pr, "__symphonyMatchedBranch", branch)
+
+  defp maybe_put_matched_branch(pr, _branch), do: pr
 
   defp pick_pr(values) do
     values
