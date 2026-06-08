@@ -854,11 +854,24 @@ defmodule SymphonyElixir.Orchestrator do
   defp review_issue_state?(_state), do: false
 
   defp reconcile_review_handoff_issue_state(%Issue{} = issue, %State{} = state) do
+    refreshed_issue = refresh_review_handoff_issue(issue)
+
+    if review_issue_state?(refreshed_issue.state) do
+      do_reconcile_review_handoff_issue_state(refreshed_issue, state)
+    else
+      Logger.info("Issue left review state before handoff guard after refresh: #{issue_context(refreshed_issue)} state=#{refreshed_issue.state}")
+      refresh_running_issue_state(state, refreshed_issue)
+    end
+  end
+
+  defp do_reconcile_review_handoff_issue_state(%Issue{} = issue, %State{} = state) do
     case Map.get(state.running, issue.id) do
       nil ->
         state
 
       running_entry ->
+        running_entry = refresh_running_entry_issue(running_entry, issue)
+
         case branch_name_and_workspace(running_entry) do
           {:ok, branch_name, workspace_path} ->
             reconcile_review_handoff_with_pr_lookup(
@@ -876,6 +889,53 @@ defmodule SymphonyElixir.Orchestrator do
         end
     end
   end
+
+  defp refresh_review_handoff_issue(%Issue{} = issue) do
+    module = tracker_module()
+
+    if function_exported?(module, :fetch_issue_states_by_ids, 1) do
+      case module.fetch_issue_states_by_ids([issue.id]) do
+        {:ok, [%Issue{} = refreshed_issue | _rest]} ->
+          refreshed_issue
+
+        {:ok, []} ->
+          Logger.warning("Could not refresh review handoff issue before PR lookup: issue_id=#{issue.id} reason=:not_found")
+          issue
+
+        {:error, reason} ->
+          Logger.warning("Could not refresh review handoff issue before PR lookup: issue_id=#{issue.id} reason=#{inspect(reason)}")
+          issue
+
+        other ->
+          Logger.warning("Could not refresh review handoff issue before PR lookup: issue_id=#{issue.id} result=#{inspect(other)}")
+          issue
+      end
+    else
+      issue
+    end
+  end
+
+  defp refresh_running_entry_issue(running_entry, %Issue{} = issue) when is_map(running_entry) do
+    Map.update(running_entry, :issue, issue, fn
+      %Issue{} = running_issue -> merge_refreshed_issue(running_issue, issue)
+      _other -> issue
+    end)
+  end
+
+  defp refresh_running_entry_issue(running_entry, _issue), do: running_entry
+
+  defp merge_refreshed_issue(%Issue{} = running_issue, %Issue{} = refreshed_issue) do
+    %{
+      refreshed_issue
+      | branch_name: first_present(refreshed_issue.branch_name, running_issue.branch_name),
+        labels: first_present(refreshed_issue.labels, running_issue.labels),
+        blocked_by: first_present(refreshed_issue.blocked_by, running_issue.blocked_by)
+    }
+  end
+
+  defp first_present(value, fallback) when value in [nil, ""], do: fallback
+  defp first_present([], fallback), do: fallback
+  defp first_present(value, _fallback), do: value
 
   defp reconcile_review_handoff_with_pr_lookup(
          %Issue{} = issue,
