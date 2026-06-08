@@ -112,7 +112,7 @@ defmodule SymphonyElixir.RepositoryResolver do
 
   defp repo_from_github_url(text) when is_binary(text) do
     case Regex.run(@github_url_regex, text, capture: :all_but_first) do
-      [owner, repo] -> "#{owner}/#{repo}"
+      [owner, repo] -> github_slug(owner, repo)
       _ -> nil
     end
   end
@@ -120,7 +120,7 @@ defmodule SymphonyElixir.RepositoryResolver do
   defp github_slugs(text) when is_binary(text) do
     @github_url_regex
     |> Regex.scan(text, capture: :all_but_first)
-    |> Enum.map(fn [owner, repo] -> "#{owner}/#{repo}" end)
+    |> Enum.map(fn [owner, repo] -> github_slug(owner, repo) end)
     |> Enum.uniq()
   end
 
@@ -175,6 +175,10 @@ defmodule SymphonyElixir.RepositoryResolver do
   defp normalize_blank(nil), do: nil
   defp normalize_blank(value) when is_binary(value), do: if(String.trim(value) == "", do: nil, else: value)
   defp normalize_blank(value), do: value
+
+  defp github_slug(owner, repo) do
+    "#{owner}/#{String.replace_suffix(repo, ".git", "")}"
+  end
 
   defp allow_repository(nil, _allowed), do: :ok
   defp allow_repository(_slug, allowed) when allowed in [nil, []], do: :ok

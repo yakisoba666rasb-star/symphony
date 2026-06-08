@@ -180,6 +180,29 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              RepositoryResolver.resolve(issue, settings)
   end
 
+  test "repository resolver treats clone URLs and issue URLs for the same repository as one hint" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "allowed" => ["ryo1111-qqq/Remote-mouse_v1"]
+               }
+             })
+
+    issue = %Issue{
+      identifier: "LAB-377",
+      description: """
+      git remote get-url origin -> https://github.com/ryo1111-qqq/Remote-mouse_v1.git
+      Related issue: https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/78
+      """,
+      attachment_urls: ["https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/78"]
+    }
+
+    assert RepositoryResolver.repository_hint?(issue)
+    assert {:ok, repository} = RepositoryResolver.resolve(issue, settings)
+    assert repository.slug == "ryo1111-qqq/Remote-mouse_v1"
+    assert repository.github_issue_url == "https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/78"
+  end
+
   test "repository resolver allows explicit repo when reference links mention another repository" do
     assert {:ok, settings} =
              Schema.parse(%{
