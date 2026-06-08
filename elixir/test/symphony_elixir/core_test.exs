@@ -470,7 +470,7 @@ defmodule SymphonyElixir.CoreTest do
       assert %{
                identifier: ^issue_identifier,
                issue: %Issue{state: "Rework"},
-               error: "issue moved to In Review without discoverable GitHub PR for branch feature/no-pr; agent-owned PR is required before handoff"
+               error: "issue moved to In Review without discoverable GitHub PR for branch feature/no-pr or linked PR attachments; agent-owned PR is required before handoff"
              } = updated_state.blocked[issue_id]
     after
       if is_nil(previous_lookup) do
@@ -582,7 +582,7 @@ defmodule SymphonyElixir.CoreTest do
       assert %{
                identifier: ^issue_identifier,
                issue: %Issue{state: "In Progress"},
-               error: "issue moved to In Review without discoverable GitHub PR for branch feature/no-rework; agent-owned PR is required before handoff"
+               error: "issue moved to In Review without discoverable GitHub PR for branch feature/no-rework or linked PR attachments; agent-owned PR is required before handoff"
              } = updated_state.blocked[issue_id]
     after
       if is_nil(previous_lookup) do
@@ -697,7 +697,7 @@ defmodule SymphonyElixir.CoreTest do
       assert %{
                identifier: ^issue_identifier,
                issue: %Issue{state: "Rework"},
-               error: "issue moved to In Review without discoverable GitHub PR for branch feature/runtime-publish; agent-owned PR is required before handoff"
+               error: "issue moved to In Review without discoverable GitHub PR for branch feature/runtime-publish or linked PR attachments; agent-owned PR is required before handoff"
              } = updated_state.blocked[issue_id]
 
       refute Process.alive?(agent_pid)

@@ -277,12 +277,14 @@ defmodule SymphonyElixir.Orchestrator do
          branch_name,
          workspace_path
        ) do
-    case lookup_pr_for_branch(workspace_path, branch_name) do
+    case lookup_pr_for_handoff(workspace_path, running_entry, branch_name) do
       {:ok, pr} when is_map(pr) ->
         move_issue_to_review_after_pr_discovery(state, issue_id, running_entry, session_id, pr)
 
       {:ok, nil} ->
-        error = "no GitHub PR found for branch #{branch_name}; agent-owned PR is required before In Review handoff"
+        error =
+          "no GitHub PR found for branch #{branch_name} or linked PR attachments; agent-owned PR is required before In Review handoff"
+
         Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
         block_issue_from_entry(state, issue_id, running_entry, error)
 
@@ -318,14 +320,27 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp has_workspace_path?(_running_entry), do: false
 
-  defp lookup_pr_for_branch(workspace_path, branch_name)
+  defp lookup_pr_for_handoff(workspace_path, running_entry, branch_name)
        when is_binary(workspace_path) and is_binary(branch_name) do
-    github_pr_lookup_module().lookup_workspace_head(workspace_path, branch_name)
+    lookup_module = github_pr_lookup_module()
+    issue = Map.get(running_entry, :issue)
+    attachment_urls = issue_attachment_urls(issue)
+
+    if function_exported?(lookup_module, :lookup_workspace_handoff_pr, 3) do
+      lookup_module.lookup_workspace_handoff_pr(workspace_path, branch_name, attachment_urls)
+    else
+      lookup_module.lookup_workspace_head(workspace_path, branch_name)
+    end
   end
 
-  defp lookup_pr_for_branch(_workspace_path, _branch_name) do
+  defp lookup_pr_for_handoff(_workspace_path, _running_entry, _branch_name) do
     {:error, :invalid_pr_lookup_input}
   end
+
+  defp issue_attachment_urls(%Issue{attachment_urls: attachment_urls}) when is_list(attachment_urls),
+    do: attachment_urls
+
+  defp issue_attachment_urls(_issue), do: []
 
   defp github_pr_lookup_module do
     Application.get_env(:symphony_elixir, :github_pr_lookup, SymphonyElixir.GitHubPrLookup)
@@ -359,7 +374,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp block_max_turns_agent_down(state, issue_id, running_entry, session_id) do
     case branch_name_and_workspace(running_entry) do
       {:ok, branch_name, workspace_path} ->
-        case lookup_pr_for_branch(workspace_path, branch_name) do
+        case lookup_pr_for_handoff(workspace_path, running_entry, branch_name) do
           {:ok, pr} when is_map(pr) ->
             move_issue_to_review_after_pr_discovery(state, issue_id, running_entry, session_id, pr)
 
@@ -423,6 +438,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     Issue: #{Map.get(running_entry, :identifier, "issue")}
     PR: #{pr_url(pr)}
+    #{handoff_pr_resolution_note(running_entry, pr)}
 
     Review loop result:
     - blocking findings: #{format_review_items(verdict_value(verdict, :blocking_findings))}
@@ -437,6 +453,30 @@ defmodule SymphonyElixir.Orchestrator do
   defp pr_url(%{"url" => url}) when is_binary(url), do: url
   defp pr_url(%{url: url}) when is_binary(url), do: url
   defp pr_url(_pr), do: "unknown"
+
+  defp handoff_pr_resolution_note(running_entry, %{"__symphonyLookupSource" => "linked_pull_request"} = pr) do
+    """
+
+    PR resolution:
+    - source: linked GitHub PR attachment
+    - expected Linear branch: #{lookup_expected_branch(pr, running_entry)}
+    - actual PR branch: #{lookup_actual_branch(pr)}
+    """
+    |> String.trim_trailing()
+  end
+
+  defp handoff_pr_resolution_note(_running_entry, _pr), do: ""
+
+  defp lookup_expected_branch(%{"__symphonyExpectedBranch" => branch}, _running_entry) when is_binary(branch),
+    do: branch
+
+  defp lookup_expected_branch(_pr, %{issue: %Issue{branch_name: branch}}) when is_binary(branch),
+    do: branch
+
+  defp lookup_expected_branch(_pr, _running_entry), do: "unknown"
+
+  defp lookup_actual_branch(%{"headRefName" => branch}) when is_binary(branch), do: branch
+  defp lookup_actual_branch(_pr), do: "unknown"
 
   defp verdict_value(verdict, key) when is_map(verdict), do: Map.get(verdict, key) || Map.get(verdict, Atom.to_string(key))
   defp verdict_value(_verdict, _key), do: nil
@@ -846,13 +886,15 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     session_id = running_entry_session_id(running_entry)
 
-    case lookup_pr_for_branch(workspace_path, branch_name) do
+    case lookup_pr_for_handoff(workspace_path, running_entry, branch_name) do
       {:ok, pr} when is_map(pr) ->
         Logger.info("Issue moved to review state after PR discovery: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
         review_premature_handoff_pr(state, issue, running_entry, session_id, pr)
 
       {:ok, nil} ->
-        error = "issue moved to #{issue.state} without discoverable GitHub PR for branch #{branch_name}; agent-owned PR is required before handoff"
+        error =
+          "issue moved to #{issue.state} without discoverable GitHub PR for branch #{branch_name} or linked PR attachments; agent-owned PR is required before handoff"
+
         Logger.warning("Agent task blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
         stop_and_block_review_handoff_issue(state, issue, running_entry, error)
 

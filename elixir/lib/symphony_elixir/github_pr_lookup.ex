@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.GitHubPrLookup do
-  @moduledoc "Lookup GitHub pull requests by repository and head branch."
+  @moduledoc "Lookup GitHub pull requests by repository, head branch, and linked issue metadata."
 
   @type pr_map() :: %{String.t() => term()}
 
@@ -25,10 +25,26 @@ defmodule SymphonyElixir.GitHubPrLookup do
   @spec lookup_workspace_head(String.t(), String.t(), deps()) :: {:ok, nil | pr_map()} | {:error, term()}
   def lookup_workspace_head(workspace_path, head_branch, deps \\ runtime_deps())
       when is_binary(workspace_path) and is_binary(head_branch) do
-    with {:ok, git_bin} <- find_git_binary(deps),
-         {:ok, remote_url} <- query_remote_url(workspace_path, git_bin, deps),
-         {:ok, repo} <- parse_remote_url(remote_url) do
+    with {:ok, repo} <- workspace_repo(workspace_path, deps) do
       lookup_by_head(repo, head_branch, deps)
+    end
+  end
+
+  @spec lookup_workspace_handoff_pr(String.t(), String.t(), [String.t()], deps()) ::
+          {:ok, nil | pr_map()} | {:error, term()}
+  def lookup_workspace_handoff_pr(workspace_path, head_branch, attachment_urls, deps \\ runtime_deps())
+      when is_binary(workspace_path) and is_binary(head_branch) and is_list(attachment_urls) do
+    with {:ok, repo} <- workspace_repo(workspace_path, deps) do
+      case lookup_by_head(repo, head_branch, deps) do
+        {:ok, %{} = pr} ->
+          {:ok, tag_lookup_source(pr, "branch", head_branch)}
+
+        {:ok, nil} ->
+          lookup_linked_pull_request(repo, head_branch, attachment_urls, deps)
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
@@ -71,6 +87,13 @@ defmodule SymphonyElixir.GitHubPrLookup do
       {:ok, {url, 0}} -> {:ok, String.trim(url)}
       {:ok, {_output, status}} -> {:error, {:git_command_failed, status}}
       {:error, reason} -> {:error, {:git_command_failed, reason}}
+    end
+  end
+
+  defp workspace_repo(workspace_path, deps) do
+    with {:ok, git_bin} <- find_git_binary(deps),
+         {:ok, remote_url} <- query_remote_url(workspace_path, git_bin, deps) do
+      parse_remote_url(remote_url)
     end
   end
 
@@ -123,6 +146,14 @@ defmodule SymphonyElixir.GitHubPrLookup do
     end
   end
 
+  defp parse_gh_pr_view_response(output) do
+    case Jason.decode(output) do
+      {:ok, %{} = pr} -> {:ok, pr}
+      {:ok, _other} -> {:error, :invalid_pr_payload}
+      {:error, reason} -> {:error, {:gh_json_error, reason}}
+    end
+  end
+
   defp lookup_by_head_state(gh_bin, repo, head_branch, state, deps) do
     command = github_pr_list_args(repo, head_branch, state)
 
@@ -131,6 +162,69 @@ defmodule SymphonyElixir.GitHubPrLookup do
       {:ok, {_output, status}} -> {:error, {:gh_command_failed, status}}
       {:error, reason} -> {:error, {:gh_command_failed, reason}}
     end
+  end
+
+  defp lookup_linked_pull_request(repo, expected_branch, attachment_urls, deps) do
+    with {:ok, gh_bin} <- find_gh_binary(deps),
+         {:ok, pull_number} <- linked_pull_number(repo, attachment_urls),
+         {:ok, pr} <- view_pull_request(gh_bin, repo, pull_number, deps),
+         :ok <- validate_linked_pull_request(pr) do
+      {:ok, tag_lookup_source(pr, "linked_pull_request", expected_branch)}
+    else
+      :none -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp linked_pull_number(repo, attachment_urls) do
+    attachment_urls
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&linked_pull_url(repo, &1))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq_by(fn {_url, number} -> number end)
+    |> case do
+      [] -> :none
+      [{_url, number}] -> {:ok, number}
+      values -> {:error, {:ambiguous_linked_pull_requests, Enum.map(values, &elem(&1, 0))}}
+    end
+  end
+
+  defp linked_pull_url(repo, url) do
+    case Regex.run(~r{^https://github\.com/([^/]+/[^/]+)/pull/(\d+)(?:[/?#].*)?$}i, String.trim(url)) do
+      [matched_url, ^repo, number] -> {matched_url, String.to_integer(number)}
+      _other -> nil
+    end
+  end
+
+  defp view_pull_request(gh_bin, repo, number, deps) when is_integer(number) do
+    command = github_pr_view_args(repo, number)
+
+    case normalize_command_result(deps.run_command.(gh_bin, command, stderr_to_stdout: true)) do
+      {:ok, {output, 0}} -> parse_gh_pr_view_response(output)
+      {:ok, {_output, status}} -> {:error, {:gh_command_failed, status}}
+      {:error, reason} -> {:error, {:gh_command_failed, reason}}
+    end
+  end
+
+  defp validate_linked_pull_request(%{"state" => state, "isDraft" => is_draft} = pr) do
+    cond do
+      String.upcase(to_string(state)) != "OPEN" ->
+        {:error, {:linked_pull_request_not_open, pr["number"]}}
+
+      is_draft == true ->
+        {:error, {:linked_pull_request_is_draft, pr["number"]}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_linked_pull_request(pr), do: {:error, {:invalid_linked_pull_request, pr}}
+
+  defp tag_lookup_source(pr, source, expected_branch) when is_map(pr) do
+    pr
+    |> Map.put("__symphonyLookupSource", source)
+    |> Map.put("__symphonyExpectedBranch", expected_branch)
   end
 
   defp pick_pr(values) do
@@ -176,6 +270,18 @@ defmodule SymphonyElixir.GitHubPrLookup do
       "number,url,headRefName,isDraft,mergeStateStatus,state",
       "--head",
       head_branch
+    ]
+  end
+
+  defp github_pr_view_args(repo, number) do
+    [
+      "pr",
+      "view",
+      Integer.to_string(number),
+      "--repo",
+      repo,
+      "--json",
+      "number,url,headRefName,isDraft,mergeStateStatus,state"
     ]
   end
 end
