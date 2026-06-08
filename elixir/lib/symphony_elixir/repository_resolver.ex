@@ -16,6 +16,31 @@ defmodule SymphonyElixir.RepositoryResolver do
   @source_github_url_regex ~r/(?im)^\s*(?:source|github issue|github pull request|github pr)\s*:\s*(https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(?:issues|pull)\/\d+)\s*$/
   @github_url_regex ~r/(?i)https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:\/(?:issues|pull)\/\d+)?/
   @github_issue_url_regex ~r/(?i)https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+/
+  @non_repository_github_owners MapSet.new([
+                                  "advisories",
+                                  "apps",
+                                  "codespaces",
+                                  "collections",
+                                  "dashboard",
+                                  "enterprise",
+                                  "events",
+                                  "explore",
+                                  "features",
+                                  "issues",
+                                  "login",
+                                  "marketplace",
+                                  "new",
+                                  "notifications",
+                                  "orgs",
+                                  "organizations",
+                                  "pricing",
+                                  "pulls",
+                                  "search",
+                                  "settings",
+                                  "sponsors",
+                                  "topics",
+                                  "trending"
+                                ])
 
   @type context :: %{
           slug: String.t() | nil,
@@ -120,7 +145,14 @@ defmodule SymphonyElixir.RepositoryResolver do
   defp github_slugs(text) when is_binary(text) do
     @github_url_regex
     |> Regex.scan(text, capture: :all_but_first)
-    |> Enum.map(fn [owner, repo] -> canonical_repository_slug("#{owner}/#{repo}") end)
+    |> Enum.map(fn
+      [owner, repo] ->
+        if github_repository_owner?(owner) do
+          canonical_repository_slug("#{owner}/#{repo}")
+        else
+          nil
+        end
+    end)
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
   end
@@ -208,12 +240,25 @@ defmodule SymphonyElixir.RepositoryResolver do
 
   defp slug_from_github_path(path) when is_binary(path) do
     case String.split(path, "/", trim: true) do
-      [owner, repo | _rest] -> "#{owner}/#{strip_git_suffix(repo)}"
-      _segments -> nil
+      [owner, repo | _rest] ->
+        if github_repository_owner?(owner) do
+          "#{owner}/#{strip_git_suffix(repo)}"
+        else
+          nil
+        end
+
+      _segments ->
+        nil
     end
   end
 
   defp slug_from_github_path(_path), do: nil
+
+  defp github_repository_owner?(owner) when is_binary(owner) do
+    owner
+    |> String.downcase()
+    |> then(fn normalized_owner -> not MapSet.member?(@non_repository_github_owners, normalized_owner) end)
+  end
 
   defp invalid_url_slug(value) do
     value

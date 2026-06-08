@@ -180,6 +180,52 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              RepositoryResolver.resolve(issue, settings)
   end
 
+  test "repository resolver ignores GitHub advisory URLs as repository hints" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "allowed" => ["kasotuosawari-design/orcclaw"]
+               }
+             })
+
+    issue = %Issue{
+      identifier: "LAB-379",
+      description: """
+      Advisory: https://github.com/advisories/GHSA-jxxr-4gwj-5jf2
+      Package: brace-expansion
+      """,
+      attachment_urls: ["https://github.com/kasotuosawari-design/orcclaw/issues/199"]
+    }
+
+    assert RepositoryResolver.repository_hint?(issue)
+    assert {:ok, repository} = RepositoryResolver.resolve(issue, settings)
+    assert repository.slug == "kasotuosawari-design/orcclaw"
+    assert repository.github_issue_url == "https://github.com/kasotuosawari-design/orcclaw/issues/199"
+  end
+
+  test "repository resolver ignores GitHub site route URLs as repository hints" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "allowed" => ["kasotuosawari-design/orcclaw"]
+               }
+             })
+
+    issue = %Issue{
+      identifier: "LAB-GITHUB-SITE-LINKS",
+      description: """
+      Project board: https://github.com/orgs/kasotuosawari-design/projects/1
+      Topic: https://github.com/topics/security
+      """,
+      attachment_urls: ["https://github.com/kasotuosawari-design/orcclaw/issues/199"]
+    }
+
+    assert RepositoryResolver.repository_hint?(issue)
+    assert {:ok, repository} = RepositoryResolver.resolve(issue, settings)
+    assert repository.slug == "kasotuosawari-design/orcclaw"
+    assert repository.github_issue_url == "https://github.com/kasotuosawari-design/orcclaw/issues/199"
+  end
+
   test "repository resolver treats clone URLs and issue URLs for the same repository as one hint" do
     assert {:ok, settings} =
              Schema.parse(%{
