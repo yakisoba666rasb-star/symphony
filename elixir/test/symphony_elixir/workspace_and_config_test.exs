@@ -203,6 +203,28 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert repository.github_issue_url == "https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/78"
   end
 
+  test "repository resolver canonicalizes explicit repo lines before source consistency checks" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "allowed" => ["ryo1111-qqq/Remote-mouse_v1.git"]
+               }
+             })
+
+    issue = %Issue{
+      identifier: "LAB-EXPLICIT-GIT",
+      description: """
+      Repo: ryo1111-qqq/Remote-mouse_v1.git/
+      Source: https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/78?utm_source=linear#note
+      """
+    }
+
+    assert RepositoryResolver.repository_hint?(issue)
+    assert {:ok, repository} = RepositoryResolver.resolve(issue, settings)
+    assert repository.slug == "ryo1111-qqq/Remote-mouse_v1"
+    assert repository.github_issue_url == "https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/78"
+  end
+
   test "repository resolver allows explicit repo when reference links mention another repository" do
     assert {:ok, settings} =
              Schema.parse(%{

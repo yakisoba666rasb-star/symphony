@@ -12,10 +12,10 @@ defmodule SymphonyElixir.RepositoryResolver do
   alias SymphonyElixir.Linear.Issue
 
   @slug_regex ~r/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
-  @repo_line_regex ~r/(?im)^\s*(?:repo|repository)\s*:\s*([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*$/
+  @repo_line_regex ~r/(?im)^\s*(?:repo|repository)\s*:\s*<?((?:https:\/\/(?:www\.)?github\.com\/)?[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?(?:[?#][^\s>]*)?)>?\s*$/
   @source_github_url_regex ~r/(?im)^\s*(?:source|github issue|github pull request|github pr)\s*:\s*(https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(?:issues|pull)\/\d+)\s*$/
-  @github_url_regex ~r/https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:\/(?:issues|pull)\/\d+)?/
-  @github_issue_url_regex ~r/https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+/
+  @github_url_regex ~r/(?i)https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:\/(?:issues|pull)\/\d+)?/
+  @github_issue_url_regex ~r/(?i)https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+/
 
   @type context :: %{
           slug: String.t() | nil,
@@ -105,14 +105,14 @@ defmodule SymphonyElixir.RepositoryResolver do
 
   defp repo_from_explicit_line(text) when is_binary(text) do
     case Regex.run(@repo_line_regex, text, capture: :all_but_first) do
-      [slug] -> slug
+      [slug] -> canonical_repository_slug(slug)
       _ -> nil
     end
   end
 
   defp repo_from_github_url(text) when is_binary(text) do
     case Regex.run(@github_url_regex, text, capture: :all_but_first) do
-      [owner, repo] -> github_slug(owner, repo)
+      [owner, repo] -> canonical_repository_slug("#{owner}/#{repo}")
       _ -> nil
     end
   end
@@ -120,7 +120,8 @@ defmodule SymphonyElixir.RepositoryResolver do
   defp github_slugs(text) when is_binary(text) do
     @github_url_regex
     |> Regex.scan(text, capture: :all_but_first)
-    |> Enum.map(fn [owner, repo] -> github_slug(owner, repo) end)
+    |> Enum.map(fn [owner, repo] -> canonical_repository_slug("#{owner}/#{repo}") end)
+    |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
   end
 
@@ -158,10 +159,10 @@ defmodule SymphonyElixir.RepositoryResolver do
   defp normalize_slug(nil), do: {:ok, nil}
 
   defp normalize_slug(slug) when is_binary(slug) do
-    normalized = String.trim(slug)
+    normalized = canonical_repository_slug(slug)
 
     cond do
-      normalized == "" ->
+      is_nil(normalized) ->
         {:ok, nil}
 
       Regex.match?(@slug_regex, normalized) ->
@@ -176,15 +177,69 @@ defmodule SymphonyElixir.RepositoryResolver do
   defp normalize_blank(value) when is_binary(value), do: if(String.trim(value) == "", do: nil, else: value)
   defp normalize_blank(value), do: value
 
-  defp github_slug(owner, repo) do
-    "#{owner}/#{String.replace_suffix(repo, ".git", "")}"
+  defp canonical_repository_slug(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.trim_leading("<")
+    |> String.trim_trailing(">")
+    |> do_canonical_repository_slug()
+  end
+
+  defp canonical_repository_slug(_value), do: nil
+
+  defp do_canonical_repository_slug(""), do: nil
+
+  defp do_canonical_repository_slug(value) do
+    case URI.parse(value) do
+      %URI{scheme: scheme, host: host, path: path} when scheme in ["http", "https"] and is_binary(host) ->
+        if String.downcase(host) in ["github.com", "www.github.com"] do
+          slug_from_github_path(path)
+        else
+          invalid_url_slug(value)
+        end
+
+      _uri ->
+        value
+        |> strip_url_suffix()
+        |> String.trim_trailing("/")
+        |> strip_git_suffix()
+    end
+  end
+
+  defp slug_from_github_path(path) when is_binary(path) do
+    case String.split(path, "/", trim: true) do
+      [owner, repo | _rest] -> "#{owner}/#{strip_git_suffix(repo)}"
+      _segments -> nil
+    end
+  end
+
+  defp slug_from_github_path(_path), do: nil
+
+  defp invalid_url_slug(value) do
+    value
+    |> strip_url_suffix()
+    |> String.trim_trailing("/")
+    |> strip_git_suffix()
+  end
+
+  defp strip_url_suffix(value) when is_binary(value) do
+    value
+    |> String.split(["?", "#"], parts: 2)
+    |> List.first()
+  end
+
+  defp strip_git_suffix(value) when is_binary(value) do
+    String.replace_suffix(value, ".git", "")
   end
 
   defp allow_repository(nil, _allowed), do: :ok
   defp allow_repository(_slug, allowed) when allowed in [nil, []], do: :ok
 
   defp allow_repository(slug, allowed) do
-    allowed = Enum.map(allowed, &String.trim/1)
+    allowed =
+      allowed
+      |> Enum.map(&canonical_repository_slug/1)
+      |> Enum.reject(&is_nil/1)
 
     if slug in allowed do
       :ok
