@@ -6,9 +6,19 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   alias SymphonyElixir.Linear.Client
 
   @linear_graphql_tool "linear_graphql"
+  @superpowers_brainstorming_tool "superpowers:brainstorming"
+  @superpowers_writing_plans_tool "superpowers:writing-plans"
   @allowed_linear_mutation_fields MapSet.new(["commentCreate", "commentUpdate"])
   @linear_graphql_description """
   Execute a raw read-only GraphQL query against Linear using Symphony's configured auth.
+  """
+  @superpowers_brainstorming_description """
+  Run the Superpowers brainstorming gate for a Symphony issue before implementation.
+  Returns a planning artifact that clarifies requirements, unknowns, risks, and acceptance criteria.
+  """
+  @superpowers_writing_plans_description """
+  Run the Superpowers writing-plans gate for a Symphony issue before implementation.
+  Returns a concrete implementation plan with steps, files, validation, and blockers.
   """
   @linear_graphql_input_schema %{
     "type" => "object",
@@ -26,12 +36,52 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       }
     }
   }
+  @superpowers_input_schema %{
+    "type" => "object",
+    "additionalProperties" => true,
+    "properties" => %{
+      "issue_identifier" => %{"type" => "string"},
+      "title" => %{"type" => "string"},
+      "description" => %{"type" => "string"},
+      "requirements_summary" => %{
+        "type" => ["string", "array"],
+        "items" => %{"type" => "string"}
+      },
+      "acceptance_criteria" => %{
+        "type" => ["string", "array"],
+        "items" => %{"type" => "string"}
+      },
+      "implementation_steps" => %{
+        "type" => ["string", "array"],
+        "items" => %{"type" => "string"}
+      },
+      "verification_method" => %{
+        "type" => ["string", "array"],
+        "items" => %{"type" => "string"}
+      },
+      "open_questions_or_blockers" => %{
+        "type" => ["string", "array"],
+        "items" => %{"type" => "string"}
+      },
+      "risks" => %{
+        "type" => ["string", "array"],
+        "items" => %{"type" => "string"}
+      },
+      "context" => %{"type" => "string"}
+    }
+  }
 
   @spec execute(String.t() | nil, term(), keyword()) :: map()
   def execute(tool, arguments, opts \\ []) do
     case tool do
       @linear_graphql_tool ->
         execute_linear_graphql(arguments, opts)
+
+      @superpowers_brainstorming_tool ->
+        execute_superpowers_tool(@superpowers_brainstorming_tool, arguments)
+
+      @superpowers_writing_plans_tool ->
+        execute_superpowers_tool(@superpowers_writing_plans_tool, arguments)
 
       other ->
         failure_response(%{
@@ -50,6 +100,16 @@ defmodule SymphonyElixir.Codex.DynamicTool do
         "name" => @linear_graphql_tool,
         "description" => @linear_graphql_description,
         "inputSchema" => @linear_graphql_input_schema
+      },
+      %{
+        "name" => @superpowers_brainstorming_tool,
+        "description" => @superpowers_brainstorming_description,
+        "inputSchema" => @superpowers_input_schema
+      },
+      %{
+        "name" => @superpowers_writing_plans_tool,
+        "description" => @superpowers_writing_plans_description,
+        "inputSchema" => @superpowers_input_schema
       }
     ]
   end
@@ -64,6 +124,162 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     else
       {:error, reason} ->
         failure_response(tool_error_payload(reason))
+    end
+  end
+
+  defp execute_superpowers_tool(tool, arguments) do
+    arguments = normalize_superpowers_arguments(arguments)
+
+    tool
+    |> superpowers_markdown(arguments)
+    |> success_response()
+  end
+
+  defp normalize_superpowers_arguments(arguments) when is_binary(arguments) do
+    case String.trim(arguments) do
+      "" -> %{}
+      context -> %{"context" => context}
+    end
+  end
+
+  defp normalize_superpowers_arguments(arguments) when is_map(arguments) do
+    Map.new(arguments, fn {key, value} -> {to_string(key), value} end)
+  end
+
+  defp normalize_superpowers_arguments(_arguments), do: %{}
+
+  defp superpowers_markdown(@superpowers_brainstorming_tool, arguments) do
+    """
+    # Superpowers Brainstorming Artifact
+
+    #{issue_heading(arguments)}
+
+    ## Requirements summary
+    #{bullet_section(arguments, "requirements_summary", fallback_requirement(arguments))}
+
+    ## Acceptance criteria candidates
+    #{bullet_section(arguments, "acceptance_criteria", ["Define observable completion criteria before editing."])}
+
+    ## Unknowns and risks
+    #{bullet_section(arguments, "risks", ["Confirm dependencies, current branch, test scope, and automation side effects."])}
+
+    ## Open questions or blockers
+    #{bullet_section(arguments, "open_questions_or_blockers", ["None recorded by the tool caller."])}
+
+    ## Next step
+    Call `superpowers:writing-plans` with the clarified requirements before editing code.
+    """
+    |> String.trim()
+  end
+
+  defp superpowers_markdown(@superpowers_writing_plans_tool, arguments) do
+    """
+    # Superpowers Writing Plan Artifact
+
+    #{issue_heading(arguments)}
+
+    ## Requirements summary
+    #{bullet_section(arguments, "requirements_summary", fallback_requirement(arguments))}
+
+    ## Acceptance criteria
+    #{bullet_section(arguments, "acceptance_criteria", ["The implementation satisfies the Linear issue without unrelated changes."])}
+
+    ## Implementation steps
+    #{numbered_section(arguments, "implementation_steps", default_implementation_steps())}
+
+    ## Verification method
+    #{bullet_section(arguments, "verification_method", ["Run targeted tests and any configured smoke-safe hook before commit."])}
+
+    ## Open questions or blockers
+    #{bullet_section(arguments, "open_questions_or_blockers", ["None recorded by the tool caller."])}
+
+    ## Planning gate status
+    This artifact was produced by the `superpowers:writing-plans` dynamic tool and can be recorded in Linear, a PR body, or a workpad before implementation.
+    """
+    |> String.trim()
+  end
+
+  defp issue_heading(arguments) do
+    identifier = text_value(arguments, "issue_identifier") || "unknown issue"
+    title = text_value(arguments, "title") || "Untitled"
+    context = text_value(arguments, "context")
+
+    base = "**Issue:** #{identifier} - #{title}"
+
+    case context do
+      nil -> base
+      context -> base <> "\n\n**Context:** " <> context
+    end
+  end
+
+  defp fallback_requirement(arguments) do
+    case text_value(arguments, "description") do
+      nil -> ["Clarify the issue requirements, constraints, and expected proof of work."]
+      description -> [description]
+    end
+  end
+
+  defp default_implementation_steps do
+    [
+      "Read the issue, linked repository context, and existing tests.",
+      "Confirm the current branch and sync from the expected default branch.",
+      "Add or update a focused failing test when the change is behavioral.",
+      "Implement the smallest complete change.",
+      "Run targeted validation and inspect output for unexpected warnings.",
+      "Commit, push, and open or update the PR with the Linear key and validation notes."
+    ]
+  end
+
+  defp bullet_section(arguments, key, fallback) do
+    arguments
+    |> list_value(key)
+    |> case do
+      [] -> fallback
+      values -> values
+    end
+    |> Enum.map_join("\n", &"- #{&1}")
+  end
+
+  defp numbered_section(arguments, key, fallback) do
+    arguments
+    |> list_value(key)
+    |> case do
+      [] -> fallback
+      values -> values
+    end
+    |> Enum.with_index(1)
+    |> Enum.map_join("\n", fn {value, index} -> "#{index}. #{value}" end)
+  end
+
+  defp list_value(arguments, key) when is_map(arguments) do
+    case Map.get(arguments, key) do
+      values when is_list(values) ->
+        values
+        |> Enum.map(&to_string/1)
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+
+      value when is_binary(value) ->
+        value
+        |> String.split(["\n", "\r"], trim: true)
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+
+      _ ->
+        []
+    end
+  end
+
+  defp text_value(arguments, key) when is_map(arguments) do
+    case Map.get(arguments, key) do
+      value when is_binary(value) ->
+        case String.trim(value) do
+          "" -> nil
+          trimmed -> trimmed
+        end
+
+      _ ->
+        nil
     end
   end
 
@@ -193,6 +409,10 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   defp failure_response(payload) do
     dynamic_tool_response(false, encode_payload(payload))
+  end
+
+  defp success_response(output) when is_binary(output) do
+    dynamic_tool_response(true, output)
   end
 
   defp dynamic_tool_response(success, output) when is_boolean(success) and is_binary(output) do
