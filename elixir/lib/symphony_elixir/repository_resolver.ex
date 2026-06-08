@@ -4,8 +4,8 @@ defmodule SymphonyElixir.RepositoryResolver do
 
   The runtime keeps Linear as the queue source of truth, but the implementation
   workspace needs a repository. This resolver follows an official-style
-  configuration contract: issue metadata can name the repo, while WORKFLOW.md
-  provides a safe default and allowlist.
+  configuration contract: GitHub-synced issue metadata can name the repo, while
+  WORKFLOW.md provides a safe default.
   """
 
   alias SymphonyElixir.Config
@@ -65,8 +65,7 @@ defmodule SymphonyElixir.RepositoryResolver do
 
     with :ok <- validate_source_consistency(explicit_slug, source_slug),
          :ok <- validate_github_url_ambiguity(explicit_slug || source_slug, github_slugs),
-         {:ok, slug} <- normalize_slug(slug),
-         :ok <- allow_repository(slug, settings.repository.allowed) do
+         {:ok, slug} <- normalize_slug(slug) do
       {:ok,
        build_context(
          slug,
@@ -275,22 +274,6 @@ defmodule SymphonyElixir.RepositoryResolver do
 
   defp strip_git_suffix(value) when is_binary(value) do
     String.replace_suffix(value, ".git", "")
-  end
-
-  defp allow_repository(nil, _allowed), do: :ok
-  defp allow_repository(_slug, allowed) when allowed in [nil, []], do: :ok
-
-  defp allow_repository(slug, allowed) do
-    allowed =
-      allowed
-      |> Enum.map(&canonical_repository_slug/1)
-      |> Enum.reject(&is_nil/1)
-
-    if slug in allowed do
-      :ok
-    else
-      {:error, {:repository_not_allowed, slug, allowed}}
-    end
   end
 
   defp build_context(nil, _clone_protocol, github_issue_url) do

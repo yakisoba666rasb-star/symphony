@@ -106,7 +106,6 @@ defmodule SymphonyElixir.TestSupport do
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           dirty_workspace_retention_days: 7,
           repository_default: nil,
-          repository_allowed: [],
           repository_clone_protocol: "https",
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
@@ -155,7 +154,6 @@ defmodule SymphonyElixir.TestSupport do
     workspace_root = Keyword.get(config, :workspace_root)
     dirty_workspace_retention_days = Keyword.get(config, :dirty_workspace_retention_days)
     repository_default = Keyword.get(config, :repository_default)
-    repository_allowed = Keyword.get(config, :repository_allowed)
     repository_clone_protocol = Keyword.get(config, :repository_clone_protocol)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
@@ -206,7 +204,7 @@ defmodule SymphonyElixir.TestSupport do
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
         "  dirty_workspace_retention_days: #{yaml_value(dirty_workspace_retention_days)}",
-        repository_yaml(repository_default, repository_allowed, repository_clone_protocol),
+        repository_yaml(repository_default, repository_clone_protocol),
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
@@ -289,13 +287,12 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
-  defp repository_yaml(nil, allowed, _clone_protocol) when allowed in [nil, []], do: nil
+  defp repository_yaml(nil, _clone_protocol), do: nil
 
-  defp repository_yaml(default, allowed, clone_protocol) do
+  defp repository_yaml(default, clone_protocol) do
     [
       "repository:",
       default && "  default: #{yaml_value(default)}",
-      allowed not in [nil, []] && "  allowed: #{yaml_value(allowed)}",
       "  clone_protocol: #{yaml_value(clone_protocol)}"
     ]
     |> Enum.reject(&(&1 in [nil, false]))
