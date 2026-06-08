@@ -82,7 +82,7 @@ defmodule SymphonyElixir.ReviewRunnerTest do
     end
   end
 
-  test "runs rework, publishes the rework branch, then re-reviews" do
+  test "runs rework, then re-reviews the existing PR without runtime publish" do
     test_root = Path.join(System.tmp_dir!(), "symphony-review-runner-rework-#{System.unique_integer([:positive])}")
     File.mkdir_p!(test_root)
 
@@ -109,11 +109,7 @@ defmodule SymphonyElixir.ReviewRunnerTest do
                  app_server_module: FakeReviewLoopAppServer,
                  max_review_fix_loops: 1,
                  implementer_codex_command: "codex --profile implementer app-server",
-                 reviewer_codex_command: "codex --profile reviewer app-server",
-                 publish_rework: fn ->
-                   send(self(), :publish_rework)
-                   {:ok, %{"number" => 238, "url" => "https://github.example/pull/238"}}
-                 end
+                 reviewer_codex_command: "codex --profile reviewer app-server"
                )
 
       assert_receive {:codex_turn, first_review_prompt}
@@ -126,7 +122,6 @@ defmodule SymphonyElixir.ReviewRunnerTest do
       assert rework_opts[:codex_command] == "codex --profile implementer app-server"
       assert_receive {:rework_turn, rework_prompt}
       assert rework_prompt =~ "PR update is missing"
-      assert_receive :publish_rework
       assert_receive {:codex_turn, second_review_prompt}
       assert second_review_prompt =~ "Review loop index: 1"
       refute File.exists?(Path.join(test_root, ".symphony-review-verdict.json"))
@@ -167,17 +162,12 @@ defmodule SymphonyElixir.ReviewRunnerTest do
                  %Issue{identifier: "LAB-277", title: "Runtime rework loop"},
                  %{"number" => 381, "url" => "https://github.example/pull/381"},
                  app_server_module: FakeReviewLoopAppServer,
-                 max_review_fix_loops: 1,
-                 publish_rework: fn ->
-                   send(self(), :publish_rework)
-                   {:ok, %{"number" => 381, "url" => "https://github.example/pull/381"}}
-                 end
+                 max_review_fix_loops: 1
                )
 
       assert_receive {:rework_turn, rework_prompt}
       assert rework_prompt =~ "tests/test_server_ui.py:766"
       assert rework_prompt =~ "Expected excluded history card"
-      assert_receive :publish_rework
       refute File.exists?(Path.join(test_root, ".symphony-review-verdict.json"))
     after
       restore_app_env(:test_pid, previous_test_pid)

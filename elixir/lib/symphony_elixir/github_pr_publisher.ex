@@ -1,9 +1,11 @@
 defmodule SymphonyElixir.GitHubPrPublisher do
   @moduledoc """
-  Publishes completed workspace changes to GitHub and opens a draft pull request.
+  Legacy helper that publishes completed workspace changes to GitHub and opens a
+  draft pull request.
 
-  Codex runs in a guarded command environment, so the runtime owns the final
-  GitHub handoff instead of asking the agent to push branches or create PRs.
+  The normal orchestrator path is agent-owned: Codex pushes branches and creates
+  or updates PRs from the workspace. Keep this module for explicit recovery or
+  compatibility paths only.
   """
 
   alias SymphonyElixir.GitHubPrLookup
@@ -241,7 +243,7 @@ defmodule SymphonyElixir.GitHubPrPublisher do
     """
     Automated Symphony runtime handoff for #{issue_identifier(issue)}.
 
-    PR URL is required before In Review handoff. The runtime created this draft PR after Codex completed workspace changes.
+    PR URL is required before In Review handoff. This legacy runtime helper created this draft PR after Codex completed workspace changes.
 
     Linear: #{issue_url}
     #{source_issue_line(github_issue_url)}

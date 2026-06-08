@@ -2,10 +2,11 @@ defmodule SymphonyElixir.ReviewRunner do
   @moduledoc """
   Runs the official-style implementer/reviewer/rework loop before human review.
 
-  The runtime owns the loop boundaries: Codex implements, the runtime publishes a
-  draft PR, a separate reviewer turn emits a structured verdict, and blocking
-  findings are sent back to an implementer rework turn until the verdict is
-  approve-equivalent or the configured loop limit is reached.
+  The runtime owns loop boundaries only: a separate reviewer turn emits a
+  structured verdict, and blocking findings are sent back to an implementer
+  rework turn until the existing PR is approve-equivalent or the configured
+  loop limit is reached. The implementer remains responsible for pushing PR
+  branch updates.
   """
 
   require Logger
@@ -52,9 +53,8 @@ defmodule SymphonyElixir.ReviewRunner do
   end
 
   defp continue_rework_loop(workspace_path, issue, pr, verdict, loop_index, max_loops, opts) do
-    with :ok <- run_rework_turn(workspace_path, issue, pr, verdict, loop_index + 1, opts),
-         {:ok, updated_pr} <- publish_rework(opts, pr) do
-      do_run_loop(workspace_path, issue, updated_pr, loop_index + 1, max_loops, opts)
+    with :ok <- run_rework_turn(workspace_path, issue, pr, verdict, loop_index + 1, opts) do
+      do_run_loop(workspace_path, issue, pr, loop_index + 1, max_loops, opts)
     end
   end
 
@@ -89,7 +89,6 @@ defmodule SymphonyElixir.ReviewRunner do
       |> Keyword.drop([
         :app_server_module,
         :max_review_fix_loops,
-        :publish_rework,
         :implementer_codex_command,
         :reviewer_codex_command
       ])
@@ -126,14 +125,6 @@ defmodule SymphonyElixir.ReviewRunner do
     case Keyword.get(opts, :reviewer_codex_command) do
       command when is_binary(command) -> [codex_command: command]
       _ -> Config.review_role_codex_options(:reviewer)
-    end
-  end
-
-  defp publish_rework(opts, current_pr) do
-    case Keyword.get(opts, :publish_rework) do
-      nil -> {:ok, current_pr}
-      publish when is_function(publish, 0) -> publish.()
-      other -> {:error, {:invalid_publish_rework_callback, other}}
     end
   end
 
@@ -284,7 +275,7 @@ defmodule SymphonyElixir.ReviewRunner do
     - Do not merge.
     - Do not move the Linear issue to human review yourself.
     - Keep changes scoped to the issue and reviewer findings.
-    - Commit-ready workspace changes are enough; the runtime owns publication and review handoff.
+    - Push any required branch updates yourself; the runtime will reuse the existing PR for the next review.
 
     Rework loop: #{loop_number}
     """

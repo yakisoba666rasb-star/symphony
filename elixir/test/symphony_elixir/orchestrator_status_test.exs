@@ -1470,7 +1470,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert %{
              identifier: "MT-NO-PR",
-             error: "no GitHub PR found for branch feature/no-pr; runtime publish failed: :publish_blocked"
+             error: "no GitHub PR found for branch feature/no-pr; agent-owned PR is required before In Review handoff"
            } = state.blocked[issue_id]
   end
 
