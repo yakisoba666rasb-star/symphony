@@ -91,6 +91,7 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
     assert body =~ "PR URL is required before In Review handoff"
     assert body =~ "https://linear.app/ryo-work/issue/LAB-236/test"
     assert body =~ "Source GitHub issue: https://github.com/octo/repo/issues/236"
+    assert body =~ "Fixes #236"
   end
 
   test "does not publish when workspace has no changes" do
@@ -104,6 +105,248 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
 
     assert {:error, :no_workspace_changes} =
              GitHubPrPublisher.publish_workspace("/work/clean", "feature/clean", %Issue{identifier: "LAB-1"}, deps)
+  end
+
+  test "returns an error when required binaries are missing" do
+    assert {:error, :git_not_found} =
+             GitHubPrPublisher.publish_workspace(
+               "/work/missing-git",
+               "feature/missing-git",
+               %Issue{identifier: "LAB-1"},
+               %{
+                 find_git_bin: fn -> nil end,
+                 find_gh_bin: fn -> "/bin/gh" end,
+                 run_command: fn _cmd, _args, _opts -> flunk("commands should not run without git") end
+               }
+             )
+
+    assert {:error, :gh_not_found} =
+             GitHubPrPublisher.publish_workspace(
+               "/work/missing-gh",
+               "feature/missing-gh",
+               %Issue{identifier: "LAB-1"},
+               %{
+                 find_git_bin: fn -> "/bin/git" end,
+                 find_gh_bin: fn -> nil end,
+                 run_command: fn _cmd, _args, _opts -> flunk("commands should not run without gh") end
+               }
+             )
+  end
+
+  test "returns an error for unsupported remotes" do
+    deps = %{
+      find_git_bin: fn -> "/bin/git" end,
+      find_gh_bin: fn -> "/bin/gh" end,
+      run_command: fn
+        "/bin/git", ["-C", "/work/unsupported", "status", "--porcelain", "--", "." | _pathspecs], _opts ->
+          {:ok, {" M file.txt\n", 0}}
+
+        "/bin/git", ["-C", "/work/unsupported", "remote", "get-url", "origin"], _opts ->
+          {:ok, {"ssh://git.example.com/octo/repo.git\n", 0}}
+      end
+    }
+
+    assert {:error, {:unsupported_remote_url, "ssh://git.example.com/octo/repo.git"}} =
+             GitHubPrPublisher.publish_workspace(
+               "/work/unsupported",
+               "feature/unsupported",
+               %Issue{identifier: "LAB-1"},
+               deps
+             )
+  end
+
+  test "sets missing git identity and creates body without source GitHub issue" do
+    parent = self()
+
+    deps = %{
+      find_git_bin: fn -> "/bin/git" end,
+      find_gh_bin: fn -> "/bin/gh" end,
+      run_command: fn cmd, args, opts ->
+        send(parent, {:command, cmd, args, opts})
+
+        case {cmd, args} do
+          {"/bin/git", ["-C", "/work/no-identity", "status", "--porcelain", "--", "." | _pathspecs]} ->
+            {:ok, {" M README.md\n", 0}}
+
+          {"/bin/git", ["-C", "/work/no-identity", "remote", "get-url", "origin"]} ->
+            {:ok, {"https://github.com/octo/repo.git\n", 0}}
+
+          {"/bin/git", ["-C", "/work/no-identity", "rev-parse", "--abbrev-ref", "origin/HEAD"]} ->
+            {:ok, {"origin/HEAD\n", 0}}
+
+          {"/bin/gh", ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]} ->
+            {:ok, {"main\n", 0}}
+
+          {"/bin/git", ["-C", "/work/no-identity", "config", "--get", _key]} ->
+            {:ok, {"", 1}}
+
+          {"/bin/git", ["-C", "/work/no-identity", "config", _key, _value]} ->
+            {:ok, {"", 0}}
+
+          {"/bin/git", ["-C", "/work/no-identity", "diff", "--cached", "--quiet"]} ->
+            {:ok, {"", 1}}
+
+          {"/bin/git", ["-C", "/work/no-identity" | _rest]} ->
+            {:ok, {"", 0}}
+
+          {"/bin/gh", ["pr", "create" | _rest]} ->
+            {:ok, {"https://github.com/octo/repo/pull/99\n", 0}}
+
+          {"/bin/gh", ["pr", "list" | _rest]} ->
+            {:ok, {"[]", 0}}
+        end
+      end
+    }
+
+    assert {:ok, %{"url" => "https://github.com/octo/repo/pull/99", "headRefName" => "feature/no-identity"}} =
+             GitHubPrPublisher.publish_workspace(
+               "/work/no-identity",
+               "feature/no-identity",
+               %Issue{identifier: "LAB-99", title: "No source issue"},
+               deps
+             )
+
+    assert_received {:command, "/bin/git", ["-C", "/work/no-identity", "config", "user.name", "Symphony Runtime"], _opts}
+    assert_received {:command, "/bin/git", ["-C", "/work/no-identity", "config", "user.email", "symphony-runtime@users.noreply.github.com"], _opts}
+
+    assert_received {:command, "/bin/gh",
+                     [
+                       "pr",
+                       "create",
+                       "--repo",
+                       "octo/repo",
+                       "--head",
+                       "feature/no-identity",
+                       "--base",
+                       "main",
+                       "--title",
+                       "[codex] LAB-99 No source issue",
+                       "--body",
+                       body,
+                       "--draft"
+                     ], _opts}
+
+    assert body =~ "Linear: n/a"
+    refute body =~ "Source GitHub issue:"
+    refute body =~ "Fixes #"
+  end
+
+  test "returns an error when add produces no staged changes" do
+    deps = %{
+      find_git_bin: fn -> "/bin/git" end,
+      find_gh_bin: fn -> "/bin/gh" end,
+      run_command: fn
+        "/bin/git", ["-C", "/work/no-staged", "status", "--porcelain", "--", "." | _pathspecs], _opts ->
+          {:ok, {" M file.txt\n", 0}}
+
+        "/bin/git", ["-C", "/work/no-staged", "remote", "get-url", "origin"], _opts ->
+          {:ok, {"git@github.com:octo/repo.git\n", 0}}
+
+        "/bin/git", ["-C", "/work/no-staged", "rev-parse", "--abbrev-ref", "origin/HEAD"], _opts ->
+          {:ok, {"main\n", 0}}
+
+        "/bin/git", ["-C", "/work/no-staged", "config", "--get", _key], _opts ->
+          {:ok, {"Test User\n", 0}}
+
+        "/bin/git", ["-C", "/work/no-staged", "diff", "--cached", "--quiet"], _opts ->
+          {:ok, {"", 0}}
+
+        "/bin/git", ["-C", "/work/no-staged" | _rest], _opts ->
+          {:ok, {"", 0}}
+      end
+    }
+
+    assert {:error, :no_staged_changes} =
+             GitHubPrPublisher.publish_workspace(
+               "/work/no-staged",
+               "feature/no-staged",
+               %Issue{identifier: "LAB-1"},
+               deps
+             )
+  end
+
+  test "returns an error when GitHub default branch lookup fails" do
+    deps = %{
+      find_git_bin: fn -> "/bin/git" end,
+      find_gh_bin: fn -> "/bin/gh" end,
+      run_command: fn
+        "/bin/git", ["-C", "/work/no-default", "status", "--porcelain", "--", "." | _pathspecs], _opts ->
+          {:ok, {" M file.txt\n", 0}}
+
+        "/bin/git", ["-C", "/work/no-default", "remote", "get-url", "origin"], _opts ->
+          {:ok, {"git@github.com:octo/repo.git\n", 0}}
+
+        "/bin/git", ["-C", "/work/no-default", "rev-parse", "--abbrev-ref", "origin/HEAD"], _opts ->
+          {:ok, {"origin/HEAD\n", 0}}
+
+        "/bin/gh", ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"], _opts ->
+          {:ok, {"missing repository", 1}}
+      end
+    }
+
+    assert {:error, {:gh_default_branch_failed, 1, "missing repository"}} =
+             GitHubPrPublisher.publish_workspace(
+               "/work/no-default",
+               "feature/no-default",
+               %Issue{identifier: "LAB-1"},
+               deps
+             )
+  end
+
+  test "returns an error when GitHub default branch lookup is blank" do
+    deps = %{
+      find_git_bin: fn -> "/bin/git" end,
+      find_gh_bin: fn -> "/bin/gh" end,
+      run_command: fn
+        "/bin/git", ["-C", "/work/blank-default", "status", "--porcelain", "--", "." | _pathspecs], _opts ->
+          {:ok, {" M file.txt\n", 0}}
+
+        "/bin/git", ["-C", "/work/blank-default", "remote", "get-url", "origin"], _opts ->
+          {:ok, {"git@github.com:octo/repo.git\n", 0}}
+
+        "/bin/git", ["-C", "/work/blank-default", "rev-parse", "--abbrev-ref", "origin/HEAD"], _opts ->
+          {:ok, {"origin/HEAD\n", 0}}
+
+        "/bin/gh", ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"], _opts ->
+          {:ok, {"\n", 0}}
+      end
+    }
+
+    assert {:error, :default_branch_not_found} =
+             GitHubPrPublisher.publish_workspace(
+               "/work/blank-default",
+               "feature/blank-default",
+               %Issue{identifier: "LAB-1"},
+               deps
+             )
+  end
+
+  test "returns an error when GitHub default branch command errors" do
+    deps = %{
+      find_git_bin: fn -> "/bin/git" end,
+      find_gh_bin: fn -> "/bin/gh" end,
+      run_command: fn
+        "/bin/git", ["-C", "/work/error-default", "status", "--porcelain", "--", "." | _pathspecs], _opts ->
+          {:ok, {" M file.txt\n", 0}}
+
+        "/bin/git", ["-C", "/work/error-default", "remote", "get-url", "origin"], _opts ->
+          {:ok, {"git@github.com:octo/repo.git\n", 0}}
+
+        "/bin/git", ["-C", "/work/error-default", "rev-parse", "--abbrev-ref", "origin/HEAD"], _opts ->
+          {:ok, {"origin/HEAD\n", 0}}
+
+        "/bin/gh", ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"], _opts ->
+          {:error, :network_down}
+      end
+    }
+
+    assert {:error, {:gh_default_branch_failed, :network_down}} =
+             GitHubPrPublisher.publish_workspace(
+               "/work/error-default",
+               "feature/error-default",
+               %Issue{identifier: "LAB-1"},
+               deps
+             )
   end
 
   test "pushes rework commits and returns existing PR when branch already has one" do

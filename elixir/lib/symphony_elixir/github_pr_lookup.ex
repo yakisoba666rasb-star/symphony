@@ -50,6 +50,22 @@ defmodule SymphonyElixir.GitHubPrLookup do
     end
   end
 
+  @spec lookup_merged_linked_pull_request(String.t(), [String.t()], deps()) ::
+          {:ok, nil | pr_map()} | {:error, term()}
+  def lookup_merged_linked_pull_request(repo, attachment_urls, deps \\ runtime_deps())
+      when is_binary(repo) and is_list(attachment_urls) do
+    with {:ok, gh_bin} <- find_gh_binary(deps),
+         {:ok, pull_number} <- linked_pull_number(repo, attachment_urls),
+         {:ok, pr} <- view_pull_request(gh_bin, repo, pull_number, deps, :merged_sync),
+         :ok <- validate_merged_linked_pull_request(pr) do
+      {:ok, tag_lookup_source(pr, "merged_linked_pull_request", nil)}
+    else
+      :none -> {:ok, nil}
+      {:error, {:linked_pull_request_not_merged, _number}} -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   @spec runtime_deps() :: deps()
   defp runtime_deps do
     %{
@@ -100,17 +116,19 @@ defmodule SymphonyElixir.GitHubPrLookup do
   end
 
   defp workspace_branch_candidates(workspace_path, deps) do
-    with {:ok, git_bin} <- find_git_binary(deps) do
-      [
-        {"workspace_branch", query_current_branch(workspace_path, git_bin, deps)},
-        {"workspace_upstream_branch", query_upstream_branch(workspace_path, git_bin, deps)}
-      ]
-      |> Enum.flat_map(fn
-        {source, {:ok, branch}} -> [{source, branch}]
-        {_source, :none} -> []
-      end)
-    else
-      {:error, _reason} -> []
+    case find_git_binary(deps) do
+      {:ok, git_bin} ->
+        [
+          {"workspace_branch", query_current_branch(workspace_path, git_bin, deps)},
+          {"workspace_upstream_branch", query_upstream_branch(workspace_path, git_bin, deps)}
+        ]
+        |> Enum.flat_map(fn
+          {source, {:ok, branch}} -> [{source, branch}]
+          {_source, :none} -> []
+        end)
+
+      {:error, _reason} ->
+        []
     end
   end
 
@@ -274,8 +292,8 @@ defmodule SymphonyElixir.GitHubPrLookup do
     end
   end
 
-  defp view_pull_request(gh_bin, repo, number, deps) when is_integer(number) do
-    command = github_pr_view_args(repo, number)
+  defp view_pull_request(gh_bin, repo, number, deps, mode \\ :handoff) when is_integer(number) do
+    command = github_pr_view_args(repo, number, mode)
 
     case normalize_command_result(deps.run_command.(gh_bin, command, stderr_to_stdout: true)) do
       {:ok, {output, 0}} -> parse_gh_pr_view_response(output)
@@ -298,6 +316,19 @@ defmodule SymphonyElixir.GitHubPrLookup do
   end
 
   defp validate_linked_pull_request(pr), do: {:error, {:invalid_linked_pull_request, pr}}
+
+  defp validate_merged_linked_pull_request(%{"state" => state, "mergedAt" => merged_at} = pr) do
+    if String.upcase(to_string(state)) == "MERGED" or present_string?(merged_at) do
+      :ok
+    else
+      {:error, {:linked_pull_request_not_merged, pr["number"]}}
+    end
+  end
+
+  defp validate_merged_linked_pull_request(pr), do: {:error, {:invalid_linked_pull_request, pr}}
+
+  defp present_string?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present_string?(_value), do: false
 
   defp tag_lookup_source(pr, source, expected_branch, matched_branch \\ nil) when is_map(pr) do
     pr
@@ -357,7 +388,7 @@ defmodule SymphonyElixir.GitHubPrLookup do
     ]
   end
 
-  defp github_pr_view_args(repo, number) do
+  defp github_pr_view_args(repo, number, :handoff) do
     [
       "pr",
       "view",
@@ -366,6 +397,18 @@ defmodule SymphonyElixir.GitHubPrLookup do
       repo,
       "--json",
       "number,url,headRefName,isDraft,mergeStateStatus,state"
+    ]
+  end
+
+  defp github_pr_view_args(repo, number, :merged_sync) do
+    [
+      "pr",
+      "view",
+      Integer.to_string(number),
+      "--repo",
+      repo,
+      "--json",
+      "number,url,headRefName,isDraft,mergeStateStatus,state,mergedAt"
     ]
   end
 end

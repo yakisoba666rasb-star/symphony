@@ -80,7 +80,9 @@ repository or in operator-managed runtime storage.
 7. Leave branch push, PR creation or update, and `In Review` transition to the
    Symphony runtime publisher.
 8. Include `Refs {{ issue.identifier }}` in any local commit or PR body text you
-   prepare.
+   prepare. If the Linear issue is synced from a GitHub issue, include the
+   matching GitHub closing keyword, such as `Fixes #123`, in the PR body so the
+   source issue can close on merge.
 9. Report whether the workspace is ready for runtime publication.
 10. Leave final merge or closure to a human unless the workflow explicitly says
     otherwise.
