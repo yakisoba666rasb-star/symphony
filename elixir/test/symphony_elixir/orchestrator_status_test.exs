@@ -1922,7 +1922,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, {:DOWN, ref, :process, self(), :normal})
     assert_receive {:tracker_comment_called, ^issue_id, comment_body}
     refute_receive {:unexpected_handoff_refresh, _issue_ids}, 100
-    state = :sys.get_state(pid)
+
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        get_in(state.blocked, [issue_id, :error]) ==
+          "GitHub PR lookup returned unexpected result for branch feature/unexpected-pr-lookup"
+      end)
 
     assert comment_body =~ "Symphony blocked MT-UNEXPECTED-PR-LOOKUP"
 
