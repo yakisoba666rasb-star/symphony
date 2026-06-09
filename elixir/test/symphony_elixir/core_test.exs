@@ -804,7 +804,9 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+      pending_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+      assert_receive {review_ref, review_result} when is_reference(review_ref), 200
+      {:noreply, updated_state} = Orchestrator.handle_info({review_ref, review_result}, pending_state)
 
       assert_receive {:tracker_state_update, ^issue_id, "In Review"}
       refute Map.has_key?(updated_state.running, issue_id)
