@@ -2370,6 +2370,32 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert %{^pending_ref => %{issue_id: ^issue_id}} = state.pending_review_handoffs
   end
 
+  test "orchestrator keeps pending review handoff when task DOWN normal arrives before result" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+
+    issue_id = "issue-review-down-before-result"
+    orchestrator_name = Module.concat(__MODULE__, :ReviewDownBeforeResultOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    review_ref = make_ref()
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      Map.put(initial_state, :pending_review_handoffs, %{review_ref => %{issue_id: issue_id}})
+    end)
+
+    send(pid, {:DOWN, review_ref, :process, self(), :normal})
+
+    state = :sys.get_state(pid)
+    assert %{^review_ref => %{issue_id: ^issue_id}} = state.pending_review_handoffs
+  end
+
   test "orchestrator does not duplicate blocked review recovery while review is pending" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
 
