@@ -2314,6 +2314,62 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.blocked[issue_id]
   end
 
+  test "orchestrator does not duplicate blocked review guard while review state handoff is pending" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      tracker_active_states: ["Todo", "In Progress", "Rework"],
+      tracker_review_state: "In Review"
+    )
+
+    issue_id = "issue-blocked-review-handoff-in-review-pending"
+    orchestrator_name = Module.concat(__MODULE__, :BlockedReviewHandoffInReviewPendingOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-BLOCKED-IN-REVIEW-PENDING",
+      branch_name: "feature/blocked-in-review-pending",
+      state: "In Review"
+    }
+
+    blocked_entry = %{
+      issue_id: issue_id,
+      identifier: issue.identifier,
+      issue: %{issue | state: "Rework"},
+      worker_host: nil,
+      workspace_path: "/tmp/mt-blocked-in-review-pending",
+      session_id: "thread-blocked-in-review-pending",
+      error: "issue moved to In Review without discoverable GitHub PR for branch feature/blocked-in-review-pending or linked PR attachments; agent-owned PR is required before handoff",
+      blocked_at: DateTime.utc_now(),
+      last_codex_message: nil,
+      last_codex_event: nil,
+      last_codex_timestamp: nil
+    }
+
+    pending_ref = make_ref()
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:blocked, %{issue_id => blocked_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+      |> Map.put(:pending_review_handoffs, %{pending_ref => %{issue_id: issue_id}})
+    end)
+
+    :sys.replace_state(pid, &Orchestrator.reconcile_blocked_issue_states_for_test([issue], &1))
+
+    state = :sys.get_state(pid)
+    assert MapSet.member?(state.claimed, issue_id)
+    assert Map.has_key?(state.blocked, issue_id)
+    assert %{^pending_ref => %{issue_id: ^issue_id}} = state.pending_review_handoffs
+  end
+
   test "orchestrator does not duplicate blocked review recovery while review is pending" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
 
@@ -2424,6 +2480,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_receive :slow_review_started, 200
 
     :sys.replace_state(pid, &Orchestrator.reconcile_blocked_issue_states_for_test([issue], &1))
+    refute_receive :slow_review_started, 100
+
+    review_issue = %{issue | state: "In Review"}
+    :sys.replace_state(pid, &Orchestrator.reconcile_blocked_issue_states_for_test([review_issue], &1))
     refute_receive :slow_review_started, 100
 
     assert_receive {:tracker_comment_called, ^issue_id, comment}, 2_000
@@ -3011,16 +3071,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
-    Process.sleep(50)
-    state = :sys.get_state(pid)
-
-    assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 200
-    assert_receive {:tracker_comment_called, ^issue_id, comment}, 200
+    assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 2_000
+    assert_receive {:tracker_comment_called, ^issue_id, comment}, 2_000
     assert comment =~ "PR: https://github.example/pull/79"
     assert comment =~ "source: linked GitHub PR attachment"
     assert comment =~ "expected Linear branch: feature/linear-branch"
     assert comment =~ "actual PR branch: feature/actual-pr"
 
+    state = :sys.get_state(pid)
     assert MapSet.member?(state.completed, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
     assert state.blocked == %{}

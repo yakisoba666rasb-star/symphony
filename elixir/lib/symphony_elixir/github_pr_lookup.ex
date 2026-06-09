@@ -433,8 +433,7 @@ defmodule SymphonyElixir.GitHubPrLookup do
 
   defp pick_merged_issue_pull_request({:ok, prs}, issue_identifier, issue_url, branch_name) do
     prs
-    |> Enum.filter(&merged_pr?/1)
-    |> Enum.filter(&issue_pr_evidence?(&1, issue_identifier, issue_url, branch_name))
+    |> Enum.filter(&(merged_pr?(&1) and issue_pr_evidence?(&1, issue_identifier, issue_url, branch_name)))
     |> pick_best_merged_issue_pr(issue_identifier, issue_url, branch_name)
   end
 

@@ -1448,10 +1448,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp guard_blocked_review_handoff_issue(%State{} = state, %Issue{} = issue) do
     with %{error: error} = blocked_entry <- Map.get(state.blocked, issue.id),
+         false <- pending_review_handoff_for_issue?(state, issue.id),
          true <- review_handoff_pr_missing_error?(error),
          guarded_entry <- refresh_blocked_review_handoff_entry(blocked_entry, issue) do
       {:ok, do_guard_blocked_review_handoff_issue(state, issue, guarded_entry)}
     else
+      true -> {:ok, state}
       _miss -> :miss
     end
   end
