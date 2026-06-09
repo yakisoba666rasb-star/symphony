@@ -1047,6 +1047,60 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
              GitHubPrLookup.lookup_merged_issue_pull_request("octo/repo", "LAB-382", nil, nil, deps)
   end
 
+  test "merged issue pull request lookup ignores unmerged and invalid candidates" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            "not a pr",
+            %{
+              "number" => 80,
+              "url" => "https://github.com/octo/repo/pull/80",
+              "headRefName" => "lab-382-open",
+              "state" => "OPEN",
+              "mergedAt" => nil,
+              "title" => "LAB-382 not merged",
+              "body" => "Refs LAB-382"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:ok, nil} = GitHubPrLookup.lookup_merged_issue_pull_request("octo/repo", "LAB-382", nil, nil, deps)
+  end
+
+  test "merged issue pull request lookup reports ambiguous matches without urls" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 81,
+              "headRefName" => "lab-382-a",
+              "state" => "MERGED",
+              "mergedAt" => "2026-06-09T16:00:00Z",
+              "title" => "LAB-382 first",
+              "body" => "Refs LAB-382"
+            },
+            %{
+              "headRefName" => "lab-382-b",
+              "state" => "MERGED",
+              "mergedAt" => "2026-06-09T16:01:00Z",
+              "title" => "LAB-382 second",
+              "body" => "Refs LAB-382"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:error, {:ambiguous_merged_issue_pull_requests, ["81", pr_payload]}} =
+             GitHubPrLookup.lookup_merged_issue_pull_request("octo/repo", "LAB-382", nil, nil, deps)
+
+    assert pr_payload =~ "lab-382-b"
+  end
+
   test "merged linked pull request lookup rejects ambiguous linked PR attachments" do
     deps = %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,

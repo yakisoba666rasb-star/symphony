@@ -497,6 +497,19 @@ defmodule SymphonyElixir.Orchestrator do
          opts \\ []
        )
        when mode in [:normal, :premature] do
+    if pending_review_handoff_for_issue?(state, issue_id) do
+      Logger.info(
+        "Skipping duplicate review handoff start for issue_id=#{issue_id} mode=#{mode}; " <>
+          "a review handoff is already pending"
+      )
+
+      state
+    else
+      do_start_review_handoff_task(state, mode, issue_id, running_entry, session_id, pr, issue, opts)
+    end
+  end
+
+  defp do_start_review_handoff_task(%State{} = state, mode, issue_id, running_entry, session_id, pr, issue, opts) do
     review_runner = review_runner_module()
     tracker = tracker_module()
     max_review_fix_loops = Config.max_review_fix_loops()
@@ -525,6 +538,15 @@ defmodule SymphonyElixir.Orchestrator do
       state
       | pending_review_handoffs: Map.put(state.pending_review_handoffs, task.ref, pending_review_handoff)
     }
+  end
+
+  defp handle_pending_review_handoff_down(%{pending_review_handoffs: pending} = state, ref, :normal)
+       when is_reference(ref) do
+    if Map.has_key?(pending, ref) do
+      Logger.debug("Review handoff task exited normally before result was handled; waiting for result ref=#{inspect(ref)}")
+    end
+
+    state
   end
 
   defp handle_pending_review_handoff_down(%{pending_review_handoffs: pending} = state, ref, reason)
@@ -1839,17 +1861,22 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp review_premature_handoff_pr(%State{} = state, %Issue{} = issue, running_entry, session_id, pr) do
-    stopped_state = terminate_running_issue(state, issue.id, false)
+    if pending_review_handoff_for_issue?(state, issue.id) do
+      Logger.info("Skipping premature review handoff for issue_id=#{issue.id}; a review handoff is already pending")
+      state
+    else
+      stopped_state = terminate_running_issue(state, issue.id, false)
 
-    start_review_handoff_task(
-      stopped_state,
-      :premature,
-      issue.id,
-      running_entry,
-      session_id,
-      pr,
-      issue
-    )
+      start_review_handoff_task(
+        stopped_state,
+        :premature,
+        issue.id,
+        running_entry,
+        session_id,
+        pr,
+        issue
+      )
+    end
   end
 
   defp review_handoff_block_state do
