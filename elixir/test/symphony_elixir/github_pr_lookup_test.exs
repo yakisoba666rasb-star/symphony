@@ -410,6 +410,186 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
     assert_received {:command, :gh, ["pr", "list", "--repo", "octo/repo", "--state", "open", "--json", _fields, "--head", "lab-379-brace-expansion-audit"]}
   end
 
+  test "workspace handoff lookup uses workspace head sha when branch names diverge" do
+    workspace = "/tmp/owner-workspace-head-sha-fallback"
+    parent = self()
+    head_sha = "c346f466a2cf61b390b75160b9a760c62345d6f3"
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", args, _opts ->
+          send(parent, {:command, :git, args})
+
+          case args do
+            ["-C", ^workspace, "remote", "get-url", "origin"] ->
+              {:ok, {"https://github.com/octo/repo.git", 0}}
+
+            ["-C", ^workspace, "branch", "--show-current"] ->
+              {:ok, {"lab-381-dedupe-slack-handoff\n", 0}}
+
+            ["-C", ^workspace, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"] ->
+              {:ok, {"origin/lab-381-dedupe-slack-handoff\n", 0}}
+
+            ["-C", ^workspace, "rev-parse", "HEAD"] ->
+              {:ok, {head_sha <> "\n", 0}}
+          end
+
+        "/tmp/fake-gh", args, _opts ->
+          send(parent, {:command, :gh, args})
+
+          case args do
+            ["pr", "list", "--repo", "octo/repo", "--state", _state, "--json", _fields, "--head", _head] ->
+              {:ok, {"[]", 0}}
+
+            ["pr", "list", "--repo", "octo/repo", "--state", "open", "--limit", "100", "--json", _fields] ->
+              {:ok,
+               {Jason.encode!([
+                  %{
+                    "number" => 204,
+                    "url" => "https://github.com/octo/repo/pull/204",
+                    "headRefName" => "lab-381-dedupe-slack-handoff",
+                    "headRefOid" => head_sha,
+                    "isDraft" => false,
+                    "mergeStateStatus" => "CLEAN",
+                    "state" => "OPEN"
+                  }
+                ]), 0}}
+          end
+      end
+    }
+
+    assert {:ok,
+            %{
+              "number" => 204,
+              "headRefName" => "lab-381-dedupe-slack-handoff",
+              "__symphonyLookupSource" => "workspace_head_sha",
+              "__symphonyExpectedBranch" => "aenima611111/linear-generated-branch",
+              "__symphonyMatchedBranch" => "lab-381-dedupe-slack-handoff"
+            }} =
+             GitHubPrLookup.lookup_workspace_handoff_pr(
+               workspace,
+               "aenima611111/linear-generated-branch",
+               [],
+               deps
+             )
+
+    assert_received {:command, :git, ["-C", ^workspace, "rev-parse", "HEAD"]}
+    assert_received {:command, :gh, ["pr", "list", "--repo", "octo/repo", "--state", "open", "--limit", "100", "--json", _fields]}
+  end
+
+  test "workspace handoff head sha lookup falls back to all PRs when open list misses" do
+    workspace = "/tmp/owner-workspace-head-sha-all-fallback"
+    head_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", args, _opts ->
+          case args do
+            ["-C", ^workspace, "remote", "get-url", "origin"] -> {:ok, {"https://github.com/octo/repo.git", 0}}
+            ["-C", ^workspace, "branch", "--show-current"] -> {:ok, {"workspace-branch\n", 0}}
+            ["-C", ^workspace, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"] -> {:ok, {"origin/workspace-branch\n", 0}}
+            ["-C", ^workspace, "rev-parse", "HEAD"] -> {:ok, {head_sha <> "\n", 0}}
+          end
+
+        "/tmp/fake-gh", args, _opts ->
+          case args do
+            ["pr", "list", "--repo", "octo/repo", "--state", _state, "--json", _fields, "--head", _head] ->
+              {:ok, {"[]", 0}}
+
+            ["pr", "list", "--repo", "octo/repo", "--state", "open", "--limit", "100", "--json", _fields] ->
+              {:ok, {"[]", 0}}
+
+            ["pr", "list", "--repo", "octo/repo", "--state", "all", "--limit", "100", "--json", _fields] ->
+              {:ok,
+               {Jason.encode!([
+                  %{
+                    "number" => 205,
+                    "url" => "https://github.com/octo/repo/pull/205",
+                    "headRefName" => "workspace-branch",
+                    "headRefOid" => head_sha,
+                    "isDraft" => false,
+                    "mergeStateStatus" => "CLEAN",
+                    "state" => "OPEN"
+                  }
+                ]), 0}}
+          end
+      end
+    }
+
+    assert {:ok,
+            %{
+              "number" => 205,
+              "__symphonyLookupSource" => "workspace_head_sha"
+            }} =
+             GitHubPrLookup.lookup_workspace_handoff_pr(
+               workspace,
+               "linear-branch",
+               [],
+               deps
+             )
+  end
+
+  test "workspace handoff head sha lookup returns nil without an open non-draft match" do
+    workspace = "/tmp/owner-workspace-head-sha-no-match"
+    head_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", args, _opts ->
+          case args do
+            ["-C", ^workspace, "remote", "get-url", "origin"] -> {:ok, {"https://github.com/octo/repo.git", 0}}
+            ["-C", ^workspace, "branch", "--show-current"] -> {:ok, {"workspace-branch\n", 0}}
+            ["-C", ^workspace, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"] -> {:ok, {"fatal: no upstream\n", 128}}
+            ["-C", ^workspace, "rev-parse", "HEAD"] -> {:ok, {head_sha <> "\n", 0}}
+          end
+
+        "/tmp/fake-gh", args, _opts ->
+          case args do
+            ["pr", "list", "--repo", "octo/repo", "--state", _state, "--json", _fields, "--head", _head] ->
+              {:ok, {"[]", 0}}
+
+            ["pr", "list", "--repo", "octo/repo", "--state", state, "--limit", "100", "--json", _fields]
+            when state in ["open", "all"] ->
+              {:ok,
+               {Jason.encode!([
+                  %{
+                    "number" => 206,
+                    "url" => "https://github.com/octo/repo/pull/206",
+                    "headRefName" => "workspace-branch",
+                    "headRefOid" => head_sha,
+                    "isDraft" => true,
+                    "mergeStateStatus" => "CLEAN",
+                    "state" => "OPEN"
+                  },
+                  %{
+                    "number" => 207,
+                    "url" => "https://github.com/octo/repo/pull/207",
+                    "headRefName" => "workspace-branch",
+                    "headRefOid" => "cccccccccccccccccccccccccccccccccccccccc",
+                    "isDraft" => false,
+                    "mergeStateStatus" => "CLEAN",
+                    "state" => "OPEN"
+                  }
+                ]), 0}}
+          end
+      end
+    }
+
+    assert {:ok, nil} =
+             GitHubPrLookup.lookup_workspace_handoff_pr(
+               workspace,
+               "linear-branch",
+               [],
+               deps
+             )
+  end
+
   test "workspace handoff lookup keeps branch PR as the primary source" do
     workspace = "/tmp/owner-workspace-branch-primary"
 

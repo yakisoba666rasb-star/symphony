@@ -42,7 +42,7 @@ defmodule SymphonyElixir.GitHubPrLookup do
           {:ok, tag_lookup_source(pr, source, head_branch, matched_branch)}
 
         {:ok, nil} ->
-          lookup_linked_pull_request(repo, head_branch, attachment_urls, deps)
+          lookup_linked_or_workspace_head_pull_request(repo, workspace_path, head_branch, attachment_urls, deps)
 
         {:error, reason} ->
           {:error, reason}
@@ -260,6 +260,14 @@ defmodule SymphonyElixir.GitHubPrLookup do
     end
   end
 
+  defp lookup_linked_or_workspace_head_pull_request(repo, workspace_path, expected_branch, attachment_urls, deps) do
+    case lookup_linked_pull_request(repo, expected_branch, attachment_urls, deps) do
+      {:ok, %{} = pr} -> {:ok, pr}
+      {:ok, nil} -> lookup_workspace_head_commit_pull_request(repo, workspace_path, expected_branch, deps)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp lookup_linked_pull_request(repo, expected_branch, attachment_urls, deps) do
     with {:ok, gh_bin} <- find_gh_binary(deps),
          {:ok, pull_number} <- linked_pull_number(repo, attachment_urls),
@@ -270,6 +278,98 @@ defmodule SymphonyElixir.GitHubPrLookup do
       :none -> {:ok, nil}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp lookup_workspace_head_commit_pull_request(repo, workspace_path, expected_branch, deps) do
+    with {:ok, gh_bin} <- find_gh_binary(deps),
+         {:ok, git_bin} <- find_git_binary(deps),
+         {:ok, head_sha} <- query_workspace_head_sha(workspace_path, git_bin, deps),
+         {:ok, nil} <-
+           lookup_workspace_head_commit_pull_request_state(
+             gh_bin,
+             repo,
+             head_sha,
+             expected_branch,
+             "open",
+             deps
+           ) do
+      lookup_workspace_head_commit_pull_request_state(gh_bin, repo, head_sha, expected_branch, "all", deps)
+    else
+      :none -> {:ok, nil}
+      {:ok, %{} = pr} -> {:ok, pr}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp lookup_workspace_head_commit_pull_request_state(gh_bin, repo, head_sha, expected_branch, state, deps) do
+    command = github_pr_list_by_state_args(repo, state)
+
+    case normalize_command_result(deps.run_command.(gh_bin, command, stderr_to_stdout: true)) do
+      {:ok, {output, 0}} ->
+        output
+        |> parse_gh_pr_list_response()
+        |> match_pr_by_head_sha(head_sha, expected_branch)
+
+      {:ok, {_output, status}} ->
+        {:error, {:gh_command_failed, status}}
+
+      {:error, reason} ->
+        {:error, {:gh_command_failed, reason}}
+    end
+  end
+
+  defp query_workspace_head_sha(workspace_path, git_bin, deps) do
+    args = ["-C", workspace_path, "rev-parse", "HEAD"]
+
+    case normalize_command_result(deps.run_command.(git_bin, args, stderr_to_stdout: true)) do
+      {:ok, {output, 0}} ->
+        case String.trim(output) do
+          <<sha::binary-size(40)>> -> {:ok, sha}
+          _other -> :none
+        end
+
+      {:ok, {_output, _status}} ->
+        :none
+
+      {:error, _reason} ->
+        :none
+    end
+  end
+
+  defp parse_gh_pr_list_response(output) do
+    case Jason.decode(output) do
+      {:ok, values} when is_list(values) -> {:ok, Enum.filter(values, &is_map/1)}
+      {:ok, _other} -> {:error, :invalid_pr_payload}
+      {:error, reason} -> {:error, {:gh_json_error, reason}}
+    end
+  end
+
+  defp match_pr_by_head_sha({:ok, prs}, head_sha, expected_branch) do
+    prs
+    |> Enum.filter(&(String.downcase(to_string(&1["headRefOid"])) == String.downcase(head_sha)))
+    |> reject_draft_closed_prs()
+    |> pick_head_sha_pr()
+    |> case do
+      {:ok, %{} = pr} -> {:ok, tag_lookup_source(pr, "workspace_head_sha", expected_branch, pr["headRefName"])}
+      {:ok, nil} -> {:ok, nil}
+    end
+  end
+
+  defp match_pr_by_head_sha({:error, reason}, _head_sha, _expected_branch), do: {:error, reason}
+
+  defp reject_draft_closed_prs(prs) do
+    Enum.filter(prs, fn pr ->
+      String.upcase(to_string(pr["state"])) == "OPEN" and pr["isDraft"] != true
+    end)
+  end
+
+  defp pick_head_sha_pr([]), do: {:ok, nil}
+
+  defp pick_head_sha_pr(prs) do
+    prs
+    |> Enum.sort_by(&pr_sort_key/1)
+    |> List.first()
+    |> then(&{:ok, &1})
   end
 
   defp linked_pull_number(repo, attachment_urls) do
@@ -385,6 +485,21 @@ defmodule SymphonyElixir.GitHubPrLookup do
       "number,url,headRefName,isDraft,mergeStateStatus,state",
       "--head",
       head_branch
+    ]
+  end
+
+  defp github_pr_list_by_state_args(repo, state) do
+    [
+      "pr",
+      "list",
+      "--repo",
+      repo,
+      "--state",
+      state,
+      "--limit",
+      "100",
+      "--json",
+      "number,url,headRefName,headRefOid,isDraft,mergeStateStatus,state"
     ]
   end
 
