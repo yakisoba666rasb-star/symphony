@@ -1011,6 +1011,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec reconcile_blocked_issue_states_for_test([Issue.t()], term()) :: term()
+  def reconcile_blocked_issue_states_for_test(issues, %State{} = state) when is_list(issues) do
+    reconcile_blocked_issue_states(issues, state, active_state_set(), terminal_state_set())
+  end
+
+  def reconcile_blocked_issue_states_for_test(issues, state) when is_list(issues) do
+    reconcile_blocked_issue_states(issues, state, active_state_set(), terminal_state_set())
+  end
+
+  @doc false
   @spec should_dispatch_issue_for_test(Issue.t(), term()) :: boolean()
   def should_dispatch_issue_for_test(%Issue{} = issue, %State{} = state) do
     should_dispatch_issue?(issue, state, active_state_set(), terminal_state_set())
@@ -1230,7 +1240,10 @@ defmodule SymphonyElixir.Orchestrator do
         release_issue_claim(state, issue.id)
 
       active_issue_state?(issue.state, active_states) ->
-        refresh_blocked_issue_state(state, issue)
+        case maybe_recover_blocked_review_handoff_issue(state, issue) do
+          {:ok, recovered_state} -> recovered_state
+          :miss -> refresh_blocked_issue_state(state, issue)
+        end
 
       true ->
         Logger.info("Blocked issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; releasing block")
@@ -1239,6 +1252,53 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_blocked_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp maybe_recover_blocked_review_handoff_issue(%State{} = state, %Issue{} = issue) do
+    with %{error: error} = blocked_entry <- Map.get(state.blocked, issue.id),
+         true <- review_handoff_pr_missing_error?(error),
+         recovered_entry <- refresh_blocked_review_handoff_entry(blocked_entry, issue),
+         {:ok, branch_name, workspace_path} <- branch_name_and_workspace(recovered_entry),
+         {:ok, pr} when is_map(pr) <- lookup_pr_for_handoff(workspace_path, recovered_entry, branch_name) do
+      Logger.info("Recovering blocked review handoff after PR discovery: #{issue_context(issue)} branch=#{branch_name} pr=#{pr_url(pr)}")
+
+      {:ok, move_blocked_issue_to_review_after_pr_discovery(state, issue.id, recovered_entry, pr)}
+    else
+      _miss -> :miss
+    end
+  end
+
+  defp review_handoff_pr_missing_error?(error) when is_binary(error) do
+    String.contains?(error, "agent-owned PR is required") and
+      (String.contains?(error, "without discoverable GitHub PR") or
+         String.contains?(error, "no GitHub PR found"))
+  end
+
+  defp review_handoff_pr_missing_error?(_error), do: false
+
+  defp refresh_blocked_review_handoff_entry(blocked_entry, %Issue{} = refreshed_issue) do
+    Map.update(blocked_entry, :issue, refreshed_issue, fn
+      %Issue{} = blocked_issue -> merge_refreshed_issue(blocked_issue, refreshed_issue)
+      _other -> refreshed_issue
+    end)
+  end
+
+  defp move_blocked_issue_to_review_after_pr_discovery(state, issue_id, blocked_entry, pr) do
+    session_id = running_entry_session_id(blocked_entry)
+
+    state
+    |> move_issue_to_review_after_pr_discovery(issue_id, blocked_entry, session_id, pr)
+    |> release_completed_blocked_issue(issue_id)
+  end
+
+  defp release_completed_blocked_issue(%State{} = state, issue_id) do
+    if MapSet.member?(state.completed, issue_id) do
+      state
+      |> release_issue_claim(issue_id)
+      |> complete_issue(issue_id)
+    else
+      state
+    end
+  end
 
   defp reconcile_missing_running_issue_ids(%State{} = state, requested_issue_ids, issues)
        when is_list(requested_issue_ids) and is_list(issues) do
