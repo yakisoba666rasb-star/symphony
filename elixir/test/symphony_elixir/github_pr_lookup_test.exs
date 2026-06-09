@@ -659,6 +659,62 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
              )
   end
 
+  test "workspace handoff lookup falls back to workspace head sha when linked PR attachments are ambiguous" do
+    workspace = "/tmp/owner-workspace-ambiguous-linked-pr-head-sha"
+    head_sha = "dddddddddddddddddddddddddddddddddddddddd"
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", args, _opts ->
+          case args do
+            ["-C", ^workspace, "remote", "get-url", "origin"] -> {:ok, {"https://github.com/octo/repo.git", 0}}
+            ["-C", ^workspace, "branch", "--show-current"] -> {:ok, {"workspace-branch\n", 0}}
+            ["-C", ^workspace, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"] -> {:ok, {"fatal: no upstream\n", 128}}
+            ["-C", ^workspace, "rev-parse", "HEAD"] -> {:ok, {head_sha <> "\n", 0}}
+          end
+
+        "/tmp/fake-gh", args, _opts ->
+          case args do
+            ["pr", "list", "--repo", "octo/repo", "--state", _state, "--json", _fields, "--head", _head] ->
+              {:ok, {"[]", 0}}
+
+            ["pr", "list", "--repo", "octo/repo", "--state", "open", "--limit", "100", "--json", _fields] ->
+              {:ok,
+               {Jason.encode!([
+                  %{
+                    "number" => 81,
+                    "url" => "https://github.com/octo/repo/pull/81",
+                    "headRefName" => "workspace-branch",
+                    "headRefOid" => head_sha,
+                    "isDraft" => false,
+                    "mergeStateStatus" => "CLEAN",
+                    "state" => "OPEN"
+                  }
+                ]), 0}}
+
+            ["pr", "view" | _args] ->
+              flunk("ambiguous linked PRs should not be viewed")
+          end
+      end
+    }
+
+    assert {:ok,
+            %{
+              "number" => 81,
+              "__symphonyLookupSource" => "workspace_head_sha",
+              "__symphonyExpectedBranch" => "feature/linear",
+              "__symphonyMatchedBranch" => "workspace-branch"
+            }} =
+             GitHubPrLookup.lookup_workspace_handoff_pr(
+               workspace,
+               "feature/linear",
+               ["https://github.com/octo/repo/pull/79", "https://github.com/octo/repo/pull/80"],
+               deps
+             )
+  end
+
   test "workspace handoff lookup rejects draft linked PR attachments" do
     workspace = "/tmp/owner-workspace-draft-linked-pr"
 
