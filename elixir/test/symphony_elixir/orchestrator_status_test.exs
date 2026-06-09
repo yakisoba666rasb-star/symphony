@@ -1624,16 +1624,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
 
     send(pid, {:codex_worker_update, issue_id, review_update.()})
-    Process.sleep(50)
 
-    state_after_first = :sys.get_state(pid)
+    state_after_first =
+      wait_for_orchestrator_state(pid, fn state ->
+        Map.has_key?(state.running, issue_id) and not Map.has_key?(state.blocked, issue_id)
+      end)
+
     assert Map.has_key?(state_after_first.running, issue_id)
     refute Map.has_key?(state_after_first.blocked, issue_id)
 
     send(pid, {:codex_worker_update, issue_id, review_update.()})
-    Process.sleep(50)
 
-    state = :sys.get_state(pid)
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        get_in(state.blocked, [issue_id, :error]) == "repeated review fingerprint reached limit 2"
+      end)
 
     refute Process.alive?(worker_pid)
     refute Map.has_key?(state.running, issue_id)
@@ -1821,8 +1826,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
-    Process.sleep(650)
-    state = :sys.get_state(pid)
+
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        get_in(state.blocked, [issue_id, :error]) ==
+          "no GitHub PR found for branch feature/no-pr or linked PR attachments; agent-owned PR is required before In Review handoff"
+      end)
 
     refute MapSet.member?(state.completed, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
@@ -3969,8 +3978,17 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
-    Process.sleep(650)
-    state = :sys.get_state(pid)
+
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        match?(
+          %{
+            identifier: "MT-PR-ERROR",
+            error: "GitHub PR lookup failed for branch feature/pr-error: :missing_auth"
+          },
+          state.blocked[issue_id]
+        )
+      end)
 
     refute MapSet.member?(state.completed, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
@@ -5036,6 +5054,31 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_snapshot(pid, predicate, deadline_ms)
+  end
+
+  defp wait_for_orchestrator_state(pid, predicate, timeout_ms \\ 2_000) when is_function(predicate, 1) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_orchestrator_state(pid, predicate, deadline_ms)
+  end
+
+  defp do_wait_for_orchestrator_state(pid, predicate, deadline_ms) do
+    state =
+      try do
+        :sys.get_state(pid, 1_000)
+      catch
+        :exit, _reason -> nil
+      end
+
+    if state != nil and predicate.(state) do
+      state
+    else
+      if System.monotonic_time(:millisecond) >= deadline_ms do
+        flunk("timed out waiting for orchestrator state: #{inspect(state)}")
+      else
+        Process.sleep(10)
+        do_wait_for_orchestrator_state(pid, predicate, deadline_ms)
+      end
+    end
   end
 
   defp do_wait_for_snapshot(pid, predicate, deadline_ms) do
