@@ -797,15 +797,27 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_sync_merged_linked_pull_requests_to_done(%State{} = state, module, states) do
     case module.fetch_issues_by_states(states) do
       {:ok, issues} ->
+        log_post_merge_done_sync_candidates(issues, states)
         Enum.reduce(issues, state, &maybe_sync_merged_linked_pr_issue_to_done/2)
 
       {:error, reason} ->
-        Logger.debug("Skipping merged linked PR Done sync; failed to fetch Linear issues: #{inspect(reason)}")
+        Logger.warning("Skipping merged linked PR Done sync; failed to fetch Linear issues: #{inspect(reason)}")
         state
 
       other ->
-        Logger.debug("Skipping merged linked PR Done sync; unexpected fetch result: #{inspect(other)}")
+        Logger.warning("Skipping merged linked PR Done sync; unexpected fetch result: #{inspect(other)}")
         state
+    end
+  end
+
+  defp log_post_merge_done_sync_candidates(issues, states) when is_list(issues) do
+    pull_request_issue_count = Enum.count(issues, &issue_has_pull_request_attachment?/1)
+
+    if pull_request_issue_count > 0 do
+      Logger.info(
+        "Merged linked PR Done sync inspecting #{pull_request_issue_count} issue(s) with PR attachments " <>
+          "from #{length(issues)} fetched issue(s) states=#{inspect(states)}"
+      )
     end
   end
 
@@ -819,34 +831,98 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_sync_merged_linked_pr_issue_to_done(%Issue{} = issue, %State{} = state) do
-    with true <- issue_has_pull_request_attachment?(issue),
-         {:ok, %{slug: repo}} when is_binary(repo) <- RepositoryResolver.resolve(issue, Config.settings!()),
-         {:ok, %{} = pr} <- lookup_merged_linked_pull_request(repo, issue_attachment_urls(issue)),
-         :ok <- tracker_module().update_issue_state(issue.id, done_state_name()) do
-      Logger.info("Merged linked PR detected; moved Linear issue to #{done_state_name()}: #{issue_context(issue)} pr=#{pr_url(pr)}")
-
-      state
-      |> terminate_running_issue(issue.id, true)
-      |> release_issue_claim(issue.id)
-      |> complete_issue(issue.id)
+    if issue_has_pull_request_attachment?(issue) do
+      do_maybe_sync_merged_linked_pr_issue_to_done(issue, state)
     else
-      false ->
+      state
+    end
+  end
+
+  defp maybe_sync_merged_linked_pr_issue_to_done(_issue, %State{} = state), do: state
+
+  defp do_maybe_sync_merged_linked_pr_issue_to_done(%Issue{} = issue, %State{} = state) do
+    attachment_urls = issue_attachment_urls(issue)
+
+    case RepositoryResolver.resolve(issue, Config.settings!()) do
+      {:ok, %{slug: repo}} when is_binary(repo) ->
+        maybe_move_merged_linked_pr_issue_to_done(issue, repo, attachment_urls, state)
+
+      {:ok, other} ->
+        Logger.warning(
+          "Skipping merged linked PR Done sync for #{issue_context(issue)}; " <>
+            "repository resolver returned invalid result=#{inspect(other)}"
+        )
+
         state
+
+      {:error, reason} ->
+        Logger.warning(
+          "Skipping merged linked PR Done sync for #{issue_context(issue)}; " <>
+            "failed to resolve repository from PR attachment metadata: #{inspect(reason)}"
+        )
+
+        state
+    end
+  end
+
+  defp maybe_move_merged_linked_pr_issue_to_done(issue, repo, attachment_urls, state) do
+    case lookup_merged_linked_pull_request(repo, attachment_urls) do
+      {:ok, %{} = pr} ->
+        move_merged_linked_pr_issue_to_done(issue, repo, pr, state)
 
       {:ok, nil} ->
         state
 
       {:error, reason} ->
-        Logger.debug("Skipping merged linked PR Done sync for #{issue_context(issue)}: #{inspect(reason)}")
+        Logger.warning(
+          "Skipping merged linked PR Done sync for #{issue_context(issue)} repo=#{repo}; " <>
+            "failed to inspect linked PR attachment: #{inspect(reason)}"
+        )
+
         state
 
       other ->
-        Logger.debug("Skipping merged linked PR Done sync for #{issue_context(issue)}: #{inspect(other)}")
+        Logger.warning(
+          "Skipping merged linked PR Done sync for #{issue_context(issue)} repo=#{repo}; " <>
+            "unexpected PR lookup result=#{inspect(other)}"
+        )
+
         state
     end
   end
 
-  defp maybe_sync_merged_linked_pr_issue_to_done(_issue, %State{} = state), do: state
+  defp move_merged_linked_pr_issue_to_done(issue, repo, pr, state) do
+    done_state = done_state_name()
+
+    case tracker_module().update_issue_state(issue.id, done_state) do
+      :ok ->
+        Logger.info(
+          "Merged linked PR detected; moved Linear issue to #{done_state}: " <>
+            "#{issue_context(issue)} repo=#{repo} pr=#{pr_url(pr)}"
+        )
+
+        state
+        |> terminate_running_issue(issue.id, true)
+        |> release_issue_claim(issue.id)
+        |> complete_issue(issue.id)
+
+      {:error, reason} ->
+        Logger.warning(
+          "Merged linked PR detected but failed to move Linear issue to #{done_state}: " <>
+            "#{issue_context(issue)} repo=#{repo} pr=#{pr_url(pr)} reason=#{inspect(reason)}"
+        )
+
+        state
+
+      other ->
+        Logger.warning(
+          "Merged linked PR detected but Linear state update returned unexpected result: " <>
+            "#{issue_context(issue)} repo=#{repo} pr=#{pr_url(pr)} result=#{inspect(other)}"
+        )
+
+        state
+    end
+  end
 
   defp issue_has_pull_request_attachment?(%Issue{} = issue) do
     issue
@@ -866,7 +942,7 @@ defmodule SymphonyElixir.Orchestrator do
     if function_exported?(lookup_module, :lookup_merged_linked_pull_request, 2) do
       lookup_module.lookup_merged_linked_pull_request(repo, attachment_urls)
     else
-      {:ok, nil}
+      {:error, {:missing_lookup_merged_linked_pull_request, lookup_module}}
     end
   end
 
