@@ -840,6 +840,192 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "blocked review handoff moved to review without discoverable PR stays blocked" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-blocked-review-no-pr-reconcile-#{System.unique_integer([:positive])}"
+      )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_test_pid = Application.get_env(:symphony_elixir, :test_pid)
+    issue_id = "issue-blocked-review-no-pr"
+    issue_identifier = "MT-BLOCKED-REVIEW-NO-PR"
+    workspace = Path.join(test_root, issue_identifier)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        tracker_active_states: ["Todo", "In Progress", "Rework"],
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+        tracker_review_state: "In Review"
+      )
+
+      Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupNone)
+      Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerRecordsUpdates)
+      Application.put_env(:symphony_elixir, :test_pid, self())
+
+      File.mkdir_p!(workspace)
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "In Review",
+        title: "Blocked review handoff",
+        description: "Review state without PR",
+        branch_name: "feature/blocked-no-pr",
+        labels: []
+      }
+
+      blocked_entry = %{
+        issue_id: issue_id,
+        identifier: issue_identifier,
+        issue: %{issue | state: "Rework"},
+        workspace_path: workspace,
+        session_id: "thread-blocked-review-no-pr",
+        error: "issue moved to In Review without discoverable GitHub PR for branch feature/blocked-no-pr or linked PR attachments; agent-owned PR is required before handoff",
+        blocked_at: DateTime.utc_now()
+      }
+
+      state = %Orchestrator.State{
+        blocked: %{issue_id => blocked_entry},
+        claimed: MapSet.new([issue_id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      updated_state = Orchestrator.reconcile_blocked_issue_states_for_test([issue], state)
+
+      assert_receive {:tracker_state_update, ^issue_id, "Rework"}
+      assert_receive {:tracker_comment, ^issue_id, comment_body}
+      assert comment_body =~ "Symphony blocked #{issue_identifier}"
+      assert comment_body =~ "without discoverable GitHub PR"
+      assert MapSet.member?(updated_state.claimed, issue_id)
+      refute MapSet.member?(updated_state.completed, issue_id)
+
+      assert %{
+               identifier: ^issue_identifier,
+               issue: %Issue{state: "Rework"},
+               error: "issue moved to In Review without discoverable GitHub PR for branch feature/blocked-no-pr or linked PR attachments; agent-owned PR is required before handoff"
+             } = updated_state.blocked[issue_id]
+    after
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_tracker) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker)
+      end
+
+      if is_nil(previous_test_pid) do
+        Application.delete_env(:symphony_elixir, :test_pid)
+      else
+        Application.put_env(:symphony_elixir, :test_pid, previous_test_pid)
+      end
+
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "blocked review handoff moved to review with discoverable PR clears stale block" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-blocked-review-pr-reconcile-#{System.unique_integer([:positive])}"
+      )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_review_runner = Application.get_env(:symphony_elixir, :review_runner)
+    previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_test_pid = Application.get_env(:symphony_elixir, :test_pid)
+    issue_id = "issue-blocked-review-pr"
+    issue_identifier = "MT-BLOCKED-REVIEW-PR"
+    workspace = Path.join(test_root, issue_identifier)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        tracker_active_states: ["Todo", "In Progress", "Rework"],
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+        tracker_review_state: "In Review"
+      )
+
+      Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupFound)
+      Application.put_env(:symphony_elixir, :review_runner, FakeReviewRunnerApproved)
+      Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerRecordsUpdates)
+      Application.put_env(:symphony_elixir, :test_pid, self())
+
+      File.mkdir_p!(workspace)
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "In Review",
+        title: "Blocked review handoff",
+        description: "Review state with PR",
+        branch_name: "feature/blocked-pr",
+        labels: []
+      }
+
+      blocked_entry = %{
+        issue_id: issue_id,
+        identifier: issue_identifier,
+        issue: %{issue | state: "Rework"},
+        workspace_path: workspace,
+        session_id: "thread-blocked-review-pr",
+        error: "issue moved to In Review without discoverable GitHub PR for branch feature/blocked-pr or linked PR attachments; agent-owned PR is required before handoff",
+        blocked_at: DateTime.utc_now()
+      }
+
+      state = %Orchestrator.State{
+        blocked: %{issue_id => blocked_entry},
+        claimed: MapSet.new([issue_id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      updated_state = Orchestrator.reconcile_blocked_issue_states_for_test([issue], state)
+
+      assert_receive {:tracker_comment, ^issue_id, comment_body}
+      assert comment_body =~ "Symphony automated review decision: approve-equivalent"
+      assert_receive {:tracker_state_update, ^issue_id, "In Review"}
+      assert MapSet.member?(updated_state.completed, issue_id)
+      refute MapSet.member?(updated_state.claimed, issue_id)
+      refute Map.has_key?(updated_state.blocked, issue_id)
+    after
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_review_runner) do
+        Application.delete_env(:symphony_elixir, :review_runner)
+      else
+        Application.put_env(:symphony_elixir, :review_runner, previous_review_runner)
+      end
+
+      if is_nil(previous_tracker) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker)
+      end
+
+      if is_nil(previous_test_pid) do
+        Application.delete_env(:symphony_elixir, :test_pid)
+      else
+        Application.put_env(:symphony_elixir, :test_pid, previous_test_pid)
+      end
+
+      File.rm_rf(test_root)
+    end
+  end
+
   test "terminal issue state stops running agent and cleans workspace" do
     test_root =
       Path.join(

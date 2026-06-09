@@ -1245,6 +1245,16 @@ defmodule SymphonyElixir.Orchestrator do
           :miss -> refresh_blocked_issue_state(state, issue)
         end
 
+      review_issue_state?(issue.state) ->
+        case guard_blocked_review_handoff_issue(state, issue) do
+          {:ok, guarded_state} ->
+            guarded_state
+
+          :miss ->
+            Logger.info("Blocked issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; releasing block")
+            release_issue_claim(state, issue.id)
+        end
+
       true ->
         Logger.info("Blocked issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; releasing block")
         release_issue_claim(state, issue.id)
@@ -1264,6 +1274,53 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, move_blocked_issue_to_review_after_pr_discovery(state, issue.id, recovered_entry, pr)}
     else
       _miss -> :miss
+    end
+  end
+
+  defp guard_blocked_review_handoff_issue(%State{} = state, %Issue{} = issue) do
+    with %{error: error} = blocked_entry <- Map.get(state.blocked, issue.id),
+         true <- review_handoff_pr_missing_error?(error),
+         guarded_entry <- refresh_blocked_review_handoff_entry(blocked_entry, issue) do
+      {:ok, do_guard_blocked_review_handoff_issue(state, issue, guarded_entry)}
+    else
+      _miss -> :miss
+    end
+  end
+
+  defp do_guard_blocked_review_handoff_issue(%State{} = state, %Issue{} = issue, blocked_entry) do
+    session_id = running_entry_session_id(blocked_entry)
+
+    case branch_name_and_workspace(blocked_entry) do
+      {:ok, branch_name, workspace_path} ->
+        case lookup_pr_for_handoff(workspace_path, blocked_entry, branch_name) do
+          {:ok, pr} when is_map(pr) ->
+            Logger.info("Guarding blocked review handoff after PR discovery: #{issue_context(issue)} branch=#{branch_name} pr=#{pr_url(pr)}")
+            review_premature_handoff_pr(state, issue, blocked_entry, session_id, pr)
+
+          {:ok, nil} ->
+            error =
+              "issue moved to #{issue.state} without discoverable GitHub PR for branch #{branch_name} or linked PR attachments; agent-owned PR is required before handoff"
+
+            Logger.warning("Blocked review handoff remains blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
+            stop_and_block_review_handoff_issue(state, issue, blocked_entry, error)
+
+          {:error, reason} ->
+            error = "issue moved to #{issue.state} but GitHub PR lookup failed for branch #{branch_name}: #{inspect(reason)}"
+
+            Logger.warning("Blocked review handoff remains blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
+            stop_and_block_review_handoff_issue(state, issue, blocked_entry, error)
+
+          _other ->
+            error = "issue moved to #{issue.state} but GitHub PR lookup returned unexpected result for branch #{branch_name}"
+
+            Logger.warning("Blocked review handoff remains blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
+            stop_and_block_review_handoff_issue(state, issue, blocked_entry, error)
+        end
+
+      :missing ->
+        error = "issue moved to #{issue.state} without branch metadata for GitHub PR lookup"
+        Logger.warning("Blocked review handoff remains blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
+        stop_and_block_review_handoff_issue(state, issue, blocked_entry, error)
     end
   end
 
