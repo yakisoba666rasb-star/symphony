@@ -22,6 +22,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
+  @handoff_pr_lookup_refresh_delay_ms 500
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -285,20 +286,85 @@ defmodule SymphonyElixir.Orchestrator do
         error =
           "no GitHub PR found for branch #{branch_name} or linked PR attachments; agent-owned PR is required before In Review handoff"
 
-        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
-        block_issue_from_entry(state, issue_id, running_entry, error)
+        retry_handoff_pr_lookup_after_issue_refresh_or_block(
+          state,
+          issue_id,
+          running_entry,
+          session_id,
+          branch_name,
+          workspace_path,
+          error
+        )
 
       {:error, reason} ->
         error = "GitHub PR lookup failed for branch #{branch_name}: #{inspect(reason)}"
-        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
-        block_issue_from_entry(state, issue_id, running_entry, error)
+
+        retry_handoff_pr_lookup_after_issue_refresh_or_block(
+          state,
+          issue_id,
+          running_entry,
+          session_id,
+          branch_name,
+          workspace_path,
+          error
+        )
 
       _other ->
         error = "GitHub PR lookup returned unexpected result for branch #{branch_name}"
-        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+
+        Logger.error(
+          "Unexpected GitHub PR lookup result; skipping Linear issue refresh before handoff block: issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}"
+        )
+
         block_issue_from_entry(state, issue_id, running_entry, error)
     end
   end
+
+  defp retry_handoff_pr_lookup_after_issue_refresh_or_block(
+         state,
+         issue_id,
+         running_entry,
+         session_id,
+         branch_name,
+         workspace_path,
+         error
+       ) do
+    Process.sleep(@handoff_pr_lookup_refresh_delay_ms)
+    refreshed_entry = refresh_running_entry_issue_for_handoff_retry(running_entry)
+
+    case lookup_pr_for_handoff(workspace_path, refreshed_entry, branch_name) do
+      {:ok, pr} when is_map(pr) ->
+        Logger.info("PR discovered after refreshing Linear issue before handoff block: issue_id=#{issue_id} issue_identifier=#{Map.get(refreshed_entry, :identifier)} session_id=#{session_id}")
+
+        move_issue_to_review_after_pr_discovery(state, issue_id, refreshed_entry, session_id, pr)
+
+      _retry_miss ->
+        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{Map.get(refreshed_entry, :identifier)} session_id=#{session_id}: #{error}")
+
+        block_issue_from_entry(state, issue_id, refreshed_entry, error)
+    end
+  end
+
+  defp refresh_running_entry_issue_for_handoff_retry(running_entry) when is_map(running_entry) do
+    case Map.get(running_entry, :issue) do
+      %Issue{id: issue_id} when is_binary(issue_id) ->
+        case tracker_module().fetch_issue_states_by_ids([issue_id]) do
+          {:ok, [%Issue{} = refreshed_issue | _]} ->
+            refresh_running_entry_issue(running_entry, refreshed_issue)
+
+          _miss_or_error ->
+            running_entry
+        end
+
+      _other ->
+        running_entry
+    end
+  rescue
+    _exception ->
+      running_entry
+  end
+
+  defp refresh_running_entry_issue_for_handoff_retry(running_entry), do: running_entry
 
   defp tracker_module do
     Application.get_env(:symphony_elixir, :tracker_module, Tracker)
@@ -960,11 +1026,13 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         error = "issue moved to #{issue.state} but GitHub PR lookup failed for branch #{branch_name}: #{inspect(reason)}"
+
         Logger.warning("Agent task blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
         stop_and_block_review_handoff_issue(state, issue, running_entry, error)
 
       _other ->
         error = "issue moved to #{issue.state} but GitHub PR lookup returned unexpected result for branch #{branch_name}"
+
         Logger.warning("Agent task blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
         stop_and_block_review_handoff_issue(state, issue, running_entry, error)
     end
