@@ -322,6 +322,16 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              project_name: "repo",
              description: "Repo: https://github.com/octo/repo",
              attachment_urls: []
+           },
+           %Issue{
+             id: "issue-identifier-url-only",
+             identifier: "MT-382",
+             title: "Issue without PR or branch evidence",
+             state: "In Progress",
+             url: "https://linear.app/example/issue/MT-382/no-pr-evidence",
+             project_name: "repo",
+             description: "Repo: https://github.com/octo/repo",
+             attachment_urls: []
            }
          ]}
       end
@@ -1336,6 +1346,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert_receive {:merged_issue_pr_lookup_called, "MT-381", "https://linear.app/example/issue/MT-381/body-linked-merged-pr", "lab-381-body-linked"},
                    200
+
+    refute_receive {:merged_issue_pr_lookup_called, "MT-382", _, _}, 100
 
     assert_receive {:tracker_state_update_called, "issue-review-merged", "Done"}, 200
     assert_receive {:tracker_state_update_called, "issue-progress-merged", "Done"}, 200

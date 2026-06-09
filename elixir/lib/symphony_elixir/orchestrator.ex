@@ -1088,8 +1088,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp issue_has_done_sync_evidence?(%Issue{} = issue) do
-    issue_has_pull_request_attachment?(issue) or present_string?(issue.identifier) or present_string?(issue.url) or
-      present_string?(issue.branch_name)
+    issue_has_pull_request_attachment?(issue) or present_string?(issue.branch_name)
   end
 
   defp github_pull_request_url?(url) when is_binary(url) do

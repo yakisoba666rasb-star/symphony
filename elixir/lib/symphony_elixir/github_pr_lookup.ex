@@ -452,19 +452,40 @@ defmodule SymphonyElixir.GitHubPrLookup do
   defp pr_text_contains?(_pr, value) when not is_binary(value), do: false
 
   defp pr_text_contains?(pr, value) do
-    needle = String.downcase(String.trim(value))
+    needle = String.trim(value)
 
-    needle != "" and
-      pr
-      |> pr_searchable_text()
-      |> String.downcase()
-      |> String.contains?(needle)
+    cond do
+      needle == "" ->
+        false
+
+      url_like?(needle) ->
+        pr
+        |> pr_searchable_text()
+        |> text_contains_case_insensitive?(needle)
+
+      true ->
+        pr
+        |> pr_searchable_text()
+        |> text_contains_token?(needle)
+    end
   end
 
   defp pr_searchable_text(pr) do
     [pr["title"], pr["body"], pr["url"]]
     |> Enum.filter(&is_binary/1)
     |> Enum.join("\n")
+  end
+
+  defp url_like?(value), do: Regex.match?(~r{^https?://}i, value)
+
+  defp text_contains_case_insensitive?(text, needle) do
+    text
+    |> String.downcase()
+    |> String.contains?(String.downcase(needle))
+  end
+
+  defp text_contains_token?(text, needle) do
+    Regex.match?(~r/(^|[^A-Za-z0-9])#{Regex.escape(needle)}([^A-Za-z0-9]|$)/i, text)
   end
 
   defp pr_branch_matches?(_pr, branch_name) when not is_binary(branch_name), do: false
@@ -618,7 +639,7 @@ defmodule SymphonyElixir.GitHubPrLookup do
 
   defp pr_url(%{"url" => url}) when is_binary(url), do: url
   defp pr_url(%{"number" => number}) when is_integer(number), do: Integer.to_string(number)
-  defp pr_url(pr), do: inspect(pr)
+  defp pr_url(_pr), do: "(unknown)"
 
   defp github_pr_list_args(repo, head_branch, state) do
     [
@@ -659,7 +680,7 @@ defmodule SymphonyElixir.GitHubPrLookup do
       "--state",
       "merged",
       "--limit",
-      "20",
+      "50",
       "--search",
       search_term,
       "--json",

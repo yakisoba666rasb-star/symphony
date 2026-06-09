@@ -873,7 +873,7 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
                  "--state",
                  "merged",
                  "--limit",
-                 "20",
+                 "50",
                  "--search",
                  "LAB-382",
                  "--json",
@@ -944,6 +944,28 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
 
     assert {:error, {:ambiguous_merged_issue_pull_requests, ["https://github.com/octo/repo/pull/75", "https://github.com/octo/repo/pull/76"]}} =
              GitHubPrLookup.lookup_merged_issue_pull_request("octo/repo", "LAB-382", nil, nil, deps)
+  end
+
+  test "merged issue pull request lookup does not match issue key prefixes" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 82,
+              "url" => "https://github.com/octo/repo/pull/82",
+              "headRefName" => "lab-10-fix",
+              "state" => "MERGED",
+              "mergedAt" => "2026-06-09T17:00:00Z",
+              "title" => "LAB-10 fix unrelated issue",
+              "body" => "Refs LAB-10"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:ok, nil} = GitHubPrLookup.lookup_merged_issue_pull_request("octo/repo", "LAB-1", nil, nil, deps)
   end
 
   test "merged issue pull request lookup returns nil without search evidence" do
@@ -1095,10 +1117,8 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
       end
     }
 
-    assert {:error, {:ambiguous_merged_issue_pull_requests, ["81", pr_payload]}} =
+    assert {:error, {:ambiguous_merged_issue_pull_requests, ["81", "(unknown)"]}} =
              GitHubPrLookup.lookup_merged_issue_pull_request("octo/repo", "LAB-382", nil, nil, deps)
-
-    assert pr_payload =~ "lab-382-b"
   end
 
   test "merged linked pull request lookup rejects ambiguous linked PR attachments" do
