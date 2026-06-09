@@ -318,7 +318,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       tracker_team_key: "LAB",
       tracker_project_slug: nil,
       tracker_all_projects: true,
-      repository_default: "yakisoba666rasb-star/Symphony-Ryo-Lab"
+      repository_default: "yakisoba666rasb-star/Symphony-Ryo-Lab",
+      repository_project_routes: %{
+        "yakisoba666rasb-star/symphony" => ["symphony", "runtime"],
+        "yakisoba666rasb-star/Symphony-Ryo-Lab" => ["Symphony-Ryo-Lab"]
+      }
     )
 
     state = %Orchestrator.State{running: %{}, claimed: MapSet.new(), blocked: %{}, max_concurrent_agents: 3}
@@ -350,6 +354,46 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       attachment_urls: ["https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/63"]
     }
 
+    runtime_project_issue = %Issue{
+      id: "issue-385",
+      identifier: "LAB-385",
+      title: "GitHub issue creation should sync to Linear Backlog",
+      state: "In Progress",
+      project_name: "symphony",
+      project_slug: "symphony-afe8a6524892",
+      description: "Repo: yakisoba666rasb-star/symphony"
+    }
+
+    lab_project_runtime_issue = %Issue{
+      id: "issue-386",
+      identifier: "LAB-386",
+      title: "GitHub issue creation should sync to Linear Backlog",
+      state: "In Progress",
+      project_name: "Symphony-Ryo-Lab",
+      project_slug: "symphony-ryo-lab-dd6010d9231e",
+      description: "Repo: yakisoba666rasb-star/symphony"
+    }
+
+    lab_project_lab_issue = %Issue{
+      id: "issue-387",
+      identifier: "LAB-387",
+      title: "Lab repo issue",
+      state: "In Progress",
+      project_name: "Symphony-Ryo-Lab",
+      project_slug: "symphony-ryo-lab-dd6010d9231e",
+      description: "Repo: yakisoba666rasb-star/Symphony-Ryo-Lab"
+    }
+
+    runtime_project_lab_issue = %Issue{
+      id: "issue-388",
+      identifier: "LAB-388",
+      title: "Lab repo issue in runtime project",
+      state: "In Progress",
+      project_name: "symphony",
+      project_slug: "symphony-afe8a6524892",
+      description: "Repo: yakisoba666rasb-star/Symphony-Ryo-Lab"
+    }
+
     unprojected_remote_issue = %Issue{
       id: "issue-372",
       identifier: "LAB-372",
@@ -370,9 +414,59 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Orchestrator.should_dispatch_issue_for_test(remote_issue, state)
     assert Orchestrator.should_dispatch_issue_for_test(synced_project_issue, state)
+    assert Orchestrator.should_dispatch_issue_for_test(runtime_project_issue, state)
+    assert Orchestrator.should_dispatch_issue_for_test(lab_project_lab_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(unprojected_remote_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(mismatched_project_issue, state)
+    refute Orchestrator.should_dispatch_issue_for_test(lab_project_runtime_issue, state)
+    refute Orchestrator.should_dispatch_issue_for_test(runtime_project_lab_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(no_hint_issue, state)
+  end
+
+  test "config validates explicit repository project routes" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      repository_project_routes: %{
+        "yakisoba666rasb-star/symphony" => "symphony",
+        "yakisoba666rasb-star/Symphony-Ryo-Lab" => ["Symphony-Ryo-Lab", "lab"]
+      }
+    )
+
+    assert :ok = Config.validate!()
+
+    assert Config.settings!().repository.project_routes == %{
+             "yakisoba666rasb-star/symphony" => "symphony",
+             "yakisoba666rasb-star/Symphony-Ryo-Lab" => ["Symphony-Ryo-Lab", "lab"]
+           }
+
+    write_workflow_file!(Workflow.workflow_file_path(), repository_project_routes: "symphony")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "repository.project_routes"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      repository_project_routes: %{"yakisoba666rasb-star/symphony" => [123]}
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "repository.project_routes"
+  end
+
+  test "repository schema accepts blank defaults and rejects malformed project route shapes" do
+    schema = %Schema.Repository{}
+
+    assert Schema.Repository.changeset(schema, %{
+             default: nil,
+             project_routes: %{}
+           }).valid?
+
+    assert Schema.Repository.changeset(schema, %{default: ""}).valid?
+
+    refute Schema.Repository.changeset(schema, %{
+             project_routes: "symphony"
+           }).valid?
+
+    refute Schema.Repository.changeset(schema, %{
+             project_routes: %{"yakisoba666rasb-star/symphony" => []}
+           }).valid?
   end
 
   test "workspace path is deterministic per issue identifier" do
@@ -1400,6 +1494,20 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), codex_stall_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.stall_timeout_ms"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      repository_project_routes: %{"symphony" => ["runtime"]}
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "repository.project_routes"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      repository_project_routes: %{"yakisoba666rasb-star/symphony" => [""]}
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "repository.project_routes"
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_active_states: %{todo: true},

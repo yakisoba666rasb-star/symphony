@@ -1816,29 +1816,108 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp issue_matches_all_projects_repository_route?(%Issue{} = issue, settings) do
-    with true <- RepositoryResolver.repository_hint?(issue),
-         {:ok, %{slug: slug, name: repo_name}} when is_binary(slug) and is_binary(repo_name) <-
-           RepositoryResolver.resolve(issue, settings),
-         true <- linear_project_matches_repository?(issue, repo_name) do
-      true
-    else
-      _not_routable -> false
+    if RepositoryResolver.repository_hint?(issue),
+      do: issue_matches_repository_hint_route?(issue, settings),
+      else: false
+  end
+
+  defp issue_matches_repository_hint_route?(%Issue{} = issue, settings) do
+    case RepositoryResolver.resolve(issue, settings) do
+      {:ok, %{slug: repo_slug, name: repo_name}}
+      when is_binary(repo_slug) and is_binary(repo_name) ->
+        resolved_repository_route_matches?(issue, repo_slug, repo_name, settings)
+
+      {:error, reason} ->
+        Logger.debug("Skipping dispatch; repository route failed for #{issue_context(issue)}: #{inspect(reason)}")
+        false
+
+      _invalid ->
+        false
     end
   end
 
-  defp linear_project_matches_repository?(%Issue{} = issue, repo_name) when is_binary(repo_name) do
+  defp resolved_repository_route_matches?(%Issue{} = issue, repo_slug, repo_name, settings) do
+    if linear_project_matches_repository?(issue, repo_slug, repo_name, settings) do
+      true
+    else
+      log_repository_route_reject(issue, repo_slug)
+      false
+    end
+  end
+
+  defp log_repository_route_reject(%Issue{} = issue, repo_slug) do
+    Logger.debug(
+      "Skipping dispatch; Linear project does not match repository route for #{issue_context(issue)} " <>
+        "repo=#{repo_slug} project_name=#{inspect(issue.project_name)} project_slug=#{inspect(issue.project_slug)}"
+    )
+  end
+
+  defp linear_project_matches_repository?(%Issue{} = issue, repo_slug, repo_name, settings)
+       when is_binary(repo_slug) and is_binary(repo_name) do
+    route_tokens = repository_project_route_tokens(settings, repo_slug)
+
+    if route_tokens == [] do
+      linear_project_matches_repository_name?(issue, repo_name)
+    else
+      issue
+      |> issue_project_route_tokens()
+      |> Enum.any?(fn project_token ->
+        Enum.any?(route_tokens, &(project_token == &1))
+      end)
+    end
+  end
+
+  defp linear_project_matches_repository_name?(%Issue{} = issue, repo_name) when is_binary(repo_name) do
     repo_token = route_token(repo_name)
 
     if repo_token == "" do
       false
     else
-      [issue.project_name, issue.project_slug]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.map(&route_token/1)
+      issue
+      |> issue_project_route_tokens()
       |> Enum.any?(fn project_token ->
         project_token == repo_token or String.starts_with?(project_token, repo_token)
       end)
     end
+  end
+
+  defp repository_project_route_tokens(settings, repo_slug) when is_binary(repo_slug) do
+    settings
+    |> get_in([Access.key(:repository), Access.key(:project_routes)])
+    |> project_route_aliases(repo_slug)
+    |> Enum.map(&route_token/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp project_route_aliases(project_routes, repo_slug) when is_map(project_routes) do
+    canonical_repo_token = canonical_route_repo_token(repo_slug)
+
+    project_routes
+    |> Enum.find_value([], fn {raw_repo, aliases} ->
+      if canonical_route_repo_token(raw_repo) == canonical_repo_token do
+        List.wrap(aliases)
+      end
+    end)
+  end
+
+  defp project_route_aliases(_project_routes, _repo_slug), do: []
+
+  defp canonical_route_repo_token(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.trim_leading("https://github.com/")
+    |> String.trim_trailing(".git")
+    |> String.downcase()
+  end
+
+  defp canonical_route_repo_token(value), do: value |> to_string() |> canonical_route_repo_token()
+
+  defp issue_project_route_tokens(%Issue{} = issue) do
+    [issue.project_name, issue.project_slug]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&route_token/1)
+    |> Enum.reject(&(&1 == ""))
   end
 
   defp route_token(value) when is_binary(value) do

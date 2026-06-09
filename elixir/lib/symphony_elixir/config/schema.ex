@@ -125,13 +125,15 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:default, :string)
       field(:clone_protocol, :string, default: "https")
+      field(:project_routes, :map, default: %{})
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:default, :clone_protocol], empty_values: [])
+      |> cast(attrs, [:default, :clone_protocol, :project_routes], empty_values: [])
       |> validate_change(:default, &validate_optional_repository_slug/2)
+      |> validate_change(:project_routes, &validate_project_routes/2)
       |> validate_inclusion(:clone_protocol, ["https", "ssh"])
     end
 
@@ -149,6 +151,44 @@ defmodule SymphonyElixir.Config.Schema do
     defp valid_repository_slug?(value) when is_binary(value) do
       Regex.match?(~r/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, String.trim(value))
     end
+
+    defp validate_project_routes(_field, value) when value in [nil, %{}], do: []
+
+    defp validate_project_routes(field, value) when is_map(value) do
+      invalid? =
+        Enum.any?(value, fn {repo_slug, aliases} ->
+          !valid_repository_slug?(to_string(repo_slug)) or !valid_project_route_aliases?(aliases)
+        end)
+
+      if invalid? do
+        [
+          {field, "must map GitHub repository slugs like owner/name to non-empty Linear project aliases"}
+        ]
+      else
+        []
+      end
+    end
+
+    defp validate_project_routes(field, _value) do
+      [{field, "must be a map of GitHub repository slugs to Linear project aliases"}]
+    end
+
+    defp valid_project_route_aliases?(aliases) do
+      aliases
+      |> List.wrap()
+      |> case do
+        [] -> false
+        values -> Enum.all?(values, &valid_project_route_alias?/1)
+      end
+    end
+
+    defp valid_project_route_alias?(value) when is_binary(value) do
+      value
+      |> String.trim()
+      |> then(fn trimmed -> trimmed != "" and Regex.match?(~r/[A-Za-z0-9]/, trimmed) end)
+    end
+
+    defp valid_project_route_alias?(_value), do: false
   end
 
   defmodule Worker do

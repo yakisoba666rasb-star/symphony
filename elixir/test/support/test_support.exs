@@ -107,6 +107,7 @@ defmodule SymphonyElixir.TestSupport do
           dirty_workspace_retention_days: 7,
           repository_default: nil,
           repository_clone_protocol: "https",
+          repository_project_routes: %{},
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
           max_concurrent_agents: 10,
@@ -155,6 +156,7 @@ defmodule SymphonyElixir.TestSupport do
     dirty_workspace_retention_days = Keyword.get(config, :dirty_workspace_retention_days)
     repository_default = Keyword.get(config, :repository_default)
     repository_clone_protocol = Keyword.get(config, :repository_clone_protocol)
+    repository_project_routes = Keyword.get(config, :repository_project_routes)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
@@ -204,7 +206,7 @@ defmodule SymphonyElixir.TestSupport do
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
         "  dirty_workspace_retention_days: #{yaml_value(dirty_workspace_retention_days)}",
-        repository_yaml(repository_default, repository_clone_protocol),
+        repository_yaml(repository_default, repository_clone_protocol, repository_project_routes),
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
@@ -287,13 +289,14 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
-  defp repository_yaml(nil, _clone_protocol), do: nil
+  defp repository_yaml(nil, _clone_protocol, project_routes) when project_routes in [nil, %{}], do: nil
 
-  defp repository_yaml(default, clone_protocol) do
+  defp repository_yaml(default, clone_protocol, project_routes) do
     [
       "repository:",
       default && "  default: #{yaml_value(default)}",
-      "  clone_protocol: #{yaml_value(clone_protocol)}"
+      "  clone_protocol: #{yaml_value(clone_protocol)}",
+      project_routes not in [nil, %{}] && "  project_routes: #{yaml_value(project_routes)}"
     ]
     |> Enum.reject(&(&1 in [nil, false]))
     |> Enum.join("\n")

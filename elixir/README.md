@@ -152,6 +152,26 @@ Notes:
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- When `tracker.all_projects: true`, Symphony only dispatches issues whose repository hint matches
+  their Linear project. By default the repository name must match the project name or slug. Use
+  `repository.project_routes` to make the project/repository mapping explicit when names differ.
+  Route keys must use GitHub repository slug form (`owner/repo`), not HTTPS or SSH URLs:
+
+```yaml
+tracker:
+  kind: linear
+  team_key: LAB
+  all_projects: true
+repository:
+  default: your-org/default-repo
+  project_routes:
+    your-org/symphony:
+      - symphony
+      - runtime
+    your-org/Symphony-Ryo-Lab:
+      - Symphony-Ryo-Lab
+```
+
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
