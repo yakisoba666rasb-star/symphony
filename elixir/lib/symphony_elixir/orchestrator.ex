@@ -49,6 +49,7 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
+      pending_review_handoffs: %{},
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -135,7 +136,7 @@ defmodule SymphonyElixir.Orchestrator do
       ) do
     case find_issue_id_for_ref(running, ref) do
       nil ->
-        {:noreply, state}
+        {:noreply, handle_pending_review_handoff_down(state, ref, reason)}
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
@@ -206,6 +207,25 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
+
+  def handle_info({review_ref, result}, %{pending_review_handoffs: pending} = state)
+      when is_reference(review_ref) do
+    case Map.pop(pending, review_ref) do
+      {nil, _pending} ->
+        {:noreply, state}
+
+      {metadata, pending} ->
+        Process.demonitor(review_ref, [:flush])
+
+        state =
+          state
+          |> Map.put(:pending_review_handoffs, pending)
+          |> finish_pending_review_handoff(metadata, result)
+
+        notify_dashboard()
+        {:noreply, state}
+    end
+  end
 
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
@@ -463,10 +483,80 @@ defmodule SymphonyElixir.Orchestrator do
     _pr_number = pr["number"] || pr[:number]
     _pr_url = pr["url"] || pr[:url]
 
-    with {:ok, verdict} <- review_pr_before_handoff(running_entry, pr),
-         :ok <- comment_on_approved_review_handoff(issue_id, running_entry, pr, verdict) do
+    start_review_handoff_task(state, :normal, issue_id, running_entry, session_id, pr, nil)
+  end
+
+  defp start_review_handoff_task(
+         %State{} = state,
+         mode,
+         issue_id,
+         running_entry,
+         session_id,
+         pr,
+         issue,
+         opts \\ []
+       )
+       when mode in [:normal, :premature] do
+    review_runner = review_runner_module()
+    tracker = tracker_module()
+    max_review_fix_loops = Config.max_review_fix_loops()
+
+    task =
+      Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
+        review_pr_before_handoff(running_entry, pr, review_runner, max_review_fix_loops)
+      end)
+
+    pending_review_handoff = %{
+      mode: mode,
+      issue_id: issue_id,
+      running_entry: running_entry,
+      session_id: session_id,
+      pr: pr,
+      issue: issue,
+      tracker: tracker,
+      release_claim_on_completion: Keyword.get(opts, :release_claim_on_completion, false),
+      pid: task.pid,
+      started_at: DateTime.utc_now()
+    }
+
+    Logger.info("Started async review handoff for issue_id=#{issue_id} session_id=#{session_id} review_pid=#{inspect(task.pid)}")
+
+    %{
+      state
+      | pending_review_handoffs: Map.put(state.pending_review_handoffs, task.ref, pending_review_handoff)
+    }
+  end
+
+  defp handle_pending_review_handoff_down(%{pending_review_handoffs: pending} = state, ref, reason)
+       when is_reference(ref) do
+    case Map.pop(pending, ref) do
+      {nil, _pending} ->
+        state
+
+      {metadata, pending} ->
+        state
+        |> Map.put(:pending_review_handoffs, pending)
+        |> finish_pending_review_handoff(metadata, {:error, {:review_task_down, reason}})
+    end
+  end
+
+  defp handle_pending_review_handoff_down(state, _ref, _reason), do: state
+
+  defp finish_pending_review_handoff(
+         %State{} = state,
+         %{mode: :normal, issue_id: issue_id, running_entry: running_entry, session_id: session_id, pr: pr} =
+           metadata,
+         result
+       ) do
+    tracker = Map.get(metadata, :tracker, tracker_module())
+
+    with {:ok, verdict} <- result,
+         :ok <- comment_on_approved_review_handoff(issue_id, running_entry, pr, verdict, tracker) do
       Logger.info("Review loop approved-equivalent for issue_id=#{issue_id} session_id=#{session_id} verdict=#{inspect(verdict)}")
-      move_issue_to_review_after_approval(state, issue_id, running_entry, session_id)
+
+      state
+      |> move_issue_to_review_after_approval(issue_id, running_entry, session_id, tracker)
+      |> maybe_release_completed_review_handoff_claim(issue_id, metadata)
     else
       {:error, reason} ->
         error = "review loop did not approve PR before In Review handoff: #{inspect(reason)}"
@@ -475,12 +565,40 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp comment_on_approved_review_handoff(issue_id, running_entry, pr, verdict)
+  defp finish_pending_review_handoff(
+         %State{} = state,
+         %{mode: :premature, issue: issue, running_entry: running_entry, session_id: session_id, pr: pr} =
+           metadata,
+         result
+       ) do
+    tracker = Map.get(metadata, :tracker, tracker_module())
+
+    with {:ok, verdict} <- result,
+         :ok <- comment_on_approved_review_handoff(issue.id, running_entry, pr, verdict, tracker) do
+      Logger.info("Review loop approved-equivalent for premature review handoff issue_id=#{issue.id} session_id=#{session_id} verdict=#{inspect(verdict)}")
+      move_issue_to_review_after_approval(state, issue.id, running_entry, session_id, tracker)
+    else
+      {:error, reason} ->
+        error = "review loop did not approve PR before In Review handoff: #{inspect(reason)}"
+        Logger.warning("Premature review handoff blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
+        stop_and_block_review_handoff_issue(state, issue, running_entry, error, tracker)
+    end
+  end
+
+  defp maybe_release_completed_review_handoff_claim(%State{} = state, issue_id, %{
+         release_claim_on_completion: true
+       }) do
+    release_completed_blocked_issue(state, issue_id)
+  end
+
+  defp maybe_release_completed_review_handoff_claim(%State{} = state, _issue_id, _metadata), do: state
+
+  defp comment_on_approved_review_handoff(issue_id, running_entry, pr, verdict, tracker)
        when is_binary(issue_id) do
     body = approved_review_handoff_comment(running_entry, pr, verdict)
 
     try do
-      case tracker_module().create_comment(issue_id, body) do
+      case tracker.create_comment(issue_id, body) do
         :ok ->
           :ok
 
@@ -496,7 +614,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp comment_on_approved_review_handoff(_issue_id, _running_entry, _pr, _verdict), do: :ok
+  defp comment_on_approved_review_handoff(_issue_id, _running_entry, _pr, _verdict, _tracker), do: :ok
 
   defp approved_review_handoff_comment(running_entry, pr, verdict) do
     """
@@ -626,14 +744,14 @@ defmodule SymphonyElixir.Orchestrator do
   defp command_result_summary(command, nil), do: command
   defp command_result_summary(command, result), do: "#{command} (#{result})"
 
-  defp review_pr_before_handoff(running_entry, pr) do
+  defp review_pr_before_handoff(running_entry, pr, review_runner, max_review_fix_loops) do
     case Map.get(running_entry, :workspace_path) do
       workspace_path when is_binary(workspace_path) ->
         review_opts = [
-          max_review_fix_loops: Config.max_review_fix_loops()
+          max_review_fix_loops: max_review_fix_loops
         ]
 
-        review_runner_module().run_loop(
+        review_runner.run_loop(
           workspace_path,
           issue_for_review(running_entry),
           pr,
@@ -655,10 +773,10 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp move_issue_to_review_after_approval(state, issue_id, running_entry, session_id) do
+  defp move_issue_to_review_after_approval(state, issue_id, running_entry, session_id, tracker) do
     target_state = Config.review_handoff_state()
 
-    case tracker_module().update_issue_state(issue_id, target_state) do
+    case tracker.update_issue_state(issue_id, target_state) do
       :ok ->
         Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; issue moved to #{target_state}")
 
@@ -1255,6 +1373,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_recover_blocked_review_handoff_issue(%State{} = state, %Issue{} = issue) do
     with %{error: error} = blocked_entry <- Map.get(state.blocked, issue.id),
+         false <- pending_review_handoff_for_issue?(state, issue.id),
          true <- review_handoff_pr_missing_error?(error),
          recovered_entry <- refresh_blocked_review_handoff_entry(blocked_entry, issue),
          {:ok, branch_name, workspace_path} <- branch_name_and_workspace(recovered_entry),
@@ -1266,6 +1385,16 @@ defmodule SymphonyElixir.Orchestrator do
       _miss -> :miss
     end
   end
+
+  defp pending_review_handoff_for_issue?(%State{pending_review_handoffs: pending}, issue_id)
+       when is_binary(issue_id) do
+    Enum.any?(pending, fn
+      {_ref, %{issue_id: ^issue_id}} -> true
+      _other -> false
+    end)
+  end
+
+  defp pending_review_handoff_for_issue?(_state, _issue_id), do: false
 
   defp review_handoff_pr_missing_error?(error) when is_binary(error) do
     String.contains?(error, "agent-owned PR is required") and
@@ -1285,9 +1414,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp move_blocked_issue_to_review_after_pr_discovery(state, issue_id, blocked_entry, pr) do
     session_id = running_entry_session_id(blocked_entry)
 
-    state
-    |> move_issue_to_review_after_pr_discovery(issue_id, blocked_entry, session_id, pr)
-    |> release_completed_blocked_issue(issue_id)
+    start_review_handoff_task(state, :normal, issue_id, blocked_entry, session_id, pr, nil, release_claim_on_completion: true)
   end
 
   defp release_completed_blocked_issue(%State{} = state, issue_id) do
@@ -1574,9 +1701,15 @@ defmodule SymphonyElixir.Orchestrator do
     block_issue_from_entry(state, issue_id, running_entry, error)
   end
 
-  defp stop_and_block_review_handoff_issue(%State{} = state, %Issue{} = issue, running_entry, error) do
+  defp stop_and_block_review_handoff_issue(
+         %State{} = state,
+         %Issue{} = issue,
+         running_entry,
+         error,
+         tracker \\ tracker_module()
+       ) do
     target_state = review_handoff_block_state()
-    move_review_handoff_issue_to_block_state(issue.id, issue.identifier, target_state)
+    move_review_handoff_issue_to_block_state(issue.id, issue.identifier, target_state, tracker)
 
     running_entry =
       Map.update(running_entry, :issue, %{issue | state: target_state}, fn
@@ -1590,16 +1723,15 @@ defmodule SymphonyElixir.Orchestrator do
   defp review_premature_handoff_pr(%State{} = state, %Issue{} = issue, running_entry, session_id, pr) do
     stopped_state = terminate_running_issue(state, issue.id, false)
 
-    with {:ok, verdict} <- review_pr_before_handoff(running_entry, pr),
-         :ok <- comment_on_approved_review_handoff(issue.id, running_entry, pr, verdict) do
-      Logger.info("Review loop approved-equivalent for premature review handoff issue_id=#{issue.id} session_id=#{session_id} verdict=#{inspect(verdict)}")
-      move_issue_to_review_after_approval(stopped_state, issue.id, running_entry, session_id)
-    else
-      {:error, reason} ->
-        error = "review loop did not approve PR before In Review handoff: #{inspect(reason)}"
-        Logger.warning("Premature review handoff blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
-        stop_and_block_review_handoff_issue(stopped_state, issue, running_entry, error)
-    end
+    start_review_handoff_task(
+      stopped_state,
+      :premature,
+      issue.id,
+      running_entry,
+      session_id,
+      pr,
+      issue
+    )
   end
 
   defp review_handoff_block_state do
@@ -1609,9 +1741,9 @@ defmodule SymphonyElixir.Orchestrator do
       Enum.find(active_states, "In Progress", fn state -> normalize_issue_state(state) == "in progress" end)
   end
 
-  defp move_review_handoff_issue_to_block_state(issue_id, issue_identifier, target_state)
+  defp move_review_handoff_issue_to_block_state(issue_id, issue_identifier, target_state, tracker)
        when is_binary(issue_id) and is_binary(target_state) do
-    case tracker_module().update_issue_state(issue_id, target_state) do
+    case tracker.update_issue_state(issue_id, target_state) do
       :ok ->
         Logger.info("Moved premature review handoff back to #{target_state}: issue_id=#{issue_id} issue_identifier=#{issue_identifier}")
         :ok
