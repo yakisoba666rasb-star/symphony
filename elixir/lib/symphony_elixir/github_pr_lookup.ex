@@ -264,8 +264,35 @@ defmodule SymphonyElixir.GitHubPrLookup do
     case lookup_linked_pull_request(repo, expected_branch, attachment_urls, deps) do
       {:ok, %{} = pr} -> {:ok, pr}
       {:ok, nil} -> lookup_workspace_head_commit_pull_request(repo, workspace_path, expected_branch, deps)
-      {:error, reason} -> {:error, reason}
+      {:error, reason} -> lookup_workspace_head_after_linked_error(repo, workspace_path, expected_branch, deps, reason)
     end
+  end
+
+  defp lookup_workspace_head_after_linked_error(
+         repo,
+         workspace_path,
+         expected_branch,
+         deps,
+         linked_reason
+       ) do
+    case lookup_workspace_head_commit_pull_request(repo, workspace_path, expected_branch, deps) do
+      {:ok, %{} = pr} ->
+        {:ok, pr}
+
+      {:ok, nil} ->
+        {:error, linked_reason}
+
+      {:error, workspace_head_reason} ->
+        {:error, linked_workspace_head_error(linked_reason, workspace_head_reason)}
+    end
+  end
+
+  defp linked_workspace_head_error(linked_reason, workspace_head_reason) do
+    {
+      :linked_pull_request_lookup_failed,
+      linked_reason,
+      {:workspace_head_lookup_failed, workspace_head_reason}
+    }
   end
 
   defp lookup_linked_pull_request(repo, expected_branch, attachment_urls, deps) do
