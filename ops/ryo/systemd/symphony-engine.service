@@ -1,0 +1,20 @@
+[Unit]
+Description=Symphony Engine Runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ryo
+Group=ryo
+WorkingDirectory=/home/ryo/src/symphony/elixir
+EnvironmentFile=/home/ryo/.config/symphony-ryo/symphony.env
+ExecStartPre=/home/ryo/src/symphony/ops/ryo/preflight.sh /home/ryo/src/symphony/ops/ryo/WORKFLOW.md
+ExecStart=/home/ryo/.local/bin/mise exec -- /home/ryo/src/symphony/elixir/bin/symphony --port 4000 --i-understand-that-this-will-be-running-without-the-usual-guardrails /home/ryo/src/symphony/ops/ryo/WORKFLOW.md
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/symphony-ryo/engine.log
+StandardError=append:/var/log/symphony-ryo/engine-error.log
+
+[Install]
+WantedBy=multi-user.target
