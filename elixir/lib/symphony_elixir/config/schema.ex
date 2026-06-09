@@ -149,8 +149,6 @@ defmodule SymphonyElixir.Config.Schema do
     defp valid_repository_slug?(value) when is_binary(value) do
       Regex.match?(~r/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, String.trim(value))
     end
-
-    defp valid_repository_slug?(_value), do: false
   end
 
   defmodule Worker do

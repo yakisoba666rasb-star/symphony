@@ -36,6 +36,31 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     def lookup_workspace_head(_workspace_path, _branch_name), do: {:ok, nil}
   end
 
+  defmodule FakeGitHubPrLookupMergedLinkedPr do
+    def lookup_merged_linked_pull_request("octo/repo", attachment_urls) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:merged_pr_lookup_called, attachment_urls})
+
+        _ ->
+          :ok
+      end
+
+      if "https://github.com/octo/repo/pull/200" in attachment_urls do
+        {:ok,
+         %{
+           "number" => 200,
+           "url" => "https://github.com/octo/repo/pull/200",
+           "headRefName" => "lab-379-fix",
+           "state" => "MERGED",
+           "mergedAt" => "2026-06-09T01:42:42Z"
+         }}
+      else
+        {:ok, nil}
+      end
+    end
+  end
+
   defmodule FakeGitHubPrPublisherError do
     def publish_workspace(_workspace_path, _branch_name, _issue), do: {:error, :publish_blocked}
   end
@@ -178,6 +203,60 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
         recipient when is_pid(recipient) ->
           send(recipient, {:tracker_comment_called, issue_id, body})
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
+  end
+
+  defmodule FakeTrackerMergedLinkedPrIssues do
+    alias SymphonyElixir.Linear.Issue
+
+    def fetch_issues_by_states(state_names) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:post_merge_fetch_states, state_names})
+
+        _ ->
+          :ok
+      end
+
+      if "Done" in state_names do
+        {:ok, []}
+      else
+        {:ok,
+         [
+           %Issue{
+             id: "issue-review-merged",
+             identifier: "MT-379",
+             title: "Merged review issue",
+             state: "In Review",
+             project_name: "repo",
+             description: "Repo: https://github.com/octo/repo",
+             attachment_urls: ["https://github.com/octo/repo/pull/200"]
+           },
+           %Issue{
+             id: "issue-progress-merged",
+             identifier: "MT-380",
+             title: "Merged progress issue",
+             state: "In Progress",
+             project_name: "repo",
+             description: "Repo: https://github.com/octo/repo",
+             attachment_urls: ["https://github.com/octo/repo/pull/200"]
+           }
+         ]}
+      end
+    end
+
+    def fetch_candidate_issues, do: {:ok, []}
+
+    def update_issue_state(issue_id, state_name) do
+      case Application.get_env(:symphony_elixir, :tracker_state_update_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:tracker_state_update_called, issue_id, state_name})
 
         _ ->
           :ok
@@ -1094,6 +1173,97 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert next_poll_in_ms <= 50
   end
 
+  test "orchestrator moves active and review issues with merged linked PR attachments to Done" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      poll_interval_ms: 50
+    )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+
+    previous_tracker_state_update_recipient =
+      Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
+
+    previous_tracker_comment_recipient =
+      Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+
+      if is_nil(previous_tracker_state_update_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_state_update_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_state_update_recipient,
+          previous_tracker_state_update_recipient
+        )
+      end
+
+      if is_nil(previous_tracker_comment_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_comment_recipient,
+          previous_tracker_comment_recipient
+        )
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupMergedLinkedPr)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerMergedLinkedPrIssues)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :MergedLinkedPrDoneSyncOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    flush_post_merge_test_messages = fn flush ->
+      receive do
+        {:post_merge_fetch_states, _state_names} -> flush.(flush)
+        {:merged_pr_lookup_called, _attachment_urls} -> flush.(flush)
+      after
+        0 -> :ok
+      end
+    end
+
+    flush_post_merge_test_messages.(flush_post_merge_test_messages)
+
+    send(pid, :run_poll_cycle)
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert_receive {:post_merge_fetch_states, state_names}, 200
+    assert "Todo" in state_names
+    assert "In Progress" in state_names
+    assert "In Review" in state_names
+
+    assert_receive {:merged_pr_lookup_called, ["https://github.com/octo/repo/pull/200"]}, 200
+    assert_receive {:tracker_state_update_called, "issue-review-merged", "Done"}, 200
+    assert_receive {:tracker_state_update_called, "issue-progress-merged", "Done"}, 200
+
+    assert MapSet.member?(state.completed, "issue-review-merged")
+    assert MapSet.member?(state.completed, "issue-progress-merged")
+  end
+
   test "orchestrator restarts stalled workers with retry backoff" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -1138,6 +1308,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
+    retry_started_at_ms = System.monotonic_time(:millisecond)
     send(pid, :tick)
     Process.sleep(100)
     state = :sys.get_state(pid)
@@ -1153,9 +1324,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.retry_attempts[issue_id]
 
     assert is_integer(due_at_ms)
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 8_900
-    assert remaining_ms <= 10_500
+    retry_delay_ms = due_at_ms - retry_started_at_ms
+    assert retry_delay_ms >= 9_000
+    assert retry_delay_ms <= 10_500
   end
 
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do

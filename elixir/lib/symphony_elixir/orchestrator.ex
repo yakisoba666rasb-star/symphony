@@ -733,6 +733,7 @@ defmodule SymphonyElixir.Orchestrator do
       state
       |> reconcile_running_issues()
       |> reconcile_blocked_issues()
+      |> sync_merged_linked_pull_requests_to_done()
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
@@ -780,6 +781,98 @@ defmodule SymphonyElixir.Orchestrator do
       false ->
         state
     end
+  end
+
+  defp sync_merged_linked_pull_requests_to_done(%State{} = state) do
+    states = post_merge_done_sync_states()
+    module = tracker_module()
+
+    if function_exported?(module, :fetch_issues_by_states, 1) do
+      do_sync_merged_linked_pull_requests_to_done(state, module, states)
+    else
+      state
+    end
+  end
+
+  defp do_sync_merged_linked_pull_requests_to_done(%State{} = state, module, states) do
+    case module.fetch_issues_by_states(states) do
+      {:ok, issues} ->
+        Enum.reduce(issues, state, &maybe_sync_merged_linked_pr_issue_to_done/2)
+
+      {:error, reason} ->
+        Logger.debug("Skipping merged linked PR Done sync; failed to fetch Linear issues: #{inspect(reason)}")
+        state
+
+      other ->
+        Logger.debug("Skipping merged linked PR Done sync; unexpected fetch result: #{inspect(other)}")
+        state
+    end
+  end
+
+  defp post_merge_done_sync_states do
+    Config.settings!().tracker.active_states
+    |> Kernel.++([Config.review_handoff_state()])
+    |> Enum.map(&to_string/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp maybe_sync_merged_linked_pr_issue_to_done(%Issue{} = issue, %State{} = state) do
+    with true <- issue_has_pull_request_attachment?(issue),
+         {:ok, %{slug: repo}} when is_binary(repo) <- RepositoryResolver.resolve(issue, Config.settings!()),
+         {:ok, %{} = pr} <- lookup_merged_linked_pull_request(repo, issue_attachment_urls(issue)),
+         :ok <- tracker_module().update_issue_state(issue.id, done_state_name()) do
+      Logger.info("Merged linked PR detected; moved Linear issue to #{done_state_name()}: #{issue_context(issue)} pr=#{pr_url(pr)}")
+
+      state
+      |> terminate_running_issue(issue.id, true)
+      |> release_issue_claim(issue.id)
+      |> complete_issue(issue.id)
+    else
+      false ->
+        state
+
+      {:ok, nil} ->
+        state
+
+      {:error, reason} ->
+        Logger.debug("Skipping merged linked PR Done sync for #{issue_context(issue)}: #{inspect(reason)}")
+        state
+
+      other ->
+        Logger.debug("Skipping merged linked PR Done sync for #{issue_context(issue)}: #{inspect(other)}")
+        state
+    end
+  end
+
+  defp maybe_sync_merged_linked_pr_issue_to_done(_issue, %State{} = state), do: state
+
+  defp issue_has_pull_request_attachment?(%Issue{} = issue) do
+    issue
+    |> issue_attachment_urls()
+    |> Enum.any?(&github_pull_request_url?/1)
+  end
+
+  defp github_pull_request_url?(url) when is_binary(url) do
+    Regex.match?(~r{^https://github\.com/[^/]+/[^/]+/pull/\d+(?:[/?#].*)?$}i, String.trim(url))
+  end
+
+  defp github_pull_request_url?(_url), do: false
+
+  defp lookup_merged_linked_pull_request(repo, attachment_urls) do
+    lookup_module = github_pr_lookup_module()
+
+    if function_exported?(lookup_module, :lookup_merged_linked_pull_request, 2) do
+      lookup_module.lookup_merged_linked_pull_request(repo, attachment_urls)
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp done_state_name do
+    Config.settings!().tracker.terminal_states
+    |> Enum.find("Done", fn state -> normalize_issue_state(to_string(state)) == "done" end)
   end
 
   defp reconcile_running_issues(%State{} = state) do

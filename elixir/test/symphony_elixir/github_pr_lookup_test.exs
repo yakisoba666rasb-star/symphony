@@ -514,6 +514,145 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
              )
   end
 
+  test "merged linked pull request lookup returns only merged linked PR attachments" do
+    parent = self()
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", args, _opts ->
+        send(parent, {:command, :gh, args})
+
+        case args do
+          ["pr", "view", "79", "--repo", "octo/repo", "--json", fields] ->
+            assert fields == "number,url,headRefName,isDraft,mergeStateStatus,state,mergedAt"
+
+            {:ok,
+             {Jason.encode!(%{
+                "number" => 79,
+                "url" => "https://github.com/octo/repo/pull/79",
+                "headRefName" => "feature/done",
+                "isDraft" => false,
+                "mergeStateStatus" => "UNKNOWN",
+                "state" => "MERGED",
+                "mergedAt" => "2026-06-09T02:06:42Z"
+              }), 0}}
+        end
+      end
+    }
+
+    assert {:ok,
+            %{
+              "number" => 79,
+              "state" => "MERGED",
+              "__symphonyLookupSource" => "merged_linked_pull_request"
+            }} =
+             GitHubPrLookup.lookup_merged_linked_pull_request(
+               "octo/repo",
+               ["https://github.com/octo/repo/pull/79"],
+               deps
+             )
+
+    assert_received {:command, :gh, ["pr", "view", "79", "--repo", "octo/repo", "--json", _fields]}
+  end
+
+  test "merged linked pull request lookup skips open linked PR attachments" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", ["pr", "view", "79" | _args], _opts ->
+        {:ok,
+         {Jason.encode!(%{
+            "number" => 79,
+            "url" => "https://github.com/octo/repo/pull/79",
+            "headRefName" => "feature/open",
+            "isDraft" => false,
+            "mergeStateStatus" => "CLEAN",
+            "state" => "OPEN",
+            "mergedAt" => nil
+          }), 0}}
+      end
+    }
+
+    assert {:ok, nil} =
+             GitHubPrLookup.lookup_merged_linked_pull_request(
+               "octo/repo",
+               ["https://github.com/octo/repo/pull/79"],
+               deps
+             )
+  end
+
+  test "merged linked pull request lookup treats mergedAt as merged evidence" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", ["pr", "view", "79" | _args], _opts ->
+        {:ok,
+         {Jason.encode!(%{
+            "number" => 79,
+            "url" => "https://github.com/octo/repo/pull/79",
+            "headRefName" => "feature/merged-at",
+            "isDraft" => false,
+            "mergeStateStatus" => "UNKNOWN",
+            "state" => "CLOSED",
+            "mergedAt" => "2026-06-09T02:06:42Z"
+          }), 0}}
+      end
+    }
+
+    assert {:ok, %{"number" => 79, "mergedAt" => "2026-06-09T02:06:42Z"}} =
+             GitHubPrLookup.lookup_merged_linked_pull_request(
+               "octo/repo",
+               ["https://github.com/octo/repo/pull/79"],
+               deps
+             )
+  end
+
+  test "merged linked pull request lookup returns nil without linked PR attachments" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        flunk("gh pr view should not run without a linked PR attachment")
+      end
+    }
+
+    assert {:ok, nil} =
+             GitHubPrLookup.lookup_merged_linked_pull_request(
+               "octo/repo",
+               ["https://github.com/octo/repo/issues/79"],
+               deps
+             )
+  end
+
+  test "merged linked pull request lookup rejects ambiguous linked PR attachments" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        flunk("ambiguous linked PRs should not be viewed")
+      end
+    }
+
+    assert {:error, {:ambiguous_linked_pull_requests, ["https://github.com/octo/repo/pull/79", "https://github.com/octo/repo/pull/80"]}} =
+             GitHubPrLookup.lookup_merged_linked_pull_request(
+               "octo/repo",
+               ["https://github.com/octo/repo/pull/79", "https://github.com/octo/repo/pull/80"],
+               deps
+             )
+  end
+
+  test "merged linked pull request lookup rejects invalid PR view payloads" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", ["pr", "view", "79" | _args], _opts ->
+        {:ok, {Jason.encode!(%{"number" => 79}), 0}}
+      end
+    }
+
+    assert {:error, {:invalid_linked_pull_request, %{"number" => 79}}} =
+             GitHubPrLookup.lookup_merged_linked_pull_request(
+               "octo/repo",
+               ["https://github.com/octo/repo/pull/79"],
+               deps
+             )
+  end
+
   test "resolves repository from SSH host-alias GitHub remote URL" do
     workspace = "/tmp/owner-workspace-alias"
 
