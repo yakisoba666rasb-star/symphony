@@ -991,8 +991,11 @@ defmodule SymphonyElixir.CoreTest do
         retry_attempts: %{}
       }
 
-      updated_state = Orchestrator.reconcile_blocked_issue_states_for_test([issue], state)
+      pending_state = Orchestrator.reconcile_blocked_issue_states_for_test([issue], state)
+      [{review_ref, _metadata}] = Map.to_list(pending_state.pending_review_handoffs)
 
+      assert_receive {^review_ref, review_result}
+      {:noreply, updated_state} = Orchestrator.handle_info({review_ref, review_result}, pending_state)
       assert_receive {:tracker_comment, ^issue_id, comment_body}
       assert comment_body =~ "Symphony automated review decision: approve-equivalent"
       assert_receive {:tracker_state_update, ^issue_id, "In Review"}

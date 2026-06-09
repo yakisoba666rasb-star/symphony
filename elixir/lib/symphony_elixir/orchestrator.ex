@@ -550,14 +550,15 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     tracker = Map.get(metadata, :tracker, tracker_module())
 
-    with {:ok, verdict} <- result,
-         :ok <- comment_on_approved_review_handoff(issue_id, running_entry, pr, verdict, tracker) do
-      Logger.info("Review loop approved-equivalent for issue_id=#{issue_id} session_id=#{session_id} verdict=#{inspect(verdict)}")
+    case result do
+      {:ok, verdict} ->
+        warn_on_approved_review_handoff_comment(issue_id, running_entry, pr, verdict, tracker)
+        Logger.info("Review loop approved-equivalent for issue_id=#{issue_id} session_id=#{session_id} verdict=#{inspect(verdict)}")
 
-      state
-      |> move_issue_to_review_after_approval(issue_id, running_entry, session_id, tracker)
-      |> maybe_release_completed_review_handoff_claim(issue_id, metadata)
-    else
+        state
+        |> move_issue_to_review_after_approval(issue_id, running_entry, session_id, tracker)
+        |> maybe_release_completed_review_handoff_claim(issue_id, metadata)
+
       {:error, reason} ->
         error = "review loop did not approve PR before In Review handoff: #{inspect(reason)}"
         Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
@@ -573,11 +574,12 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     tracker = Map.get(metadata, :tracker, tracker_module())
 
-    with {:ok, verdict} <- result,
-         :ok <- comment_on_approved_review_handoff(issue.id, running_entry, pr, verdict, tracker) do
-      Logger.info("Review loop approved-equivalent for premature review handoff issue_id=#{issue.id} session_id=#{session_id} verdict=#{inspect(verdict)}")
-      move_issue_to_review_after_approval(state, issue.id, running_entry, session_id, tracker)
-    else
+    case result do
+      {:ok, verdict} ->
+        warn_on_approved_review_handoff_comment(issue.id, running_entry, pr, verdict, tracker)
+        Logger.info("Review loop approved-equivalent for premature review handoff issue_id=#{issue.id} session_id=#{session_id} verdict=#{inspect(verdict)}")
+        move_issue_to_review_after_approval(state, issue.id, running_entry, session_id, tracker)
+
       {:error, reason} ->
         error = "review loop did not approve PR before In Review handoff: #{inspect(reason)}"
         Logger.warning("Premature review handoff blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
@@ -592,6 +594,21 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_release_completed_review_handoff_claim(%State{} = state, _issue_id, _metadata), do: state
+
+  defp warn_on_approved_review_handoff_comment(issue_id, running_entry, pr, verdict, tracker) do
+    case comment_on_approved_review_handoff(issue_id, running_entry, pr, verdict, tracker) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Approved review handoff comment failed for issue_id=#{issue_id} " <>
+            "issue_identifier=#{Map.get(running_entry, :identifier)} pr=#{pr_url(pr)} reason=#{inspect(reason)}; continuing handoff"
+        )
+
+        :ok
+    end
+  end
 
   defp comment_on_approved_review_handoff(issue_id, running_entry, pr, verdict, tracker)
        when is_binary(issue_id) do
@@ -929,11 +946,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp log_post_merge_done_sync_candidates(issues, states) when is_list(issues) do
-    pull_request_issue_count = Enum.count(issues, &issue_has_pull_request_attachment?/1)
+    pull_request_issue_count = Enum.count(issues, &issue_has_done_sync_evidence?/1)
 
     if pull_request_issue_count > 0 do
       Logger.info(
-        "Merged linked PR Done sync inspecting #{pull_request_issue_count} issue(s) with PR attachments " <>
+        "Merged PR Done sync inspecting #{pull_request_issue_count} issue(s) with PR evidence " <>
           "from #{length(issues)} fetched issue(s) states=#{inspect(states)}"
       )
     end
@@ -949,7 +966,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_sync_merged_linked_pr_issue_to_done(%Issue{} = issue, %State{} = state) do
-    if issue_has_pull_request_attachment?(issue) do
+    if issue_has_done_sync_evidence?(issue) do
       do_maybe_sync_merged_linked_pr_issue_to_done(issue, state)
     else
       state
@@ -984,7 +1001,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_move_merged_linked_pr_issue_to_done(issue, repo, attachment_urls, state) do
-    case lookup_merged_linked_pull_request(repo, attachment_urls) do
+    case lookup_merged_pull_request_for_done(issue, repo, attachment_urls) do
       {:ok, %{} = pr} ->
         move_merged_linked_pr_issue_to_done(issue, repo, pr, state)
 
@@ -1048,11 +1065,26 @@ defmodule SymphonyElixir.Orchestrator do
     |> Enum.any?(&github_pull_request_url?/1)
   end
 
+  defp issue_has_done_sync_evidence?(%Issue{} = issue) do
+    issue_has_pull_request_attachment?(issue) or present_string?(issue.identifier) or present_string?(issue.url) or
+      present_string?(issue.branch_name)
+  end
+
   defp github_pull_request_url?(url) when is_binary(url) do
     Regex.match?(~r{^https://github\.com/[^/]+/[^/]+/pull/\d+(?:[/?#].*)?$}i, String.trim(url))
   end
 
   defp github_pull_request_url?(_url), do: false
+
+  defp present_string?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present_string?(_value), do: false
+
+  defp lookup_merged_pull_request_for_done(%Issue{} = issue, repo, attachment_urls) do
+    case lookup_merged_linked_pull_request(repo, attachment_urls) do
+      {:ok, nil} -> lookup_merged_issue_pull_request(repo, issue)
+      other -> other
+    end
+  end
 
   defp lookup_merged_linked_pull_request(repo, attachment_urls) do
     lookup_module = github_pr_lookup_module()
@@ -1061,6 +1093,16 @@ defmodule SymphonyElixir.Orchestrator do
       lookup_module.lookup_merged_linked_pull_request(repo, attachment_urls)
     else
       {:error, {:missing_lookup_merged_linked_pull_request, lookup_module}}
+    end
+  end
+
+  defp lookup_merged_issue_pull_request(repo, %Issue{} = issue) do
+    lookup_module = github_pr_lookup_module()
+
+    if function_exported?(lookup_module, :lookup_merged_issue_pull_request, 4) do
+      lookup_module.lookup_merged_issue_pull_request(repo, issue.identifier, issue.url, issue.branch_name)
+    else
+      {:ok, nil}
     end
   end
 
@@ -1358,20 +1400,10 @@ defmodule SymphonyElixir.Orchestrator do
         release_issue_claim(state, issue.id)
 
       active_issue_state?(issue.state, active_states) ->
-        case maybe_recover_blocked_review_handoff_issue(state, issue) do
-          {:ok, recovered_state} -> recovered_state
-          :miss -> refresh_blocked_issue_state(state, issue)
-        end
+        reconcile_active_blocked_issue_state(state, issue)
 
       review_issue_state?(issue.state) ->
-        case guard_blocked_review_handoff_issue(state, issue) do
-          {:ok, guarded_state} ->
-            guarded_state
-
-          :miss ->
-            Logger.info("Blocked issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; releasing block")
-            release_issue_claim(state, issue.id)
-        end
+        reconcile_review_blocked_issue_state(state, issue)
 
       true ->
         Logger.info("Blocked issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; releasing block")
@@ -1380,6 +1412,24 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_blocked_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp reconcile_active_blocked_issue_state(%State{} = state, %Issue{} = issue) do
+    case maybe_recover_blocked_review_handoff_issue(state, issue) do
+      {:ok, recovered_state} -> recovered_state
+      :miss -> refresh_blocked_issue_state(state, issue)
+    end
+  end
+
+  defp reconcile_review_blocked_issue_state(%State{} = state, %Issue{} = issue) do
+    case guard_blocked_review_handoff_issue(state, issue) do
+      {:ok, guarded_state} ->
+        guarded_state
+
+      :miss ->
+        Logger.info("Blocked issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; releasing block")
+        release_issue_claim(state, issue.id)
+    end
+  end
 
   defp maybe_recover_blocked_review_handoff_issue(%State{} = state, %Issue{} = issue) do
     with %{error: error} = blocked_entry <- Map.get(state.blocked, issue.id),
@@ -1471,7 +1521,16 @@ defmodule SymphonyElixir.Orchestrator do
   defp move_blocked_issue_to_review_after_pr_discovery(state, issue_id, blocked_entry, pr) do
     session_id = running_entry_session_id(blocked_entry)
 
-    start_review_handoff_task(state, :normal, issue_id, blocked_entry, session_id, pr, nil, release_claim_on_completion: true)
+    start_review_handoff_task(
+      state,
+      :normal,
+      issue_id,
+      blocked_entry,
+      session_id,
+      pr,
+      nil,
+      release_claim_on_completion: true
+    )
   end
 
   defp release_completed_blocked_issue(%State{} = state, issue_id) do

@@ -857,6 +857,95 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
              )
   end
 
+  test "merged issue pull request lookup finds merged PR by issue key evidence" do
+    parent = self()
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", args, _opts ->
+        send(parent, {:command, :gh, args})
+
+        assert args == [
+                 "pr",
+                 "list",
+                 "--repo",
+                 "octo/repo",
+                 "--state",
+                 "merged",
+                 "--limit",
+                 "20",
+                 "--search",
+                 "LAB-382",
+                 "--json",
+                 "number,url,headRefName,isDraft,mergeStateStatus,state,mergedAt,title,body"
+               ]
+
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 75,
+              "url" => "https://github.com/octo/repo/pull/75",
+              "headRefName" => "lab-382-async-review-handoff",
+              "isDraft" => false,
+              "mergeStateStatus" => "UNKNOWN",
+              "state" => "MERGED",
+              "mergedAt" => "2026-06-09T14:19:59Z",
+              "title" => "LAB-382 keep review handoff async",
+              "body" => "Refs LAB-382\nLinear: https://linear.app/example/issue/LAB-382/example"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:ok,
+            %{
+              "number" => 75,
+              "__symphonyLookupSource" => "merged_issue_pull_request",
+              "__symphonyMatchedBranch" => "lab-382-async-review-handoff"
+            }} =
+             GitHubPrLookup.lookup_merged_issue_pull_request(
+               "octo/repo",
+               "LAB-382",
+               "https://linear.app/example/issue/LAB-382/example",
+               "lab-382-async-review-handoff",
+               deps
+             )
+
+    assert_received {:command, :gh, ["pr", "list", "--repo", "octo/repo", "--state", "merged" | _rest]}
+  end
+
+  test "merged issue pull request lookup rejects ambiguous issue-key matches" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 75,
+              "url" => "https://github.com/octo/repo/pull/75",
+              "headRefName" => "lab-382-a",
+              "state" => "MERGED",
+              "mergedAt" => "2026-06-09T14:19:59Z",
+              "title" => "LAB-382 first",
+              "body" => "Refs LAB-382"
+            },
+            %{
+              "number" => 76,
+              "url" => "https://github.com/octo/repo/pull/76",
+              "headRefName" => "lab-382-b",
+              "state" => "MERGED",
+              "mergedAt" => "2026-06-09T14:20:59Z",
+              "title" => "LAB-382 second",
+              "body" => "Refs LAB-382"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:error, {:ambiguous_merged_issue_pull_requests, ["https://github.com/octo/repo/pull/75", "https://github.com/octo/repo/pull/76"]}} =
+             GitHubPrLookup.lookup_merged_issue_pull_request("octo/repo", "LAB-382", nil, nil, deps)
+  end
+
   test "merged linked pull request lookup rejects ambiguous linked PR attachments" do
     deps = %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,
