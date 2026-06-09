@@ -66,6 +66,23 @@ defmodule SymphonyElixir.GitHubPrLookup do
     end
   end
 
+  @spec lookup_merged_issue_pull_request(
+          String.t(),
+          String.t() | nil,
+          String.t() | nil,
+          String.t() | nil,
+          deps()
+        ) ::
+          {:ok, nil | pr_map()} | {:error, term()}
+  def lookup_merged_issue_pull_request(repo, issue_identifier, issue_url, branch_name, deps \\ runtime_deps())
+      when is_binary(repo) do
+    with {:ok, gh_bin} <- find_gh_binary(deps) do
+      merged_issue_pr_search_terms(issue_identifier, issue_url, branch_name)
+      |> lookup_merged_issue_pr_candidates(gh_bin, repo, deps)
+      |> pick_merged_issue_pull_request(issue_identifier, issue_url, branch_name)
+    end
+  end
+
   @spec runtime_deps() :: deps()
   defp runtime_deps do
     %{
@@ -384,6 +401,126 @@ defmodule SymphonyElixir.GitHubPrLookup do
 
   defp match_pr_by_head_sha({:error, reason}, _head_sha, _expected_branch), do: {:error, reason}
 
+  defp merged_issue_pr_search_terms(issue_identifier, issue_url, branch_name) do
+    [issue_identifier, issue_url, branch_name]
+    |> Enum.filter(&present_string?/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.uniq()
+  end
+
+  defp lookup_merged_issue_pr_candidates([], _gh_bin, _repo, _deps), do: {:ok, []}
+
+  defp lookup_merged_issue_pr_candidates([term | rest], gh_bin, repo, deps) do
+    case list_merged_issue_pr_candidates(gh_bin, repo, term, deps) do
+      {:ok, []} -> lookup_merged_issue_pr_candidates(rest, gh_bin, repo, deps)
+      {:ok, prs} -> {:ok, prs}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp list_merged_issue_pr_candidates(gh_bin, repo, search_term, deps) do
+    command = github_pr_merged_search_args(repo, search_term)
+
+    case normalize_command_result(deps.run_command.(gh_bin, command, stderr_to_stdout: true)) do
+      {:ok, {output, 0}} -> parse_gh_pr_list_response(output)
+      {:ok, {_output, status}} -> {:error, {:gh_command_failed, status}}
+      {:error, reason} -> {:error, {:gh_command_failed, reason}}
+    end
+  end
+
+  defp pick_merged_issue_pull_request({:error, reason}, _issue_identifier, _issue_url, _branch_name),
+    do: {:error, reason}
+
+  defp pick_merged_issue_pull_request({:ok, prs}, issue_identifier, issue_url, branch_name) do
+    prs
+    |> Enum.filter(&(merged_pr?(&1) and issue_pr_evidence?(&1, issue_identifier, issue_url, branch_name)))
+    |> pick_best_merged_issue_pr(issue_identifier, issue_url, branch_name)
+  end
+
+  defp merged_pr?(%{"state" => state, "mergedAt" => merged_at}) do
+    String.upcase(to_string(state)) == "MERGED" or present_string?(merged_at)
+  end
+
+  defp merged_pr?(_pr), do: false
+
+  defp issue_pr_evidence?(pr, issue_identifier, issue_url, branch_name) do
+    pr_text_contains?(pr, issue_identifier) or
+      pr_text_contains?(pr, issue_url) or
+      pr_branch_matches?(pr, branch_name)
+  end
+
+  defp pr_text_contains?(_pr, value) when not is_binary(value), do: false
+
+  defp pr_text_contains?(pr, value) do
+    needle = String.trim(value)
+
+    cond do
+      needle == "" ->
+        false
+
+      url_like?(needle) ->
+        pr
+        |> pr_searchable_text()
+        |> text_contains_case_insensitive?(needle)
+
+      true ->
+        pr
+        |> pr_searchable_text()
+        |> text_contains_token?(needle)
+    end
+  end
+
+  defp pr_searchable_text(pr) do
+    [pr["title"], pr["body"], pr["url"]]
+    |> Enum.filter(&is_binary/1)
+    |> Enum.join("\n")
+  end
+
+  defp url_like?(value), do: Regex.match?(~r{^https?://}i, value)
+
+  defp text_contains_case_insensitive?(text, needle) do
+    text
+    |> String.downcase()
+    |> String.contains?(String.downcase(needle))
+  end
+
+  defp text_contains_token?(text, needle) do
+    Regex.match?(~r/(^|[^A-Za-z0-9])#{Regex.escape(needle)}([^A-Za-z0-9]|$)/i, text)
+  end
+
+  defp pr_branch_matches?(_pr, branch_name) when not is_binary(branch_name), do: false
+
+  defp pr_branch_matches?(pr, branch_name) do
+    present_string?(branch_name) and String.trim(to_string(pr["headRefName"])) == String.trim(branch_name)
+  end
+
+  defp pick_best_merged_issue_pr([], _issue_identifier, _issue_url, _branch_name), do: {:ok, nil}
+
+  defp pick_best_merged_issue_pr(prs, issue_identifier, issue_url, branch_name) do
+    with :miss <- pick_unique_by(prs, &pr_branch_matches?(&1, branch_name)),
+         :miss <- pick_unique_by(prs, &pr_text_contains?(&1, issue_url)),
+         :miss <- pick_unique_by(prs, &pr_text_contains?(&1, issue_identifier)) do
+      case Enum.uniq_by(prs, &pr_number/1) do
+        [pr] ->
+          {:ok, tag_lookup_source(pr, "merged_issue_pull_request", branch_name, pr["headRefName"])}
+
+        values ->
+          {:error, {:ambiguous_merged_issue_pull_requests, Enum.map(values, &pr_url/1)}}
+      end
+    end
+  end
+
+  defp pick_unique_by(prs, predicate) when is_function(predicate, 1) do
+    prs
+    |> Enum.filter(predicate)
+    |> Enum.uniq_by(&pr_number/1)
+    |> case do
+      [pr] -> {:ok, tag_lookup_source(pr, "merged_issue_pull_request", nil, pr["headRefName"])}
+      [] -> :miss
+      values -> {:error, {:ambiguous_merged_issue_pull_requests, Enum.map(values, &pr_url/1)}}
+    end
+  end
+
   defp reject_draft_closed_prs(prs) do
     Enum.filter(prs, fn pr ->
       String.upcase(to_string(pr["state"])) == "OPEN" and pr["isDraft"] != true
@@ -500,6 +637,10 @@ defmodule SymphonyElixir.GitHubPrLookup do
   defp pr_number(%{"number" => number}) when is_integer(number), do: number
   defp pr_number(_pr), do: 0
 
+  defp pr_url(%{"url" => url}) when is_binary(url), do: url
+  defp pr_url(%{"number" => number}) when is_integer(number), do: Integer.to_string(number)
+  defp pr_url(_pr), do: "(unknown)"
+
   defp github_pr_list_args(repo, head_branch, state) do
     [
       "pr",
@@ -527,6 +668,23 @@ defmodule SymphonyElixir.GitHubPrLookup do
       "100",
       "--json",
       "number,url,headRefName,headRefOid,isDraft,mergeStateStatus,state"
+    ]
+  end
+
+  defp github_pr_merged_search_args(repo, search_term) do
+    [
+      "pr",
+      "list",
+      "--repo",
+      repo,
+      "--state",
+      "merged",
+      "--limit",
+      "50",
+      "--search",
+      search_term,
+      "--json",
+      "number,url,headRefName,isDraft,mergeStateStatus,state,mergedAt,title,body"
     ]
   end
 

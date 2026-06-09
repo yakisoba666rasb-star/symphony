@@ -857,6 +857,270 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
              )
   end
 
+  test "merged issue pull request lookup finds merged PR by issue key evidence" do
+    parent = self()
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", args, _opts ->
+        send(parent, {:command, :gh, args})
+
+        assert args == [
+                 "pr",
+                 "list",
+                 "--repo",
+                 "octo/repo",
+                 "--state",
+                 "merged",
+                 "--limit",
+                 "50",
+                 "--search",
+                 "LAB-382",
+                 "--json",
+                 "number,url,headRefName,isDraft,mergeStateStatus,state,mergedAt,title,body"
+               ]
+
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 75,
+              "url" => "https://github.com/octo/repo/pull/75",
+              "headRefName" => "lab-382-async-review-handoff",
+              "isDraft" => false,
+              "mergeStateStatus" => "UNKNOWN",
+              "state" => "MERGED",
+              "mergedAt" => "2026-06-09T14:19:59Z",
+              "title" => "LAB-382 keep review handoff async",
+              "body" => "Refs LAB-382\nLinear: https://linear.app/example/issue/LAB-382/example"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:ok,
+            %{
+              "number" => 75,
+              "__symphonyLookupSource" => "merged_issue_pull_request",
+              "__symphonyMatchedBranch" => "lab-382-async-review-handoff"
+            }} =
+             GitHubPrLookup.lookup_merged_issue_pull_request(
+               "octo/repo",
+               "LAB-382",
+               "https://linear.app/example/issue/LAB-382/example",
+               "lab-382-async-review-handoff",
+               deps
+             )
+
+    assert_received {:command, :gh, ["pr", "list", "--repo", "octo/repo", "--state", "merged" | _rest]}
+  end
+
+  test "merged issue pull request lookup rejects ambiguous issue-key matches" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 75,
+              "url" => "https://github.com/octo/repo/pull/75",
+              "headRefName" => "lab-382-a",
+              "state" => "MERGED",
+              "mergedAt" => "2026-06-09T14:19:59Z",
+              "title" => "LAB-382 first",
+              "body" => "Refs LAB-382"
+            },
+            %{
+              "number" => 76,
+              "url" => "https://github.com/octo/repo/pull/76",
+              "headRefName" => "lab-382-b",
+              "state" => "MERGED",
+              "mergedAt" => "2026-06-09T14:20:59Z",
+              "title" => "LAB-382 second",
+              "body" => "Refs LAB-382"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:error, {:ambiguous_merged_issue_pull_requests, ["https://github.com/octo/repo/pull/75", "https://github.com/octo/repo/pull/76"]}} =
+             GitHubPrLookup.lookup_merged_issue_pull_request("octo/repo", "LAB-382", nil, nil, deps)
+  end
+
+  test "merged issue pull request lookup does not match issue key prefixes" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 82,
+              "url" => "https://github.com/octo/repo/pull/82",
+              "headRefName" => "lab-10-fix",
+              "state" => "MERGED",
+              "mergedAt" => "2026-06-09T17:00:00Z",
+              "title" => "LAB-10 fix unrelated issue",
+              "body" => "Refs LAB-10"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:ok, nil} = GitHubPrLookup.lookup_merged_issue_pull_request("octo/repo", "LAB-1", nil, nil, deps)
+  end
+
+  test "merged issue pull request lookup returns nil without search evidence" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        flunk("lookup without search terms should not call gh")
+      end
+    }
+
+    assert {:ok, nil} = GitHubPrLookup.lookup_merged_issue_pull_request("octo/repo", nil, " ", nil, deps)
+  end
+
+  test "merged issue pull request lookup falls through empty search terms" do
+    parent = self()
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", args, _opts ->
+        search = Enum.at(args, Enum.find_index(args, &(&1 == "--search")) + 1)
+        send(parent, {:search, search})
+
+        case search do
+          "LAB-382" ->
+            {:ok, {Jason.encode!([]), 0}}
+
+          "https://linear.app/example/issue/LAB-382/example" ->
+            {:ok,
+             {Jason.encode!([
+                %{
+                  "number" => 77,
+                  "url" => "https://github.com/octo/repo/pull/77",
+                  "headRefName" => "lab-382-url",
+                  "state" => "MERGED",
+                  "mergedAt" => "2026-06-09T15:00:00Z",
+                  "title" => "URL match",
+                  "body" => "Linear: https://linear.app/example/issue/LAB-382/example"
+                }
+              ]), 0}}
+        end
+      end
+    }
+
+    assert {:ok, %{"number" => 77, "__symphonyLookupSource" => "merged_issue_pull_request"}} =
+             GitHubPrLookup.lookup_merged_issue_pull_request(
+               "octo/repo",
+               "LAB-382",
+               "https://linear.app/example/issue/LAB-382/example",
+               nil,
+               deps
+             )
+
+    assert_received {:search, "LAB-382"}
+    assert_received {:search, "https://linear.app/example/issue/LAB-382/example"}
+  end
+
+  test "merged issue pull request lookup finds branch-only merged PR" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 78,
+              "url" => "https://github.com/octo/repo/pull/78",
+              "headRefName" => "lab-382-branch",
+              "state" => "CLOSED",
+              "mergedAt" => "2026-06-09T15:05:00Z",
+              "title" => "Branch-only match",
+              "body" => ""
+            },
+            %{
+              "number" => 79,
+              "url" => "https://github.com/octo/repo/pull/79",
+              "headRefName" => "other-branch",
+              "state" => "OPEN",
+              "mergedAt" => nil,
+              "title" => "Not merged",
+              "body" => "LAB-382"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:ok,
+            %{
+              "number" => 78,
+              "__symphonyLookupSource" => "merged_issue_pull_request",
+              "__symphonyMatchedBranch" => "lab-382-branch"
+            }} =
+             GitHubPrLookup.lookup_merged_issue_pull_request("octo/repo", nil, nil, "lab-382-branch", deps)
+  end
+
+  test "merged issue pull request lookup reports gh command failures" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts -> {:ok, {"no auth", 4}} end
+    }
+
+    assert {:error, {:gh_command_failed, 4}} =
+             GitHubPrLookup.lookup_merged_issue_pull_request("octo/repo", "LAB-382", nil, nil, deps)
+  end
+
+  test "merged issue pull request lookup ignores unmerged and invalid candidates" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            "not a pr",
+            %{
+              "number" => 80,
+              "url" => "https://github.com/octo/repo/pull/80",
+              "headRefName" => "lab-382-open",
+              "state" => "OPEN",
+              "mergedAt" => nil,
+              "title" => "LAB-382 not merged",
+              "body" => "Refs LAB-382"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:ok, nil} = GitHubPrLookup.lookup_merged_issue_pull_request("octo/repo", "LAB-382", nil, nil, deps)
+  end
+
+  test "merged issue pull request lookup reports ambiguous matches without urls" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 81,
+              "headRefName" => "lab-382-a",
+              "state" => "MERGED",
+              "mergedAt" => "2026-06-09T16:00:00Z",
+              "title" => "LAB-382 first",
+              "body" => "Refs LAB-382"
+            },
+            %{
+              "headRefName" => "lab-382-b",
+              "state" => "MERGED",
+              "mergedAt" => "2026-06-09T16:01:00Z",
+              "title" => "LAB-382 second",
+              "body" => "Refs LAB-382"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:error, {:ambiguous_merged_issue_pull_requests, ["81", "(unknown)"]}} =
+             GitHubPrLookup.lookup_merged_issue_pull_request("octo/repo", "LAB-382", nil, nil, deps)
+  end
+
   test "merged linked pull request lookup rejects ambiguous linked PR attachments" do
     deps = %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,
