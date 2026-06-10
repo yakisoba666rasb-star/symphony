@@ -34,6 +34,7 @@ Already implemented (PR #62, #63, #77, #78):
 | Review handoff dedupe / blocked-state recovery | Done (#77) |
 | Runtime env points to `yakisoba666rasb-star/symphony` | Done |
 | Workspace HEAD SHA PR discovery avoids `--limit 100` list truncation | Done (#70) |
+| Project route can resolve non-default repos for dispatch | Done (#86) |
 | Done sync only inspects issues with PR attachment or branch evidence | Done |
 | Merged issue-key matching uses token boundaries and limit 50 | Done |
 
@@ -47,6 +48,10 @@ Remaining gaps:
   module), LAB-388 (coverage gate excludes core modules).
 - **C. Block observability**: block comments exist, but retry limits /
   backoff are not unified and there is no detection of silent stalls.
+- **D. Missing Linear Project assignment**: when an issue has GitHub repository
+  evidence but no Linear Project, dispatch waits for a human to set Project.
+  LAB-396 should assign a unique matching team project before dispatch. See
+  [Repository and Linear Project Routing](project_routing.md).
 
 ## Implementation Plan
 
@@ -77,24 +82,37 @@ Implemented.
 6. **Word-boundary issue-key matching + limit raise**: merged issue PR
    lookup uses token-boundary matching, so `LAB-1` does not match
    `LAB-10`, and merged search uses `--limit 50`.
+7. **Project-route dispatch**: `repository.project_routes` participates in
+   repository resolution, so non-default repository issues can dispatch when
+   their Linear Project uniquely maps to the repository.
+
+### Phase 2.5: Project metadata convergence
+
+In progress / next implementation target.
+
+8. **LAB-396 / missing project auto-assignment**: when a candidate issue has
+   GitHub repository evidence but no Linear Project, resolve the repository,
+   find a unique matching Linear Project on the issue's team, assign it, and
+   defer dispatch until the next poll. This should work for every registered
+   project, not only `auto_template`.
 
 ### Phase 3: Systematic block reduction
 
-7. **Unified retry policy** (new issue): consolidate scattered
+9. **Unified retry policy** (new issue): consolidate scattered
    retry/backoff logic (stalled worker, PR lookup, handoff) into one
    policy: max N attempts, exponential backoff, and a reasoned block when
    the cap is reached.
-8. **Stall detection** (new issue): detect running issues with no progress
+10. **Stall detection** (new issue): detect running issues with no progress
    events for X minutes and post a status comment to Linear, so stalls are
    never silent.
-9. **Block comment template** (small): every block comment includes the
+11. **Block comment template** (small): every block comment includes the
    reason, attempt count, and the concrete action a human should take.
 
 ### Phase 4: Maintainability (after automation stabilizes)
 
-10. **LAB-389**: decompose the Orchestrator. Start only after Phases 2-3
+12. **LAB-389**: decompose the Orchestrator. Start only after Phases 2-3
     land; refactoring while sync logic is churning invites conflicts.
-11. **LAB-388**: include core modules in the coverage gate, paired with
+13. **LAB-388**: include core modules in the coverage gate, paired with
     the decomposition.
 
 ## Review Operations
@@ -109,6 +127,6 @@ Implemented.
 
 ## Recommended Order
 
-Phase 1 (immediate) -> LAB-387 -> Done sync throttling -> Phase 3 ->
-LAB-389. New issues in Phases 2-3 (items 5-9) should be filed in Linear so
+Phase 1 (done) -> LAB-387 -> Done sync throttling -> LAB-396 ->
+Phase 3 -> LAB-389. New issues in Phases 2-3 should be filed in Linear so
 Symphony itself can implement them.
