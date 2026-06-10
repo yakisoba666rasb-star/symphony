@@ -487,7 +487,7 @@ defmodule SymphonyElixir.Orchestrator do
     issue = Map.get(running_entry, :issue)
     attachment_urls = issue_attachment_urls(issue)
 
-    if function_exported?(lookup_module, :lookup_workspace_handoff_pr, 3) do
+    if module_exports?(lookup_module, :lookup_workspace_handoff_pr, 3) do
       lookup_module.lookup_workspace_handoff_pr(workspace_path, branch_name, attachment_urls)
     else
       lookup_module.lookup_workspace_head(workspace_path, branch_name)
@@ -510,6 +510,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp github_issue_module do
     Application.get_env(:symphony_elixir, :github_issue, GitHubIssue)
   end
+
+  defp module_exports?(module, function_name, arity)
+       when is_atom(module) and is_atom(function_name) and is_integer(arity) do
+    Code.ensure_loaded?(module) and function_exported?(module, function_name, arity)
+  end
+
+  defp module_exports?(_module, _function_name, _arity), do: false
 
   defp review_runner_module do
     Application.get_env(:symphony_elixir, :review_runner, ReviewRunner)
@@ -1035,7 +1042,7 @@ defmodule SymphonyElixir.Orchestrator do
     states = post_merge_done_sync_states()
     module = tracker_module()
 
-    if function_exported?(module, :fetch_issues_by_states, 1) do
+    if module_exports?(module, :fetch_issues_by_states, 1) do
       do_sync_merged_linked_pull_requests_to_done(state, module, states)
     else
       state
@@ -1317,7 +1324,7 @@ defmodule SymphonyElixir.Orchestrator do
     module = github_issue_module()
     comment = source_github_issue_close_comment(issue, pr)
 
-    if function_exported?(module, :close_if_open, 3) do
+    if module_exports?(module, :close_if_open, 3) do
       case module.close_if_open(repo, issue_url, comment) do
         {:ok, :closed} ->
           Logger.info("Closed source GitHub issue for #{issue_context(issue)} repo=#{repo} issue=#{issue_url}")
@@ -1349,7 +1356,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp lookup_merged_linked_pull_request(repo, attachment_urls) do
     lookup_module = github_pr_lookup_module()
 
-    if function_exported?(lookup_module, :lookup_merged_linked_pull_request, 2) do
+    if module_exports?(lookup_module, :lookup_merged_linked_pull_request, 2) do
       lookup_module.lookup_merged_linked_pull_request(repo, attachment_urls)
     else
       {:error, {:missing_lookup_merged_linked_pull_request, lookup_module}}
@@ -1359,7 +1366,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp lookup_merged_issue_pull_request(repo, %Issue{} = issue) do
     lookup_module = github_pr_lookup_module()
 
-    if function_exported?(lookup_module, :lookup_merged_issue_pull_request, 4) do
+    if module_exports?(lookup_module, :lookup_merged_issue_pull_request, 4) do
       lookup_module.lookup_merged_issue_pull_request(repo, issue.identifier, issue.url, issue.branch_name)
     else
       {:ok, nil}
@@ -1558,7 +1565,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp refresh_review_handoff_issue(%Issue{} = issue) do
     module = tracker_module()
 
-    if function_exported?(module, :fetch_issue_states_by_ids, 1) do
+    if module_exports?(module, :fetch_issue_states_by_ids, 1) do
       case module.fetch_issue_states_by_ids([issue.id]) do
         {:ok, [%Issue{} = refreshed_issue | _rest]} ->
           refreshed_issue
@@ -2734,7 +2741,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp lookup_open_pr_for_dispatch(%Issue{} = issue) do
     lookup_module = github_pr_lookup_module()
 
-    if function_exported?(lookup_module, :lookup_open_issue_pull_request, 5) do
+    if module_exports?(lookup_module, :lookup_open_issue_pull_request, 5) do
       case RepositoryResolver.resolve(issue, Config.settings!()) do
         {:ok, %{slug: repo}} when is_binary(repo) and repo != "" ->
           lookup_module.lookup_open_issue_pull_request(
