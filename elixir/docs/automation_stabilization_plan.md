@@ -41,19 +41,12 @@ Already implemented:
 | Full loop verified end-to-end: dispatch -> implement -> self-review -> rework -> approve -> merge -> Done | Verified 2026-06-10 (LAB-391) |
 | GitHub issue -> Linear Backlog intake sync | In review (PR #90) |
 
-Remaining gaps:
-
-- **A. GitHub issue -> Linear intake**: PR #90 adds opt-in polling intake.
-  Follow-ups after merge: dedupe gap when attachmentCreate fails after
-  issueCreate, archived-issue re-import, attempt caching for unmatchable
-  issues, and moving intake off the orchestrator poll path.
-- **B. Known stability issues in Backlog**: LAB-389 (Orchestrator god
-  module), LAB-388 (coverage gate excludes core modules).
-- **C. Stall detection**: retry/backoff is unified (#83), but there is still
-  no detection of silent stalls (running issues with no progress events).
-- **D. Done sync API churn**: merged-PR Done sync evidence checks still run
-  every poll cycle (~30s); interval throttling would reduce GitHub/Linear
-  API consumption.
+Remaining gaps: see [Zero-Touch GitHub Issue Loop](zero_touch_loop.md) for
+the consolidated design (W0-W6): intake hardening enablement, intake failure
+fingerprint cache, async intake, Done sync interval gating, stall detection,
+label-gated zero-touch promotion, and E2E measurement. Known maintainability
+issues remain in Backlog: LAB-389 (Orchestrator god module), LAB-388
+(coverage gate excludes core modules).
 
 ## Implementation Plan
 
