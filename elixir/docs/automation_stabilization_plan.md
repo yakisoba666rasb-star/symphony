@@ -1,7 +1,7 @@
 # Symphony Automation Stabilization Plan
 
-Status: Phase 2 implemented
-Last updated: 2026-06-10
+Status: Phases 1-2.5 implemented; Phase 3 retry policy implemented
+Last updated: 2026-06-10 (evening)
 
 ## Goal
 
@@ -23,12 +23,11 @@ Required invariants:
 
 ## Current State (verified 2026-06-10)
 
-Already implemented (PR #62, #63, #77, #78):
+Already implemented:
 
 | Capability | Status |
 |---|---|
-| GitHub issue -> Linear Backlog sync | Done |
-| PR created -> In Review handoff (multi-layer guards) | Done (#62, #77) |
+| PR created -> In Review handoff (multi-layer guards) | Done (#62, #77, #84, #85, #89) |
 | Merged PR -> Linear Done sync + fallback lookup | Done (#63, #77) |
 | Done sync closes source GitHub issue (`Fixes #N` + runtime close) | Done (#78) |
 | Review handoff dedupe / blocked-state recovery | Done (#77) |
@@ -37,27 +36,32 @@ Already implemented (PR #62, #63, #77, #78):
 | Project route can resolve non-default repos for dispatch | Done (#86) |
 | Done sync only inspects issues with PR attachment or branch evidence | Done |
 | Merged issue-key matching uses token boundaries and limit 50 | Done |
+| Unified retry policy with bounded attempts and Linear-visible reasons (LAB-391) | Done (#83) |
+| Auto-assign Linear Project from repository evidence (LAB-396) | Done (#88) |
+| Full loop verified end-to-end: dispatch -> implement -> self-review -> rework -> approve -> merge -> Done | Verified 2026-06-10 (LAB-391) |
+| GitHub issue -> Linear Backlog intake sync | In review (PR #90) |
 
 Remaining gaps:
 
-- **A. Operator-side legacy cleanup**: repository-level runtime config and
-  test fixtures are cleaned up by Phase 1. Operators still need to archive
-  any stale local clones and retired config directories that exist on
-  individual machines.
+- **A. GitHub issue -> Linear intake**: PR #90 adds opt-in polling intake.
+  Follow-ups after merge: dedupe gap when attachmentCreate fails after
+  issueCreate, archived-issue re-import, attempt caching for unmatchable
+  issues, and moving intake off the orchestrator poll path.
 - **B. Known stability issues in Backlog**: LAB-389 (Orchestrator god
   module), LAB-388 (coverage gate excludes core modules).
-- **C. Block observability**: block comments exist, but retry limits /
-  backoff are not unified and there is no detection of silent stalls.
-- **D. Missing Linear Project assignment**: when an issue has GitHub repository
-  evidence but no Linear Project, dispatch waits for a human to set Project.
-  LAB-396 should assign a unique matching team project before dispatch. See
-  [Repository and Linear Project Routing](project_routing.md).
+- **C. Stall detection**: retry/backoff is unified (#83), but there is still
+  no detection of silent stalls (running issues with no progress events).
+- **D. Done sync API churn**: merged-PR Done sync evidence checks still run
+  every poll cycle (~30s); interval throttling would reduce GitHub/Linear
+  API consumption.
 
 ## Implementation Plan
 
 ### Phase 1: Environment unification and legacy cleanup
 
-Implemented in this PR.
+Implemented. Operator-side cleanup is also complete: stale local clones
+(`~/symphony`, `Symphony-Ryo-Lab`) and the retired reconcile timer have been
+removed; only `symphony-engine.service` runs on the Pi.
 
 1. Document `/home/ryo/src/symphony` as the single runtime checkout.
 2. Remove legacy Lab repository routes from the Pi runtime workflow.
@@ -88,25 +92,24 @@ Implemented.
 
 ### Phase 2.5: Project metadata convergence
 
-In progress / next implementation target.
+Implemented (#88).
 
 8. **LAB-396 / missing project auto-assignment**: when a candidate issue has
    GitHub repository evidence but no Linear Project, resolve the repository,
    find a unique matching Linear Project on the issue's team, assign it, and
-   defer dispatch until the next poll. This should work for every registered
-   project, not only `auto_template`.
+   defer dispatch until the next poll. Works for every registered project.
+   See [Repository and Linear Project Routing](project_routing.md).
 
 ### Phase 3: Systematic block reduction
 
-9. **Unified retry policy** (new issue): consolidate scattered
-   retry/backoff logic (stalled worker, PR lookup, handoff) into one
-   policy: max N attempts, exponential backoff, and a reasoned block when
-   the cap is reached.
+9. **Unified retry policy (LAB-391)**: implemented (#83). Scattered
+   retry/backoff logic is consolidated: bounded attempts, exponential
+   backoff, and a reasoned Linear block comment when the cap is reached.
 10. **Stall detection** (new issue): detect running issues with no progress
    events for X minutes and post a status comment to Linear, so stalls are
    never silent.
-11. **Block comment template** (small): every block comment includes the
-   reason, attempt count, and the concrete action a human should take.
+11. **Done sync throttling** (new issue): gate merged-PR Done sync evidence
+   checks behind an interval instead of running them every poll cycle.
 
 ### Phase 4: Maintainability (after automation stabilizes)
 
@@ -127,6 +130,7 @@ In progress / next implementation target.
 
 ## Recommended Order
 
-Phase 1 (done) -> LAB-387 -> Done sync throttling -> LAB-396 ->
-Phase 3 -> LAB-389. New issues in Phases 2-3 should be filed in Linear so
-Symphony itself can implement them.
+Phase 1 (done) -> Phase 2 (done) -> LAB-396 (done) -> LAB-391 retry policy
+(done) -> GitHub intake (PR #90) -> stall detection -> Done sync throttling ->
+LAB-389. New issues should be filed in Linear so Symphony itself can
+implement them.
