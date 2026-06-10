@@ -85,6 +85,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule FakeGitHubPrLookupAnyMergedLinkedPr do
+    def lookup_merged_linked_pull_request("octo/repo", [url | _]) do
+      {:ok,
+       %{
+         "number" => 200,
+         "url" => url,
+         "headRefName" => "lab-done-sync",
+         "state" => "MERGED",
+         "mergedAt" => "2026-06-09T01:42:42Z"
+       }}
+    end
+
+    def lookup_merged_issue_pull_request(_repo, _issue_identifier, _issue_url, _branch_name), do: {:ok, nil}
+  end
+
   defmodule FakeGitHubIssueCloser do
     def close_if_open(repo, issue_url, comment) do
       case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
@@ -357,6 +372,58 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       case Application.get_env(:symphony_elixir, :tracker_state_update_recipient) do
         recipient when is_pid(recipient) ->
           send(recipient, {:tracker_state_update_called, issue_id, state_name})
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
+  end
+
+  defmodule FakeTrackerDoneSyncUpdateError do
+    alias SymphonyElixir.Linear.Issue
+
+    def fetch_issues_by_states(_state_names) do
+      attachment_url =
+        Application.get_env(
+          :symphony_elixir,
+          :done_sync_attachment_url,
+          "https://github.com/octo/repo/pull/200"
+        )
+
+      {:ok,
+       [
+         %Issue{
+           id: "issue-done-sync-update-error",
+           identifier: "MT-DONE-SYNC-ERROR",
+           title: "Merged issue update failure",
+           state: "In Progress",
+           project_name: "repo",
+           description: "Repo: https://github.com/octo/repo",
+           attachment_urls: [attachment_url]
+         }
+       ]}
+    end
+
+    def fetch_candidate_issues, do: {:ok, []}
+
+    def update_issue_state(issue_id, state_name) do
+      case Application.get_env(:symphony_elixir, :tracker_state_update_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:tracker_state_update_called, issue_id, state_name})
+
+        _ ->
+          :ok
+      end
+
+      {:error, :done_update_failed}
+    end
+
+    def create_comment(issue_id, body) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:tracker_comment_called, issue_id, body})
 
         _ ->
           :ok
@@ -1385,6 +1452,120 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert MapSet.member?(state.completed, "issue-body-linked-merged")
   end
 
+  test "Done sync failures use retry policy cap and reset when PR evidence changes" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      poll_interval_ms: 50,
+      retry_max_done_sync_attempts: 2
+    )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_attachment_url = Application.get_env(:symphony_elixir, :done_sync_attachment_url)
+
+    previous_tracker_state_update_recipient =
+      Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
+
+    previous_tracker_comment_recipient =
+      Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup),
+        do: Application.delete_env(:symphony_elixir, :github_pr_lookup),
+        else: Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+
+      if is_nil(previous_tracker_module),
+        do: Application.delete_env(:symphony_elixir, :tracker_module),
+        else: Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+
+      if is_nil(previous_attachment_url),
+        do: Application.delete_env(:symphony_elixir, :done_sync_attachment_url),
+        else: Application.put_env(:symphony_elixir, :done_sync_attachment_url, previous_attachment_url)
+
+      if is_nil(previous_tracker_state_update_recipient),
+        do: Application.delete_env(:symphony_elixir, :tracker_state_update_recipient),
+        else:
+          Application.put_env(
+            :symphony_elixir,
+            :tracker_state_update_recipient,
+            previous_tracker_state_update_recipient
+          )
+
+      if is_nil(previous_tracker_comment_recipient),
+        do: Application.delete_env(:symphony_elixir, :tracker_comment_recipient),
+        else:
+          Application.put_env(
+            :symphony_elixir,
+            :tracker_comment_recipient,
+            previous_tracker_comment_recipient
+          )
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupAnyMergedLinkedPr)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerDoneSyncUpdateError)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :DoneSyncRetryPolicyOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    issue_id = "issue-done-sync-update-error"
+
+    send(pid, :run_poll_cycle)
+
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        get_in(state.retry_attempts, [issue_id, :attempt]) == 1
+      end)
+
+    assert %{policy_context: :done_sync, attempt: 1} = state.retry_attempts[issue_id]
+
+    Application.put_env(
+      :symphony_elixir,
+      :done_sync_attachment_url,
+      "https://github.com/octo/repo/pull/201"
+    )
+
+    send(pid, :run_poll_cycle)
+
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        get_in(state.retry_attempts, [issue_id, :attempt]) == 1
+      end)
+
+    assert %{policy_context: :done_sync, attempt: 1, error: error} = state.retry_attempts[issue_id]
+    assert error =~ "failed to move Linear issue to Done"
+
+    send(pid, :run_poll_cycle)
+
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        get_in(state.retry_attempts, [issue_id, :attempt]) == 2
+      end)
+
+    assert %{policy_context: :done_sync, attempt: 2} = state.retry_attempts[issue_id]
+
+    send(pid, :run_poll_cycle)
+
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        error = get_in(state.blocked, [issue_id, :error])
+        is_binary(error) and error =~ "merged PR Done sync retry limit reached (2)"
+      end)
+
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert %{policy_terminal_context: :done_sync, error: error} = state.blocked[issue_id]
+    assert error =~ "failed to move Linear issue to Done"
+    assert_receive {:tracker_comment_called, ^issue_id, comment}, 500
+    assert comment =~ "merged PR Done sync retry limit reached (2)"
+  end
+
   test "orchestrator restarts stalled workers with retry backoff" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -1794,7 +1975,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator blocks normal worker exits when branch has no discoverable PR" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      retry_max_handoff_pr_discovery_attempts: 2
+    )
 
     previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
     previous_publisher = Application.get_env(:symphony_elixir, :github_pr_publisher)
@@ -1868,17 +2052,18 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     state =
       wait_for_orchestrator_state(pid, fn state ->
-        get_in(state.blocked, [issue_id, :error]) ==
-          "no GitHub PR found for branch feature/no-pr or linked PR attachments; agent-owned PR is required before In Review handoff"
+        error = get_in(state.blocked, [issue_id, :error])
+        is_binary(error) and error =~ "handoff PR discovery retry limit reached"
       end)
 
     refute MapSet.member?(state.completed, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
 
-    assert %{
-             identifier: "MT-NO-PR",
-             error: "no GitHub PR found for branch feature/no-pr or linked PR attachments; agent-owned PR is required before In Review handoff"
-           } = state.blocked[issue_id]
+    assert %{identifier: "MT-NO-PR", error: error} = state.blocked[issue_id]
+    assert error =~ "handoff PR discovery retry limit reached (2)"
+
+    assert error =~
+             "no GitHub PR found for branch feature/no-pr or linked PR attachments; agent-owned PR is required before In Review handoff"
   end
 
   test "orchestrator blocks unexpected PR lookup results without refreshing issue attachments" do
@@ -2365,6 +2550,65 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              issue: %Issue{state: "Rework"},
              error: "issue moved to In Review without discoverable GitHub PR for branch feature/blocked-in-review-no-pr or linked PR attachments; agent-owned PR is required before handoff"
            } = state.blocked[issue_id]
+  end
+
+  test "blocked review handoff reconciliation resets on new evidence and stops at configured cap" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      retry_max_blocked_review_handoff_attempts: 2
+    )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupNone)
+
+    issue_id = "issue-blocked-review-policy"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-BLOCKED-REVIEW-POLICY",
+      branch_name: "feature/blocked-review-policy-a",
+      state: "In Progress"
+    }
+
+    blocked_entry = %{
+      issue_id: issue_id,
+      identifier: issue.identifier,
+      issue: issue,
+      workspace_path: "/tmp/mt-blocked-review-policy",
+      session_id: "thread-blocked-review-policy",
+      error: "no GitHub PR found for branch feature/blocked-review-policy-a or linked PR attachments; agent-owned PR is required before In Review handoff",
+      blocked_at: DateTime.utc_now(),
+      last_codex_message: nil,
+      last_codex_event: nil,
+      last_codex_timestamp: nil
+    }
+
+    state =
+      %Orchestrator.State{blocked: %{issue_id => blocked_entry}, claimed: MapSet.new([issue_id])}
+      |> then(&Orchestrator.reconcile_blocked_issue_states_for_test([issue], &1))
+
+    assert get_in(state.blocked, [issue_id, :policy_attempts, :blocked_review_handoff, :attempts]) == 1
+
+    refreshed_issue = %{issue | branch_name: "feature/blocked-review-policy-b"}
+
+    state = Orchestrator.reconcile_blocked_issue_states_for_test([refreshed_issue], state)
+    assert get_in(state.blocked, [issue_id, :policy_attempts, :blocked_review_handoff, :attempts]) == 1
+
+    state = Orchestrator.reconcile_blocked_issue_states_for_test([refreshed_issue], state)
+    assert get_in(state.blocked, [issue_id, :policy_attempts, :blocked_review_handoff, :attempts]) == 2
+
+    state = Orchestrator.reconcile_blocked_issue_states_for_test([refreshed_issue], state)
+    assert %{policy_terminal_context: :blocked_review_handoff, error: error} = state.blocked[issue_id]
+    assert error =~ "blocked review handoff retry limit reached (2)"
   end
 
   test "orchestrator does not duplicate blocked review guard while review state handoff is pending" do
@@ -3277,7 +3521,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator blocks review handoff when reviewer does not approve the PR" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      retry_max_review_handoff_attempts: 1
+    )
 
     previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
     previous_review_runner = Application.get_env(:symphony_elixir, :review_runner)
@@ -3386,10 +3633,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute MapSet.member?(state.completed, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
 
-    assert %{
-             identifier: "MT-REVIEW-BLOCKED",
-             error: "review loop did not approve PR before In Review handoff: :review_blocked"
-           } = state.blocked[issue_id]
+    assert %{identifier: "MT-REVIEW-BLOCKED", error: error} = state.blocked[issue_id]
+    assert error =~ "review handoff retry limit reached (1)"
+    assert error =~ "review loop did not approve PR before In Review handoff: :review_blocked"
   end
 
   test "orchestrator returns premature In Review issues to Rework when reviewer does not approve" do
@@ -3514,8 +3760,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert %{
              identifier: "MT-PREMATURE-REVIEW",
              issue: %Issue{state: "Rework"},
-             error: "review loop did not approve PR before In Review handoff: :review_blocked"
+             error: error
            } = state.blocked[issue_id]
+
+    assert error =~ "review handoff retry limit reached (3)"
+    assert error =~ "review loop did not approve PR before In Review handoff: :review_blocked"
   end
 
   test "orchestrator comments before accepting premature In Review issues when reviewer approves" do
@@ -4025,22 +4274,16 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     state =
       wait_for_orchestrator_state(pid, fn state ->
-        match?(
-          %{
-            identifier: "MT-PR-ERROR",
-            error: "GitHub PR lookup failed for branch feature/pr-error: :missing_auth"
-          },
-          state.blocked[issue_id]
-        )
+        error = get_in(state.blocked, [issue_id, :error])
+        is_binary(error) and error =~ "handoff PR discovery retry limit reached"
       end)
 
     refute MapSet.member?(state.completed, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
 
-    assert %{
-             identifier: "MT-PR-ERROR",
-             error: "GitHub PR lookup failed for branch feature/pr-error: :missing_auth"
-           } = state.blocked[issue_id]
+    assert %{identifier: "MT-PR-ERROR", error: error} = state.blocked[issue_id]
+    assert error =~ "handoff PR discovery retry limit reached (5)"
+    assert error =~ "GitHub PR lookup failed for branch feature/pr-error: :missing_auth"
   end
 
   test "orchestrator schedules max-turn active issue exits for continuation" do

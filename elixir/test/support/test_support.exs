@@ -120,6 +120,7 @@ defmodule SymphonyElixir.TestSupport do
           max_concurrent_agents: 10,
           max_turns: 20,
           max_continuations: 3,
+          max_retry_attempts: 5,
           max_retry_backoff_ms: 300_000,
           same_review_fingerprint_limit: 4,
           same_test_failure_fingerprint_limit: 4,
@@ -143,6 +144,15 @@ defmodule SymphonyElixir.TestSupport do
           server_port: nil,
           server_host: nil,
           review_blocked_comment_template: nil,
+          retry_max_attempts: nil,
+          retry_max_continuations: nil,
+          retry_max_handoff_pr_discovery_attempts: nil,
+          retry_max_blocked_review_handoff_attempts: nil,
+          retry_max_review_handoff_attempts: nil,
+          retry_max_done_sync_attempts: nil,
+          retry_base_backoff_ms: 10_000,
+          retry_max_backoff_ms: nil,
+          retry_continuation_delay_ms: 1_000,
           prompt: @workflow_prompt
         ],
         overrides
@@ -169,6 +179,7 @@ defmodule SymphonyElixir.TestSupport do
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
     max_continuations = Keyword.get(config, :max_continuations)
+    max_retry_attempts = Keyword.get(config, :max_retry_attempts)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     same_review_fingerprint_limit = Keyword.get(config, :same_review_fingerprint_limit)
     same_test_failure_fingerprint_limit = Keyword.get(config, :same_test_failure_fingerprint_limit)
@@ -192,6 +203,15 @@ defmodule SymphonyElixir.TestSupport do
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
     review_blocked_comment_template = Keyword.get(config, :review_blocked_comment_template)
+    retry_max_attempts = Keyword.get(config, :retry_max_attempts)
+    retry_max_continuations = Keyword.get(config, :retry_max_continuations)
+    retry_max_handoff_pr_discovery_attempts = Keyword.get(config, :retry_max_handoff_pr_discovery_attempts)
+    retry_max_blocked_review_handoff_attempts = Keyword.get(config, :retry_max_blocked_review_handoff_attempts)
+    retry_max_review_handoff_attempts = Keyword.get(config, :retry_max_review_handoff_attempts)
+    retry_max_done_sync_attempts = Keyword.get(config, :retry_max_done_sync_attempts)
+    retry_base_backoff_ms = Keyword.get(config, :retry_base_backoff_ms)
+    retry_max_backoff_ms = Keyword.get(config, :retry_max_backoff_ms)
+    retry_continuation_delay_ms = Keyword.get(config, :retry_continuation_delay_ms)
     prompt = Keyword.get(config, :prompt)
 
     sections =
@@ -219,10 +239,22 @@ defmodule SymphonyElixir.TestSupport do
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_continuations: #{yaml_value(max_continuations)}",
+        "  max_retry_attempts: #{yaml_value(max_retry_attempts)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  same_review_fingerprint_limit: #{yaml_value(same_review_fingerprint_limit)}",
         "  same_test_failure_fingerprint_limit: #{yaml_value(same_test_failure_fingerprint_limit)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
+        retry_yaml(
+          retry_max_attempts,
+          retry_max_continuations,
+          retry_max_handoff_pr_discovery_attempts,
+          retry_max_blocked_review_handoff_attempts,
+          retry_max_review_handoff_attempts,
+          retry_max_done_sync_attempts,
+          retry_base_backoff_ms,
+          retry_max_backoff_ms,
+          retry_continuation_delay_ms
+        ),
         "codex:",
         "  command: #{yaml_value(codex_command)}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
@@ -242,6 +274,32 @@ defmodule SymphonyElixir.TestSupport do
       |> Enum.reject(&(&1 in [nil, ""]))
 
     Enum.join(sections, "\n") <> "\n"
+  end
+
+  defp retry_yaml(
+         max_attempts,
+         max_continuations,
+         max_handoff_pr_discovery_attempts,
+         max_blocked_review_handoff_attempts,
+         max_review_handoff_attempts,
+         max_done_sync_attempts,
+         base_backoff_ms,
+         max_backoff_ms,
+         continuation_delay_ms
+       ) do
+    [
+      "retry:",
+      "  max_attempts: #{yaml_value(max_attempts)}",
+      "  max_continuations: #{yaml_value(max_continuations)}",
+      "  max_handoff_pr_discovery_attempts: #{yaml_value(max_handoff_pr_discovery_attempts)}",
+      "  max_blocked_review_handoff_attempts: #{yaml_value(max_blocked_review_handoff_attempts)}",
+      "  max_review_handoff_attempts: #{yaml_value(max_review_handoff_attempts)}",
+      "  max_done_sync_attempts: #{yaml_value(max_done_sync_attempts)}",
+      "  base_backoff_ms: #{yaml_value(base_backoff_ms)}",
+      "  max_backoff_ms: #{yaml_value(max_backoff_ms)}",
+      "  continuation_delay_ms: #{yaml_value(continuation_delay_ms)}"
+    ]
+    |> Enum.join("\n")
   end
 
   defp yaml_value(value) when is_binary(value) do

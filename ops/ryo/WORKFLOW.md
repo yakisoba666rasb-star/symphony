@@ -85,7 +85,14 @@ hooks:
 agent:
   max_concurrent_agents: 3
   max_turns: 20
+  max_retry_attempts: 5
   max_retry_backoff_ms: 300000
+retry:
+  max_attempts: 5
+  max_continuations: 3
+  base_backoff_ms: 10000
+  max_backoff_ms: 300000
+  continuation_delay_ms: 1000
 codex:
   command: codex --config 'model="gpt-5.5"' --sandbox danger-full-access app-server
   approval_policy: never
