@@ -348,20 +348,96 @@ defmodule SymphonyElixir.Orchestrator do
          workspace_path,
          error
        ) do
-    Process.sleep(@handoff_pr_lookup_refresh_delay_ms)
-    refreshed_entry = refresh_running_entry_issue_for_handoff_retry(running_entry)
+    policy = Config.retry_policy(:handoff_pr_discovery)
 
-    case lookup_pr_for_handoff(workspace_path, refreshed_entry, branch_name) do
-      {:ok, pr} when is_map(pr) ->
-        Logger.info("PR discovered after refreshing Linear issue before handoff block: issue_id=#{issue_id} issue_identifier=#{Map.get(refreshed_entry, :identifier)} session_id=#{session_id}")
+    case retry_handoff_pr_lookup_after_issue_refresh(running_entry, branch_name, workspace_path, policy) do
+      {:ok, pr, refreshed_entry, attempt} ->
+        Logger.info(
+          "PR discovered after refreshing Linear issue before handoff block: " <>
+            "issue_id=#{issue_id} issue_identifier=#{Map.get(refreshed_entry, :identifier)} " <>
+            "session_id=#{session_id} attempt=#{attempt}"
+        )
 
         move_issue_to_review_after_pr_discovery(state, issue_id, refreshed_entry, session_id, pr)
 
-      _retry_miss ->
-        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{Map.get(refreshed_entry, :identifier)} session_id=#{session_id}: #{error}")
+      {:error, refreshed_entry, attempt, retry_error} ->
+        terminal_error = RetryPolicy.terminal_reason(policy, attempt, retry_error || error)
 
-        block_issue_from_entry(state, issue_id, refreshed_entry, error)
+        Logger.warning(
+          "Agent task blocked for issue_id=#{issue_id} " <>
+            "issue_identifier=#{Map.get(refreshed_entry, :identifier)} session_id=#{session_id}: " <>
+            terminal_error
+        )
+
+        block_issue_from_entry(state, issue_id, refreshed_entry, terminal_error)
     end
+  end
+
+  defp retry_handoff_pr_lookup_after_issue_refresh(running_entry, branch_name, workspace_path, policy) do
+    do_retry_handoff_pr_lookup_after_issue_refresh(
+      running_entry,
+      branch_name,
+      workspace_path,
+      policy,
+      RetryPolicy.reset_on_progress(%{}, handoff_pr_evidence(running_entry)),
+      nil
+    )
+  end
+
+  defp do_retry_handoff_pr_lookup_after_issue_refresh(
+         running_entry,
+         branch_name,
+         workspace_path,
+         policy,
+         attempt_state,
+         last_error
+       ) do
+    next_attempt = Map.get(attempt_state, :attempts, 0) + 1
+
+    if RetryPolicy.allow_attempt?(next_attempt, policy) do
+      if next_attempt == 1 do
+        Process.sleep(@handoff_pr_lookup_refresh_delay_ms)
+      end
+
+      refreshed_entry = refresh_running_entry_issue_for_handoff_retry(running_entry)
+
+      case lookup_pr_for_handoff(workspace_path, refreshed_entry, branch_name) do
+        {:ok, pr} when is_map(pr) ->
+          {:ok, pr, refreshed_entry, next_attempt}
+
+        miss ->
+          retry_error = handoff_pr_lookup_retry_error(branch_name, miss, last_error)
+
+          next_state =
+            attempt_state
+            |> Map.put(:attempts, next_attempt)
+            |> RetryPolicy.reset_on_progress(handoff_pr_evidence(refreshed_entry))
+
+          do_retry_handoff_pr_lookup_after_issue_refresh(
+            refreshed_entry,
+            branch_name,
+            workspace_path,
+            policy,
+            next_state,
+            retry_error
+          )
+      end
+    else
+      {running_entry, Map.get(attempt_state, :attempts, 0), last_error}
+      |> then(fn {entry, attempts, retry_error} -> {:error, entry, attempts + 1, retry_error} end)
+    end
+  end
+
+  defp handoff_pr_lookup_retry_error(branch_name, {:ok, nil}, _last_error) do
+    "no GitHub PR found for branch #{branch_name} or linked PR attachments; agent-owned PR is required before In Review handoff"
+  end
+
+  defp handoff_pr_lookup_retry_error(branch_name, {:error, reason}, _last_error) do
+    "GitHub PR lookup failed for branch #{branch_name}: #{inspect(reason)}"
+  end
+
+  defp handoff_pr_lookup_retry_error(branch_name, other, _last_error) do
+    "GitHub PR lookup returned unexpected result for branch #{branch_name}: #{inspect(other)}"
   end
 
   defp refresh_running_entry_issue_for_handoff_retry(running_entry) when is_map(running_entry) do
@@ -585,7 +661,9 @@ defmodule SymphonyElixir.Orchestrator do
         |> maybe_release_completed_review_handoff_claim(issue_id, metadata)
 
       {:error, reason} ->
-        error = "review loop did not approve PR before In Review handoff: #{inspect(reason)}"
+        error =
+          review_handoff_terminal_error("review loop did not approve PR before In Review handoff: #{inspect(reason)}")
+
         Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
         block_issue_from_entry(state, issue_id, running_entry, error)
     end
@@ -606,10 +684,18 @@ defmodule SymphonyElixir.Orchestrator do
         move_issue_to_review_after_approval(state, issue.id, running_entry, session_id, tracker)
 
       {:error, reason} ->
-        error = "review loop did not approve PR before In Review handoff: #{inspect(reason)}"
+        error =
+          review_handoff_terminal_error("review loop did not approve PR before In Review handoff: #{inspect(reason)}")
+
         Logger.warning("Premature review handoff blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
         stop_and_block_review_handoff_issue(state, issue, running_entry, error, tracker)
     end
+  end
+
+  defp review_handoff_terminal_error(error) do
+    policy = Config.retry_policy(:review_handoff)
+    attempt = max(policy.max_attempts, 1)
+    RetryPolicy.terminal_reason(policy, attempt, error)
   end
 
   defp maybe_release_completed_review_handoff_claim(%State{} = state, issue_id, %{
@@ -993,10 +1079,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_sync_merged_linked_pr_issue_to_done(%Issue{} = issue, %State{} = state) do
-    if issue_has_done_sync_evidence?(issue) do
-      do_maybe_sync_merged_linked_pr_issue_to_done(issue, state)
-    else
-      state
+    cond do
+      done_sync_terminal_blocked?(state, issue.id) ->
+        state
+
+      issue_has_done_sync_evidence?(issue) ->
+        do_maybe_sync_merged_linked_pr_issue_to_done(issue, state)
+
+      true ->
+        state
     end
   end
 
@@ -1010,20 +1101,18 @@ defmodule SymphonyElixir.Orchestrator do
         maybe_move_merged_linked_pr_issue_to_done(issue, repo, attachment_urls, state)
 
       {:ok, other} ->
-        Logger.warning(
-          "Skipping merged linked PR Done sync for #{issue_context(issue)}; " <>
-            "repository resolver returned invalid result=#{inspect(other)}"
+        record_done_sync_failure(
+          state,
+          issue,
+          "repository resolver returned invalid result=#{inspect(other)}"
         )
-
-        state
 
       {:error, reason} ->
-        Logger.warning(
-          "Skipping merged linked PR Done sync for #{issue_context(issue)}; " <>
-            "failed to resolve repository from PR attachment metadata: #{inspect(reason)}"
+        record_done_sync_failure(
+          state,
+          issue,
+          "failed to resolve repository from PR attachment metadata: #{inspect(reason)}"
         )
-
-        state
     end
   end
 
@@ -1033,23 +1122,21 @@ defmodule SymphonyElixir.Orchestrator do
         move_merged_linked_pr_issue_to_done(issue, repo, pr, state)
 
       {:ok, nil} ->
-        state
+        clear_done_sync_attempt(state, issue.id)
 
       {:error, reason} ->
-        Logger.warning(
-          "Skipping merged linked PR Done sync for #{issue_context(issue)} repo=#{repo}; " <>
-            "failed to inspect linked PR attachment: #{inspect(reason)}"
+        record_done_sync_failure(
+          state,
+          issue,
+          "repo=#{repo}; failed to inspect linked PR attachment: #{inspect(reason)}"
         )
-
-        state
 
       other ->
-        Logger.warning(
-          "Skipping merged linked PR Done sync for #{issue_context(issue)} repo=#{repo}; " <>
-            "unexpected PR lookup result=#{inspect(other)}"
+        record_done_sync_failure(
+          state,
+          issue,
+          "repo=#{repo}; unexpected PR lookup result=#{inspect(other)}"
         )
-
-        state
     end
   end
 
@@ -1071,21 +1158,100 @@ defmodule SymphonyElixir.Orchestrator do
         |> complete_issue(issue.id)
 
       {:error, reason} ->
-        Logger.warning(
-          "Merged linked PR detected but failed to move Linear issue to #{done_state}: " <>
-            "#{issue_context(issue)} repo=#{repo} pr=#{pr_url(pr)} reason=#{inspect(reason)}"
+        record_done_sync_failure(
+          state,
+          issue,
+          "merged PR detected but failed to move Linear issue to #{done_state}: " <>
+            "repo=#{repo} pr=#{pr_url(pr)} reason=#{inspect(reason)}"
         )
-
-        state
 
       other ->
-        Logger.warning(
-          "Merged linked PR detected but Linear state update returned unexpected result: " <>
-            "#{issue_context(issue)} repo=#{repo} pr=#{pr_url(pr)} result=#{inspect(other)}"
+        record_done_sync_failure(
+          state,
+          issue,
+          "merged PR detected but Linear state update returned unexpected result: " <>
+            "repo=#{repo} pr=#{pr_url(pr)} result=#{inspect(other)}"
         )
+    end
+  end
 
+  defp record_done_sync_failure(%State{} = state, %Issue{} = issue, reason) do
+    policy = Config.retry_policy(:done_sync)
+    previous_attempt = Map.get(state.retry_attempts, issue.id, %{})
+
+    attempt_state =
+      previous_attempt
+      |> RetryPolicy.reset_on_progress(done_sync_evidence(issue))
+
+    next_attempt = Map.get(attempt_state, :attempts, Map.get(attempt_state, :attempt, 0)) + 1
+    error = "Skipping merged linked PR Done sync for #{issue_context(issue)}; #{reason}"
+
+    if RetryPolicy.allow_attempt?(next_attempt, policy) do
+      Logger.warning("#{error} attempt=#{next_attempt}")
+
+      %{
+        state
+        | retry_attempts:
+            Map.put(state.retry_attempts, issue.id, %{
+              attempt: next_attempt,
+              attempts: next_attempt,
+              identifier: issue.identifier,
+              error: error,
+              policy_context: :done_sync,
+              evidence_fingerprint: Map.get(attempt_state, :evidence_fingerprint),
+              last_progress_at: Map.get(attempt_state, :last_progress_at)
+            })
+      }
+    else
+      terminal_error = RetryPolicy.terminal_reason(policy, next_attempt, error)
+
+      Logger.warning(
+        "Merged linked PR Done sync exhausted retries for #{issue_context(issue)} " <>
+          "attempt=#{next_attempt}: #{terminal_error}"
+      )
+
+      state
+      |> block_issue_from_entry(
+        issue.id,
+        %{
+          identifier: issue.identifier,
+          issue: issue,
+          workspace_path: nil,
+          worker_host: nil,
+          session_id: nil,
+          last_codex_message: nil,
+          last_codex_event: nil,
+          last_codex_timestamp: nil
+        },
+        terminal_error
+      )
+      |> put_blocked_policy_terminal_context(issue.id, :done_sync)
+    end
+  end
+
+  defp clear_done_sync_attempt(%State{} = state, issue_id) do
+    case Map.get(state.retry_attempts, issue_id) do
+      %{policy_context: :done_sync} ->
+        %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}
+
+      _other ->
         state
     end
+  end
+
+  defp done_sync_terminal_blocked?(%State{} = state, issue_id) do
+    state.blocked
+    |> Map.get(issue_id)
+    |> policy_terminal_context?(:done_sync)
+  end
+
+  defp put_blocked_policy_terminal_context(%State{} = state, issue_id, context) do
+    blocked =
+      Map.update(state.blocked, issue_id, %{policy_terminal_context: context}, fn entry ->
+        Map.put(entry, :policy_terminal_context, context)
+      end)
+
+    %{state | blocked: blocked}
   end
 
   defp issue_has_pull_request_attachment?(%Issue{} = issue) do
@@ -1097,6 +1263,33 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_has_done_sync_evidence?(%Issue{} = issue) do
     issue_has_pull_request_attachment?(issue) or present_string?(issue.branch_name)
   end
+
+  defp handoff_pr_evidence(running_entry) when is_map(running_entry) do
+    issue = Map.get(running_entry, :issue)
+
+    %{
+      branch_name: Map.get(running_entry, :branch_name) || issue_branch_name(issue),
+      attachment_urls: issue_attachment_urls(issue)
+    }
+  end
+
+  defp handoff_pr_evidence(_running_entry), do: %{}
+
+  defp blocked_review_handoff_evidence(entry) when is_map(entry) do
+    handoff_pr_evidence(entry)
+  end
+
+  defp blocked_review_handoff_evidence(_entry), do: %{}
+
+  defp done_sync_evidence(%Issue{} = issue) do
+    %{
+      branch_name: issue.branch_name,
+      attachment_urls: issue_attachment_urls(issue)
+    }
+  end
+
+  defp issue_branch_name(%Issue{branch_name: branch_name}), do: branch_name
+  defp issue_branch_name(_issue), do: nil
 
   defp github_pull_request_url?(url) when is_binary(url) do
     Regex.match?(~r{^https://github\.com/[^/]+/[^/]+/pull/\d+(?:[/?#].*)?$}i, String.trim(url))
@@ -1502,14 +1695,53 @@ defmodule SymphonyElixir.Orchestrator do
     with %{error: error} = blocked_entry <- Map.get(state.blocked, issue.id),
          false <- pending_review_handoff_for_issue?(state, issue.id),
          true <- review_handoff_pr_missing_error?(error),
+         false <- policy_terminal_context?(blocked_entry, :blocked_review_handoff),
          recovered_entry <- refresh_blocked_review_handoff_entry(blocked_entry, issue),
          {:ok, branch_name, workspace_path} <- branch_name_and_workspace(recovered_entry),
-         {:ok, pr} when is_map(pr) <- lookup_pr_for_handoff(workspace_path, recovered_entry, branch_name) do
-      Logger.info("Recovering blocked review handoff after PR discovery: #{issue_context(issue)} branch=#{branch_name} pr=#{pr_url(pr)}")
+         {:ok, attempt, attempt_state} <-
+           begin_policy_attempt(
+             blocked_entry,
+             :blocked_review_handoff,
+             blocked_review_handoff_evidence(recovered_entry)
+           ) do
+      case lookup_pr_for_handoff(workspace_path, recovered_entry, branch_name) do
+        {:ok, pr} when is_map(pr) ->
+          Logger.info("Recovering blocked review handoff after PR discovery: #{issue_context(issue)} branch=#{branch_name} pr=#{pr_url(pr)}")
 
-      {:ok, move_blocked_issue_to_review_after_pr_discovery(state, issue.id, recovered_entry, pr)}
+          {:ok, move_blocked_issue_to_review_after_pr_discovery(state, issue.id, recovered_entry, pr)}
+
+        miss ->
+          retry_error = blocked_review_handoff_lookup_error(issue, branch_name, miss)
+
+          {:ok,
+           record_blocked_policy_attempt(
+             state,
+             issue.id,
+             recovered_entry,
+             :blocked_review_handoff,
+             attempt,
+             attempt_state,
+             retry_error
+           )}
+      end
     else
-      _miss -> :miss
+      {:terminal, attempt, retry_error, attempt_state} ->
+        {:ok,
+         terminal_blocked_policy_attempt(
+           state,
+           issue.id,
+           Map.get(state.blocked, issue.id),
+           :blocked_review_handoff,
+           attempt,
+           attempt_state,
+           retry_error
+         )}
+
+      true ->
+        {:ok, state}
+
+      _miss ->
+        :miss
     end
   end
 
@@ -1517,6 +1749,7 @@ defmodule SymphonyElixir.Orchestrator do
     with %{error: error} = blocked_entry <- Map.get(state.blocked, issue.id),
          false <- pending_review_handoff_for_issue?(state, issue.id),
          true <- review_handoff_pr_missing_error?(error),
+         false <- policy_terminal_context?(blocked_entry, :blocked_review_handoff),
          guarded_entry <- refresh_blocked_review_handoff_entry(blocked_entry, issue) do
       {:ok, do_guard_blocked_review_handoff_issue(state, issue, guarded_entry)}
     else
@@ -1530,29 +1763,44 @@ defmodule SymphonyElixir.Orchestrator do
 
     case branch_name_and_workspace(blocked_entry) do
       {:ok, branch_name, workspace_path} ->
-        case lookup_pr_for_handoff(workspace_path, blocked_entry, branch_name) do
-          {:ok, pr} when is_map(pr) ->
-            Logger.info("Guarding blocked review handoff after PR discovery: #{issue_context(issue)} branch=#{branch_name} pr=#{pr_url(pr)}")
-            review_premature_handoff_pr(state, issue, blocked_entry, session_id, pr)
+        case begin_policy_attempt(
+               blocked_entry,
+               :blocked_review_handoff,
+               blocked_review_handoff_evidence(blocked_entry)
+             ) do
+          {:ok, attempt, attempt_state} ->
+            case lookup_pr_for_handoff(workspace_path, blocked_entry, branch_name) do
+              {:ok, pr} when is_map(pr) ->
+                Logger.info("Guarding blocked review handoff after PR discovery: #{issue_context(issue)} branch=#{branch_name} pr=#{pr_url(pr)}")
+                review_premature_handoff_pr(state, issue, blocked_entry, session_id, pr)
 
-          {:ok, nil} ->
-            error =
-              "issue moved to #{issue.state} without discoverable GitHub PR for branch #{branch_name} or linked PR attachments; agent-owned PR is required before handoff"
+              miss ->
+                error = blocked_review_handoff_lookup_error(issue, branch_name, miss)
 
-            Logger.warning("Blocked review handoff remains blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
-            stop_and_block_review_handoff_issue(state, issue, blocked_entry, error)
+                Logger.warning("Blocked review handoff remains blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
 
-          {:error, reason} ->
-            error = "issue moved to #{issue.state} but GitHub PR lookup failed for branch #{branch_name}: #{inspect(reason)}"
+                state
+                |> stop_and_block_review_handoff_issue(issue, blocked_entry, error)
+                |> record_blocked_policy_attempt(
+                  issue.id,
+                  blocked_entry,
+                  :blocked_review_handoff,
+                  attempt,
+                  attempt_state,
+                  error
+                )
+            end
 
-            Logger.warning("Blocked review handoff remains blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
-            stop_and_block_review_handoff_issue(state, issue, blocked_entry, error)
-
-          _other ->
-            error = "issue moved to #{issue.state} but GitHub PR lookup returned unexpected result for branch #{branch_name}"
-
-            Logger.warning("Blocked review handoff remains blocked for issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{session_id}: #{error}")
-            stop_and_block_review_handoff_issue(state, issue, blocked_entry, error)
+          {:terminal, attempt, retry_error, attempt_state} ->
+            terminal_blocked_policy_attempt(
+              state,
+              issue.id,
+              blocked_entry,
+              :blocked_review_handoff,
+              attempt,
+              attempt_state,
+              retry_error
+            )
         end
 
       :missing ->
@@ -1579,6 +1827,77 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp review_handoff_pr_missing_error?(_error), do: false
+
+  defp begin_policy_attempt(entry, context, evidence) do
+    policy = Config.retry_policy(context)
+
+    attempt_state =
+      entry
+      |> Map.get(:policy_attempts, %{})
+      |> Map.get(context, %{})
+      |> RetryPolicy.reset_on_progress(evidence)
+
+    next_attempt = Map.get(attempt_state, :attempts, 0) + 1
+    retry_error = Map.get(attempt_state, :last_error)
+
+    if RetryPolicy.allow_attempt?(next_attempt, policy) do
+      {:ok, next_attempt, attempt_state}
+    else
+      {:terminal, next_attempt, retry_error, attempt_state}
+    end
+  end
+
+  defp record_blocked_policy_attempt(%State{} = state, issue_id, entry, context, attempt, attempt_state, error) do
+    entry = Map.get(state.blocked, issue_id, entry)
+
+    updated_entry =
+      entry
+      |> Map.put(:error, error)
+      |> put_policy_attempt(context, Map.merge(attempt_state, %{attempts: attempt, last_error: error}))
+
+    %{state | blocked: Map.put(state.blocked, issue_id, updated_entry)}
+  end
+
+  defp terminal_blocked_policy_attempt(%State{} = state, issue_id, entry, context, attempt, attempt_state, error) do
+    entry = entry || %{}
+    policy = Config.retry_policy(context)
+    terminal_error = RetryPolicy.terminal_reason(policy, attempt, error)
+
+    updated_entry =
+      entry
+      |> Map.put(:error, terminal_error)
+      |> Map.put(:policy_terminal_context, context)
+      |> put_policy_attempt(context, Map.merge(attempt_state, %{attempts: attempt, last_error: terminal_error}))
+
+    %{state | blocked: Map.put(state.blocked, issue_id, updated_entry)}
+  end
+
+  defp put_policy_attempt(entry, context, attempt_state) do
+    policy_attempts =
+      entry
+      |> Map.get(:policy_attempts, %{})
+      |> Map.put(context, attempt_state)
+
+    Map.put(entry, :policy_attempts, policy_attempts)
+  end
+
+  defp policy_terminal_context?(entry, context) when is_map(entry) do
+    Map.get(entry, :policy_terminal_context) == context
+  end
+
+  defp policy_terminal_context?(_entry, _context), do: false
+
+  defp blocked_review_handoff_lookup_error(%Issue{} = issue, branch_name, {:ok, nil}) do
+    "issue moved to #{issue.state} without discoverable GitHub PR for branch #{branch_name} or linked PR attachments; agent-owned PR is required before handoff"
+  end
+
+  defp blocked_review_handoff_lookup_error(%Issue{} = issue, branch_name, {:error, reason}) do
+    "issue moved to #{issue.state} but GitHub PR lookup failed for branch #{branch_name}: #{inspect(reason)}"
+  end
+
+  defp blocked_review_handoff_lookup_error(%Issue{} = issue, branch_name, _other) do
+    "issue moved to #{issue.state} but GitHub PR lookup returned unexpected result for branch #{branch_name}"
+  end
 
   defp refresh_blocked_review_handoff_entry(blocked_entry, %Issue{} = refreshed_issue) do
     Map.update(blocked_entry, :issue, refreshed_issue, fn
