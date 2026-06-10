@@ -49,7 +49,7 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @github_issue_attachment_query """
   query SymphonyGitHubIssueAttachment($url: String!, $first: Int!) {
-    attachmentsForURL(url: $url, first: $first, includeArchived: false) {
+    attachmentsForURL(url: $url, first: $first, includeArchived: true) {
       nodes {
         id
         url
@@ -57,6 +57,19 @@ defmodule SymphonyElixir.Linear.Adapter do
           id
           identifier
         }
+      }
+    }
+  }
+  """
+
+  @github_issue_description_query """
+  query SymphonyGitHubIssueByDescription($url: String!, $first: Int!) {
+    issues(filter: {description: {contains: $url}}, first: $first, includeArchived: true) {
+      nodes {
+        id
+        identifier
+        url
+        description
       }
     }
   }
@@ -198,6 +211,17 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
+  @spec find_github_issue_by_description(String.t()) :: {:ok, map() | nil} | {:error, term()}
+  def find_github_issue_by_description(url) when is_binary(url) do
+    with {:ok, response} <- client_module().graphql(@github_issue_description_query, %{url: url, first: 10}),
+         issues when is_list(issues) <- get_in(response, ["data", "issues", "nodes"]) do
+      unique_github_issue_description_match(issues, url)
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :github_issue_description_lookup_failed}
+    end
+  end
+
   @spec resolve_github_intake_target(String.t(), String.t(), [String.t()]) ::
           {:ok, map()} | {:error, term()}
   def resolve_github_intake_target(team_key, state_name, project_aliases)
@@ -266,6 +290,36 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   defp attachment_issue_id?(%{"issue" => %{"id" => issue_id}}) when is_binary(issue_id), do: true
   defp attachment_issue_id?(_attachment), do: false
+
+  defp issue_id?(%{"id" => issue_id}) when is_binary(issue_id), do: true
+  defp issue_id?(_issue), do: false
+
+  defp unique_github_issue_description_match(issues, url) when is_list(issues) and is_binary(url) do
+    matches =
+      Enum.filter(issues, fn issue ->
+        issue_id?(issue) and github_issue_description_matches?(issue, url)
+      end)
+
+    case matches do
+      [] -> {:ok, nil}
+      [issue] -> {:ok, issue}
+      issues -> {:error, {:ambiguous_github_issue_description_match, Enum.map(issues, &issue_label/1)}}
+    end
+  end
+
+  defp github_issue_description_matches?(%{"description" => description}, url) when is_binary(description) do
+    Regex.match?(~r/(^|[^A-Za-z0-9])#{Regex.escape(url)}([^A-Za-z0-9]|$)/i, description)
+  end
+
+  defp github_issue_description_matches?(_issue, _url), do: false
+
+  defp issue_label(issue) when is_map(issue) do
+    %{
+      id: project_value(issue, "id"),
+      identifier: project_value(issue, "identifier"),
+      url: project_value(issue, "url")
+    }
+  end
 
   defp extract_single_team(response) do
     case get_in(response, ["data", "teams", "nodes"]) do

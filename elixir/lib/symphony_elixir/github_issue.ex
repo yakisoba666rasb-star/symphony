@@ -78,13 +78,42 @@ defmodule SymphonyElixir.GitHubIssue do
   end
 
   defp sync_repo_open_issues(repo, settings, linear_adapter, gh_bin, deps) do
-    with {:ok, issues} <- list_open_issues(gh_bin, repo, settings.github_intake.limit, deps) do
-      Enum.reduce(issues, {:ok, empty_sync_result()}, &sync_single_open_issue_result(&1, &2, repo, settings, linear_adapter))
+    with {:ok, issues} <- list_open_issues(gh_bin, repo, settings.github_intake.limit, deps),
+         :ok <- warn_when_issue_limit_reached(repo, issues, settings.github_intake.limit) do
+      sync_listed_repo_issues(repo, issues, settings, linear_adapter)
     end
   end
 
-  defp sync_single_open_issue_result(issue, {:ok, acc}, repo, settings, linear_adapter) do
-    case sync_single_open_issue(repo, issue, settings, linear_adapter) do
+  defp sync_listed_repo_issues(_repo, [], _settings, _linear_adapter), do: {:ok, empty_sync_result()}
+
+  defp sync_listed_repo_issues(repo, issues, settings, linear_adapter) do
+    case linear_adapter.resolve_github_intake_target(
+           settings.tracker.team_key,
+           settings.github_intake.state,
+           project_aliases(settings, repo)
+         ) do
+      {:ok, target} ->
+        Enum.reduce(issues, {:ok, empty_sync_result()}, &sync_single_open_issue_result(&1, &2, repo, target, linear_adapter))
+
+      {:error, :no_project_match} ->
+        Logger.debug("Skipping GitHub issue intake; no matching Linear project for repo=#{repo}")
+        {:ok, %{empty_sync_result() | skipped: length(issues)}}
+
+      {:error, {:ambiguous_project_match, projects}} ->
+        Logger.warning(
+          "Skipping GitHub issue intake; multiple matching Linear projects for repo=#{repo} " <>
+            "projects=#{inspect(projects)}"
+        )
+
+        {:ok, %{empty_sync_result() | skipped: length(issues)}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp sync_single_open_issue_result(issue, {:ok, acc}, repo, target, linear_adapter) do
+    case sync_single_open_issue(repo, issue, target, linear_adapter) do
       {:ok, :created} ->
         {:ok, %{acc | created: acc.created + 1}}
 
@@ -101,14 +130,9 @@ defmodule SymphonyElixir.GitHubIssue do
     end
   end
 
-  defp sync_single_open_issue(repo, %{url: url} = issue, settings, linear_adapter) when is_binary(url) do
+  defp sync_single_open_issue(repo, %{url: url} = issue, target, linear_adapter) when is_binary(url) do
     with {:ok, false} <- linear_adapter.github_issue_synced?(url),
-         {:ok, target} <-
-           linear_adapter.resolve_github_intake_target(
-             settings.tracker.team_key,
-             settings.github_intake.state,
-             project_aliases(settings, repo)
-           ),
+         {:ok, nil} <- linear_adapter.find_github_issue_by_description(url),
          {:ok, linear_issue} <-
            linear_adapter.create_github_backlog_issue(%{
              team_id: target.team_id,
@@ -129,17 +153,11 @@ defmodule SymphonyElixir.GitHubIssue do
       {:ok, true} ->
         {:ok, :skipped}
 
-      {:error, :no_project_match} ->
-        Logger.debug("Skipping GitHub issue intake; no matching Linear project for repo=#{repo} url=#{url}")
-        {:ok, :skipped}
+      {:ok, %{} = existing_issue} ->
+        repair_github_issue_attachment(repo, issue, existing_issue, linear_adapter)
 
-      {:error, {:ambiguous_project_match, projects}} ->
-        Logger.warning(
-          "Skipping GitHub issue intake; multiple matching Linear projects for repo=#{repo} " <>
-            "url=#{url} projects=#{inspect(projects)}"
-        )
-
-        {:ok, :skipped}
+      {:error, :github_issue_description_lookup_failed} ->
+        {:error, :github_issue_description_lookup_failed}
 
       {:error, reason} ->
         {:error, reason}
@@ -149,7 +167,35 @@ defmodule SymphonyElixir.GitHubIssue do
     end
   end
 
-  defp sync_single_open_issue(_repo, _issue, _settings, _linear_adapter), do: {:ok, :skipped}
+  defp sync_single_open_issue(_repo, _issue, _target, _linear_adapter), do: {:ok, :skipped}
+
+  defp repair_github_issue_attachment(repo, %{url: url} = issue, existing_issue, linear_adapter) do
+    with issue_id when is_binary(issue_id) <- existing_issue["id"] || existing_issue[:id],
+         :ok <- linear_adapter.create_issue_attachment(issue_id, github_issue_attachment_title(issue), url) do
+      Logger.info(
+        "Repaired missing Linear attachment for GitHub issue repo=#{repo} " <>
+          "github_issue=#{url} linear_issue=#{linear_issue_label(existing_issue)}"
+      )
+
+      {:ok, :skipped}
+    else
+      {:error, reason} ->
+        {:error, {:github_intake_attachment_repair_failed, reason}}
+
+      _ ->
+        {:error, :github_intake_existing_issue_missing_id}
+    end
+  end
+
+  defp warn_when_issue_limit_reached(repo, issues, limit) when is_list(issues) and is_integer(limit) do
+    if length(issues) >= limit do
+      Logger.warning("GitHub issue intake reached configured limit for repo=#{repo} limit=#{limit}; remaining open issues may be deferred")
+    end
+
+    :ok
+  end
+
+  defp warn_when_issue_limit_reached(_repo, _issues, _limit), do: :ok
 
   defp list_open_issues(gh_bin, repo, limit, deps) do
     args = [
@@ -284,6 +330,7 @@ defmodule SymphonyElixir.GitHubIssue do
   defp linear_adapter_supports_intake?(linear_adapter) do
     Code.ensure_loaded?(linear_adapter) and
       function_exported?(linear_adapter, :github_issue_synced?, 1) and
+      function_exported?(linear_adapter, :find_github_issue_by_description, 1) and
       function_exported?(linear_adapter, :resolve_github_intake_target, 3) and
       function_exported?(linear_adapter, :create_github_backlog_issue, 1) and
       function_exported?(linear_adapter, :create_issue_attachment, 3)

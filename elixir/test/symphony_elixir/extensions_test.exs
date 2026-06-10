@@ -384,6 +384,97 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:ok, true} = Adapter.github_issue_synced?("https://github.com/octo/repo/issues/67")
     assert_receive {:graphql_called, attachment_lookup_query, %{url: "https://github.com/octo/repo/issues/67", first: 10}}
     assert attachment_lookup_query =~ "attachmentsForURL"
+    assert attachment_lookup_query =~ "includeArchived: true"
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [
+               %{
+                 "id" => "issue-existing",
+                 "identifier" => "LAB-901",
+                 "url" => "https://linear.app/example/LAB-901",
+                 "description" => "Repo: octo/repo\n\nGitHub Issue: https://github.com/octo/repo/issues/67"
+               }
+             ]
+           }
+         }
+       }}
+    )
+
+    assert {:ok, %{"id" => "issue-existing"}} =
+             Adapter.find_github_issue_by_description("https://github.com/octo/repo/issues/67")
+
+    assert_receive {:graphql_called, description_lookup_query, %{url: "https://github.com/octo/repo/issues/67", first: 10}}
+    assert description_lookup_query =~ "description: {contains: $url}"
+    assert description_lookup_query =~ "includeArchived: true"
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [
+               %{
+                 "id" => "issue-90",
+                 "identifier" => "LAB-990",
+                 "url" => "https://linear.app/example/LAB-990",
+                 "description" => "GitHub Issue: https://github.com/octo/repo/issues/670"
+               }
+             ]
+           }
+         }
+       }}
+    )
+
+    assert {:ok, nil} = Adapter.find_github_issue_by_description("https://github.com/octo/repo/issues/67")
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [
+               %{
+                 "id" => "issue-a",
+                 "identifier" => "LAB-901",
+                 "url" => "https://linear.app/example/LAB-901",
+                 "description" => "GitHub Issue: https://github.com/octo/repo/issues/67"
+               },
+               %{
+                 "id" => "issue-b",
+                 "identifier" => "LAB-902",
+                 "url" => "https://linear.app/example/LAB-902",
+                 "description" => "Linked source https://github.com/octo/repo/issues/67."
+               }
+             ]
+           }
+         }
+       }}
+    )
+
+    assert {:error, {:ambiguous_github_issue_description_match, matches}} =
+             Adapter.find_github_issue_by_description("https://github.com/octo/repo/issues/67")
+
+    assert [%{id: "issue-a"}, %{id: "issue-b"}] = matches
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{"issues" => %{"nodes" => []}}}})
+    assert {:ok, nil} = Adapter.find_github_issue_by_description("https://github.com/octo/repo/issues/68")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :description_lookup_down})
+
+    assert {:error, :description_lookup_down} =
+             Adapter.find_github_issue_by_description("https://github.com/octo/repo/issues/68")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{}}})
+
+    assert {:error, :github_issue_description_lookup_failed} =
+             Adapter.find_github_issue_by_description("https://github.com/octo/repo/issues/68")
 
     Process.put(
       {FakeLinearClient, :graphql_result},
