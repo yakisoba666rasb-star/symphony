@@ -988,6 +988,7 @@ defmodule SymphonyElixir.Orchestrator do
       state
       |> reconcile_running_issues()
       |> reconcile_blocked_issues()
+      |> reconcile_active_open_pr_handoffs()
       |> sync_merged_linked_pull_requests_to_done()
 
     with :ok <- Config.validate!(),
@@ -1286,8 +1287,6 @@ defmodule SymphonyElixir.Orchestrator do
     handoff_pr_evidence(entry)
   end
 
-  defp blocked_review_handoff_evidence(_entry), do: %{}
-
   defp done_sync_evidence(%Issue{} = issue) do
     %{
       branch_name: issue.branch_name,
@@ -1376,6 +1375,100 @@ defmodule SymphonyElixir.Orchestrator do
   defp done_state_name do
     Config.settings!().tracker.terminal_states
     |> Enum.find("Done", fn state -> normalize_issue_state(to_string(state)) == "done" end)
+  end
+
+  defp reconcile_active_open_pr_handoffs(%State{} = state) do
+    states = active_open_pr_handoff_reconcile_states()
+    module = tracker_module()
+
+    cond do
+      states == [] ->
+        state
+
+      !module_exports?(module, :fetch_issues_by_states, 1) ->
+        state
+
+      !open_issue_pr_lookup_available?() ->
+        state
+
+      true ->
+        do_reconcile_active_open_pr_handoffs(state, module, states)
+    end
+  end
+
+  defp do_reconcile_active_open_pr_handoffs(%State{} = state, module, states) do
+    case module.fetch_issues_by_states(states) do
+      {:ok, issues} when is_list(issues) ->
+        Enum.reduce(issues, state, &maybe_reconcile_active_open_pr_handoff/2)
+
+      {:error, reason} ->
+        Logger.debug("Failed to fetch active issues for open PR handoff reconcile: #{inspect(reason)}")
+        state
+
+      other ->
+        Logger.debug("Unexpected active issue fetch result for open PR handoff reconcile: #{inspect(other)}")
+        state
+    end
+  end
+
+  defp active_open_pr_handoff_reconcile_states do
+    Config.settings!().tracker.active_states
+    |> Enum.map(&to_string/1)
+    |> Enum.filter(&(normalize_issue_state(&1) == "in progress"))
+    |> Enum.uniq()
+  end
+
+  defp maybe_reconcile_active_open_pr_handoff(%Issue{} = issue, %State{} = state) do
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+
+    if open_pr_handoff_reconcile_candidate?(issue, state, active_states, terminal_states) do
+      reconcile_active_open_pr_handoff(issue, state)
+    else
+      state
+    end
+  end
+
+  defp maybe_reconcile_active_open_pr_handoff(_issue, %State{} = state), do: state
+
+  defp open_pr_handoff_reconcile_candidate?(
+         %Issue{id: issue_id, state: state_name} = issue,
+         %State{} = state,
+         active_states,
+         terminal_states
+       )
+       when is_binary(issue_id) do
+    normalize_issue_state(state_name) == "in progress" and
+      candidate_issue?(issue, active_states, terminal_states) and
+      !MapSet.member?(state.claimed, issue_id) and
+      !MapSet.member?(state.completed, issue_id) and
+      !Map.has_key?(state.running, issue_id) and
+      !Map.has_key?(state.blocked, issue_id) and
+      !pending_review_handoff_for_issue?(state, issue_id)
+  end
+
+  defp open_pr_handoff_reconcile_candidate?(_issue, _state, _active_states, _terminal_states),
+    do: false
+
+  defp reconcile_active_open_pr_handoff(%Issue{} = issue, %State{} = state) do
+    case lookup_open_pr_for_dispatch(issue) do
+      {:ok, %{} = pr} ->
+        {:handoff, state} = start_existing_open_pr_handoff(state, issue, pr, reason: :polling_reconcile)
+        state
+
+      {:ok, nil} ->
+        state
+
+      {:error, {:ambiguous_open_issue_pull_requests, _urls} = reason} ->
+        error = "ambiguous open GitHub PRs found during active issue reconcile: #{inspect(reason)}"
+        Logger.warning("Blocking active issue reconcile for #{issue_context(issue)}: #{error}")
+        block_issue_before_dispatch(state, issue, error)
+
+      {:error, reason} ->
+        Logger.warning("Continuing active issue reconcile for #{issue_context(issue)}; open PR guard lookup failed: #{inspect(reason)}")
+
+        state
+    end
   end
 
   defp reconcile_running_issues(%State{} = state) do
@@ -2741,7 +2834,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp lookup_open_pr_for_dispatch(%Issue{} = issue) do
     lookup_module = github_pr_lookup_module()
 
-    if module_exports?(lookup_module, :lookup_open_issue_pull_request, 5) do
+    if open_issue_pr_lookup_available?() do
       case RepositoryResolver.resolve(issue, Config.settings!()) do
         {:ok, %{slug: repo}} when is_binary(repo) and repo != "" ->
           lookup_module.lookup_open_issue_pull_request(
@@ -2763,14 +2856,20 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp start_existing_open_pr_handoff(%State{} = state, %Issue{} = issue, %{} = pr) do
+  defp open_issue_pr_lookup_available? do
+    github_pr_lookup_module()
+    |> module_exports?(:lookup_open_issue_pull_request, 5)
+  end
+
+  defp start_existing_open_pr_handoff(%State{} = state, %Issue{} = issue, %{} = pr, opts \\ []) do
     case Workspace.create_for_issue(issue, nil, allow_dirty_existing_workspace: true) do
       {:ok, workspace_path} ->
-        session_id = "dispatch-open-pr-guard"
+        reason = Keyword.get(opts, :reason, :dispatch)
+        session_id = open_pr_handoff_session_id(reason)
         running_entry = dispatch_open_pr_running_entry(issue, workspace_path, pr, session_id)
 
         Logger.info(
-          "Open PR discovered before dispatch for #{issue_context(issue)}; " <>
+          "Open PR discovered #{open_pr_handoff_log_context(reason)} for #{issue_context(issue)}; " <>
             "skipping implementation worker and starting review handoff pr=#{pr_url(pr)}"
         )
 
@@ -2806,6 +2905,12 @@ defmodule SymphonyElixir.Orchestrator do
       started_at: DateTime.utc_now()
     }
   end
+
+  defp open_pr_handoff_session_id(:polling_reconcile), do: "polling-open-pr-reconcile"
+  defp open_pr_handoff_session_id(_reason), do: "dispatch-open-pr-guard"
+
+  defp open_pr_handoff_log_context(:polling_reconcile), do: "during active issue reconcile"
+  defp open_pr_handoff_log_context(_reason), do: "before dispatch"
 
   defp claim_issue_for_dispatch(%Issue{state: state_name} = issue, state_updater)
        when is_function(state_updater, 2) do
