@@ -313,7 +313,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert repository.github_issue_url == "https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/62"
   end
 
-  test "all-projects dispatch requires GitHub hint and matching Linear project" do
+  test "all-projects dispatch accepts unique project route without GitHub hint" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_team_key: "LAB",
       tracker_project_slug: nil,
@@ -409,17 +409,44 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       identifier: "LAB-371",
       title: "Unlinked project issue",
       state: "Todo",
-      project_name: "Symphony"
+      project_name: "Symphony",
+      project_slug: "symphony-afe8a6524892"
     }
 
     assert Orchestrator.should_dispatch_issue_for_test(remote_issue, state)
     assert Orchestrator.should_dispatch_issue_for_test(synced_project_issue, state)
     assert Orchestrator.should_dispatch_issue_for_test(runtime_project_issue, state)
     assert Orchestrator.should_dispatch_issue_for_test(worker_project_worker_issue, state)
+    assert Orchestrator.should_dispatch_issue_for_test(no_hint_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(unprojected_remote_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(mismatched_project_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(wrong_project_runtime_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(runtime_project_worker_issue, state)
+  end
+
+  test "all-projects dispatch rejects ambiguous project routes without GitHub hint" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_team_key: "LAB",
+      tracker_project_slug: nil,
+      tracker_all_projects: true,
+      repository_default: "yakisoba666rasb-star/symphony",
+      repository_project_routes: %{
+        "yakisoba666rasb-star/symphony" => ["Symphony"],
+        "example-org/worker-app" => ["Symphony"]
+      }
+    )
+
+    state = %Orchestrator.State{running: %{}, claimed: MapSet.new(), blocked: %{}, max_concurrent_agents: 3}
+
+    no_hint_issue = %Issue{
+      id: "issue-394",
+      identifier: "LAB-394",
+      title: "Add regression coverage for issue-key boundary matching",
+      state: "Todo",
+      project_name: "Symphony",
+      project_slug: "symphony-afe8a6524892"
+    }
+
     refute Orchestrator.should_dispatch_issue_for_test(no_hint_issue, state)
   end
 
