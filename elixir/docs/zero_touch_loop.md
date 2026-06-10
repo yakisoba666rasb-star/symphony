@@ -1,6 +1,6 @@
 # Zero-Touch GitHub Issue Loop
 
-Status: design
+Status: design (legs 1-7 code complete; W0 enablement and W1-W6 pending)
 Last updated: 2026-06-11
 
 ## Goal
@@ -31,7 +31,7 @@ Ownership model:
 
 | # | Leg | Status |
 |---|---|---|
-| 1 | GitHub issue -> Linear Backlog intake | Implemented (#90), hardening in review (#94: boundary-match must-fix pending) |
+| 1 | GitHub issue -> Linear Backlog intake | Done (#90; hardened in #94 with two-stage dedupe and token-boundary matching). Not yet enabled in the running engine: W0 |
 | 2 | Missing Linear Project auto-assignment | Done (#88, LAB-396) |
 | 3 | Project-route dispatch to non-default repos | Done (#86) |
 | 4 | Implement + self-review / rework loop, bounded retries | Done (#83, LAB-391; verified end-to-end 2026-06-10) |
@@ -54,10 +54,12 @@ Ownership model:
 Each item below should be filed as its own Linear issue so Symphony
 implements it. Recommended order: W0 -> W1 -> W3 -> W2 -> W4 -> W5 -> W6.
 
-### W0: Land intake hardening and enable the runtime
+### W0: Enable intake in the running engine
 
-- Merge #94 after the description-fallback boundary-match fix
-  (reuse the `text_contains_token?` regex from `github_pr_lookup.ex`).
+Intake code is fully merged (#90, #94, including the boundary-match fix).
+The running engine predates those merges, so this is an operator step,
+not a code change:
+
 - Rebuild (`mix build`), restart `symphony-engine.service`.
 - First sync imports up to `limit` open issues per configured repo into
   Backlog; review the imported set once before promoting anything to Todo.
