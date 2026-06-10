@@ -10,6 +10,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.{
     AgentRunner,
     Config,
+    GitHubIssue,
     HermesDelegation,
     RepositoryResolver,
     ReviewRunner,
@@ -430,6 +431,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp github_pr_lookup_module do
     Application.get_env(:symphony_elixir, :github_pr_lookup, SymphonyElixir.GitHubPrLookup)
+  end
+
+  defp github_issue_module do
+    Application.get_env(:symphony_elixir, :github_issue, GitHubIssue)
   end
 
   defp review_runner_module do
@@ -1058,6 +1063,8 @@ defmodule SymphonyElixir.Orchestrator do
             "#{issue_context(issue)} repo=#{repo} pr=#{pr_url(pr)}"
         )
 
+        close_source_github_issue_after_done(issue, repo, pr)
+
         state
         |> terminate_running_issue(issue.id, true)
         |> release_issue_claim(issue.id)
@@ -1101,10 +1108,48 @@ defmodule SymphonyElixir.Orchestrator do
   defp present_string?(_value), do: false
 
   defp lookup_merged_pull_request_for_done(%Issue{} = issue, repo, attachment_urls) do
-    case lookup_merged_linked_pull_request(repo, attachment_urls) do
-      {:ok, nil} -> lookup_merged_issue_pull_request(repo, issue)
-      other -> other
+    if Enum.any?(attachment_urls, &github_pull_request_url?/1) do
+      case lookup_merged_linked_pull_request(repo, attachment_urls) do
+        {:ok, nil} -> lookup_merged_issue_pull_request(repo, issue)
+        {:error, {:missing_lookup_merged_linked_pull_request, _module}} -> lookup_merged_issue_pull_request(repo, issue)
+        other -> other
+      end
+    else
+      lookup_merged_issue_pull_request(repo, issue)
     end
+  end
+
+  defp close_source_github_issue_after_done(%Issue{} = issue, repo, pr) do
+    issue_url = RepositoryResolver.source_github_issue_url(issue)
+    module = github_issue_module()
+    comment = source_github_issue_close_comment(issue, pr)
+
+    cond do
+      not function_exported?(module, :close_if_open, 3) ->
+        Logger.warning("Skipping source GitHub issue close for #{issue_context(issue)}; #{inspect(module)} does not export close_if_open/3")
+
+      true ->
+        case module.close_if_open(repo, issue_url, comment) do
+          {:ok, :closed} ->
+            Logger.info("Closed source GitHub issue for #{issue_context(issue)} repo=#{repo} issue=#{issue_url}")
+
+          {:ok, _status} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "Merged PR Done sync could not close source GitHub issue for #{issue_context(issue)} " <>
+                "repo=#{repo} issue=#{inspect(issue_url)} reason=#{inspect(reason)}"
+            )
+        end
+    end
+  end
+
+  defp source_github_issue_close_comment(%Issue{} = issue, pr) do
+    """
+    Closed by Symphony after merged PR #{pr_url(pr)} moved #{issue.identifier || issue.id} to Done in Linear.
+    """
+    |> String.trim()
   end
 
   defp lookup_merged_linked_pull_request(repo, attachment_urls) do
