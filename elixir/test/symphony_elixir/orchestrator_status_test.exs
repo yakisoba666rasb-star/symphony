@@ -211,6 +211,44 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule FakeTrackerActiveOpenPrReconcile do
+    def fetch_issues_by_states(states) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:active_open_pr_reconcile_fetch_called, states})
+
+        _ ->
+          :ok
+      end
+
+      {:ok, Application.get_env(:symphony_elixir, :active_open_pr_reconcile_issues, [])}
+    end
+
+    def update_issue_state(issue_id, state_name) do
+      case Application.get_env(:symphony_elixir, :tracker_state_update_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:tracker_state_update_called, issue_id, state_name})
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
+
+    def create_comment(issue_id, body) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:tracker_comment_called, issue_id, body})
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
+  end
+
   defmodule FakeTrackerCommentError do
     def update_issue_state(issue_id, state_name) do
       case Application.get_env(:symphony_elixir, :tracker_state_update_recipient) do
@@ -1453,6 +1491,125 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         Process.exit(pid, :normal)
       end
     end)
+
+    assert_receive {:open_issue_pr_lookup_called, "octo/repo", "LAB-391", ^issue_url, "aenima611111/lab-391-linear-generated-branch", []},
+                   1_000
+
+    assert_receive {:tracker_comment_called, ^issue_id, comment}, 1_000
+    assert comment =~ "Symphony automated review decision: approve-equivalent"
+    assert comment =~ "https://github.com/octo/repo/pull/83"
+    assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 1_000
+
+    state = :sys.get_state(pid, 15_000)
+    assert state.running == %{}
+    assert state.blocked == %{}
+    assert MapSet.member?(state.completed, issue_id)
+  end
+
+  test "orchestrator reconciles in-progress issues with existing open PRs after restart" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      poll_interval_ms: 5_000,
+      repository_default: "octo/repo"
+    )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_review_runner = Application.get_env(:symphony_elixir, :review_runner)
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_reconcile_issues = Application.get_env(:symphony_elixir, :active_open_pr_reconcile_issues)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    previous_tracker_state_update_recipient =
+      Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
+
+    previous_tracker_comment_recipient =
+      Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_review_runner) do
+        Application.delete_env(:symphony_elixir, :review_runner)
+      else
+        Application.put_env(:symphony_elixir, :review_runner, previous_review_runner)
+      end
+
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+
+      if is_nil(previous_reconcile_issues) do
+        Application.delete_env(:symphony_elixir, :active_open_pr_reconcile_issues)
+      else
+        Application.put_env(:symphony_elixir, :active_open_pr_reconcile_issues, previous_reconcile_issues)
+      end
+
+      if is_nil(previous_memory_issues) do
+        Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      else
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_memory_issues)
+      end
+
+      if is_nil(previous_tracker_state_update_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_state_update_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_state_update_recipient,
+          previous_tracker_state_update_recipient
+        )
+      end
+
+      if is_nil(previous_tracker_comment_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_comment_recipient,
+          previous_tracker_comment_recipient
+        )
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupOpenIssuePr)
+    Application.put_env(:symphony_elixir, :review_runner, FakeReviewRunnerApproved)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerActiveOpenPrReconcile)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-active-open-pr-reconcile"
+    issue_url = "https://linear.app/example/issue/LAB-391/retry-policy"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "LAB-391",
+      title: "Unify retry policy",
+      state: "In Progress",
+      url: issue_url,
+      branch_name: "aenima611111/lab-391-linear-generated-branch",
+      description: "Repo: octo/repo"
+    }
+
+    Application.put_env(:symphony_elixir, :active_open_pr_reconcile_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    orchestrator_name = Module.concat(__MODULE__, :ActiveOpenPrReconcileOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    assert_receive {:active_open_pr_reconcile_fetch_called, ["In Progress"]}, 1_000
 
     assert_receive {:open_issue_pr_lookup_called, "octo/repo", "LAB-391", ^issue_url, "aenima611111/lab-391-linear-generated-branch", []},
                    1_000
