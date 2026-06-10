@@ -993,6 +993,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
+         issues <- auto_assign_missing_projects(issues),
          true <- available_slots(state) > 0 do
       choose_issues(issues, state)
     else
@@ -1038,6 +1039,23 @@ defmodule SymphonyElixir.Orchestrator do
         state
     end
   end
+
+  defp auto_assign_missing_projects(issues) when is_list(issues) do
+    settings = Config.settings!()
+
+    Enum.reduce(issues, [], fn issue, acc ->
+      case Tracker.update_issue_project_from_repository(issue, settings) do
+        {:ok, :updated} ->
+          acc
+
+        {:ok, :skipped} ->
+          [issue | acc]
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  defp auto_assign_missing_projects(issues), do: issues
 
   defp sync_merged_linked_pull_requests_to_done(%State{} = state) do
     states = post_merge_done_sync_states()
@@ -1566,6 +1584,12 @@ defmodule SymphonyElixir.Orchestrator do
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
+  end
+
+  @doc false
+  @spec auto_assign_missing_projects_for_test([Issue.t()]) :: [Issue.t()]
+  def auto_assign_missing_projects_for_test(issues) when is_list(issues) do
+    auto_assign_missing_projects(issues)
   end
 
   @doc false

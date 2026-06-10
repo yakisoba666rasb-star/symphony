@@ -317,6 +317,57 @@ defmodule SymphonyElixir.ExtensionsTest do
     )
 
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "team" => %{
+               "projects" => %{
+                 "nodes" => [
+                   %{"id" => "project-1", "name" => "Symphony", "slugId" => "symphony"}
+                 ]
+               }
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:ok, [%{"id" => "project-1"}]} = Adapter.fetch_issue_team_projects("issue-1")
+    assert_receive {:graphql_called, team_projects_query, %{issueId: "issue-1", first: 250}}
+    assert team_projects_query =~ "projects"
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}}
+    )
+
+    assert :ok = Adapter.update_issue_project("issue-1", "project-1")
+    assert_receive {:graphql_called, project_update_query, %{issueId: "issue-1", projectId: "project-1"}}
+    assert project_update_query =~ "projectId"
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"issueUpdate" => %{"success" => false}}}}
+    )
+
+    assert {:error, :issue_project_update_failed} =
+             Adapter.update_issue_project("issue-1", "project-1")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :team_projects_down})
+    assert {:error, :team_projects_down} = Adapter.fetch_issue_team_projects("issue-1")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{}}})
+    assert {:error, :issue_team_projects_not_found} = Adapter.fetch_issue_team_projects("issue-1")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :project_update_down})
+    assert {:error, :project_update_down} = Adapter.update_issue_project("issue-1", "project-1")
+
+    Process.put({FakeLinearClient, :graphql_result}, :unexpected)
+    assert {:error, :issue_project_update_failed} = Adapter.update_issue_project("issue-1", "project-1")
   end
 
   test "phoenix observability api preserves state, issue, and refresh responses" do
