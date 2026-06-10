@@ -9,6 +9,32 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     def lookup_workspace_head(_workspace_path, _branch_name), do: {:ok, %{"number" => 123, "url" => "https://example.org/pull/123"}}
   end
 
+  defmodule FakeGitHubPrLookupOpenIssuePr do
+    def lookup_open_issue_pull_request(repo, issue_identifier, issue_url, branch_name, attachment_urls) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(
+            recipient,
+            {:open_issue_pr_lookup_called, repo, issue_identifier, issue_url, branch_name, attachment_urls}
+          )
+
+        _ ->
+          :ok
+      end
+
+      {:ok,
+       %{
+         "number" => 83,
+         "url" => "https://github.com/octo/repo/pull/83",
+         "headRefName" => "LAB-391-retry-policy",
+         "isDraft" => false,
+         "mergeStateStatus" => "CLEAN",
+         "state" => "OPEN",
+         "__symphonyLookupSource" => "open_issue_pull_request"
+       }}
+    end
+  end
+
   defmodule FakeGitHubPrLookupError do
     def lookup_workspace_head(_workspace_path, _branch_name), do: {:error, :missing_auth}
   end
@@ -1338,6 +1364,108 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(next_poll_in_ms)
     assert next_poll_in_ms >= 0
     assert next_poll_in_ms <= 50
+  end
+
+  test "orchestrator hands off existing open PR before dispatching a new worker" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      poll_interval_ms: 5_000,
+      repository_default: "octo/repo"
+    )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_review_runner = Application.get_env(:symphony_elixir, :review_runner)
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+
+    previous_tracker_state_update_recipient =
+      Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
+
+    previous_tracker_comment_recipient =
+      Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_review_runner) do
+        Application.delete_env(:symphony_elixir, :review_runner)
+      else
+        Application.put_env(:symphony_elixir, :review_runner, previous_review_runner)
+      end
+
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+
+      if is_nil(previous_tracker_state_update_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_state_update_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_state_update_recipient,
+          previous_tracker_state_update_recipient
+        )
+      end
+
+      if is_nil(previous_tracker_comment_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_comment_recipient,
+          previous_tracker_comment_recipient
+        )
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupOpenIssuePr)
+    Application.put_env(:symphony_elixir, :review_runner, FakeReviewRunnerApproved)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-dispatch-open-pr-guard"
+    issue_url = "https://linear.app/example/issue/LAB-391/retry-policy"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "LAB-391",
+      title: "Unify retry policy",
+      state: "In Progress",
+      url: issue_url,
+      branch_name: "aenima611111/lab-391-linear-generated-branch",
+      description: "Repo: octo/repo"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :DispatchOpenPrGuardOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    assert_receive {:open_issue_pr_lookup_called, "octo/repo", "LAB-391", ^issue_url, "aenima611111/lab-391-linear-generated-branch", []},
+                   1_000
+
+    assert_receive {:tracker_comment_called, ^issue_id, comment}, 1_000
+    assert comment =~ "Symphony automated review decision: approve-equivalent"
+    assert comment =~ "https://github.com/octo/repo/pull/83"
+    assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 1_000
+
+    state = :sys.get_state(pid, 15_000)
+    assert state.running == %{}
+    assert state.blocked == %{}
+    assert MapSet.member?(state.completed, issue_id)
   end
 
   test "orchestrator moves active and review issues with merged linked PR attachments to Done" do

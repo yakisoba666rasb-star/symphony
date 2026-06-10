@@ -920,6 +920,235 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
     assert_received {:command, :gh, ["pr", "list", "--repo", "octo/repo", "--state", "merged" | _rest]}
   end
 
+  test "open issue pull request lookup finds open PR by issue key evidence" do
+    parent = self()
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", args, _opts ->
+        send(parent, {:command, :gh, args})
+
+        assert args == [
+                 "pr",
+                 "list",
+                 "--repo",
+                 "octo/repo",
+                 "--state",
+                 "open",
+                 "--limit",
+                 "50",
+                 "--search",
+                 "LAB-391",
+                 "--json",
+                 "number,url,headRefName,isDraft,mergeStateStatus,state,title,body"
+               ]
+
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 83,
+              "url" => "https://github.com/octo/repo/pull/83",
+              "headRefName" => "LAB-391-retry-policy",
+              "isDraft" => false,
+              "mergeStateStatus" => "CLEAN",
+              "state" => "OPEN",
+              "title" => "LAB-391 retry policy",
+              "body" => "Refs LAB-391\nLinear: https://linear.app/example/issue/LAB-391/retry-policy"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:ok,
+            %{
+              "number" => 83,
+              "__symphonyLookupSource" => "open_issue_pull_request",
+              "__symphonyMatchedBranch" => "LAB-391-retry-policy"
+            }} =
+             GitHubPrLookup.lookup_open_issue_pull_request(
+               "octo/repo",
+               "LAB-391",
+               "https://linear.app/example/issue/LAB-391/retry-policy",
+               "aenima611111/lab-391-linear-generated-branch",
+               [],
+               deps
+             )
+
+    assert_received {:command, :gh, ["pr", "list", "--repo", "octo/repo", "--state", "open" | _rest]}
+  end
+
+  test "open issue pull request lookup prefers linked PR attachments" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", args, _opts ->
+        case args do
+          ["pr", "view", "83", "--repo", "octo/repo", "--json", fields] ->
+            assert fields == "number,url,headRefName,isDraft,mergeStateStatus,state"
+
+            {:ok,
+             {Jason.encode!(%{
+                "number" => 83,
+                "url" => "https://github.com/octo/repo/pull/83",
+                "headRefName" => "LAB-391-retry-policy",
+                "isDraft" => false,
+                "mergeStateStatus" => "CLEAN",
+                "state" => "OPEN"
+              }), 0}}
+
+          ["pr", "list" | _rest] ->
+            flunk("search should not run when a linked open PR is present")
+        end
+      end
+    }
+
+    assert {:ok,
+            %{
+              "number" => 83,
+              "__symphonyLookupSource" => "linked_pull_request"
+            }} =
+             GitHubPrLookup.lookup_open_issue_pull_request(
+               "octo/repo",
+               "LAB-391",
+               nil,
+               "aenima611111/lab-391-linear-generated-branch",
+               ["https://github.com/octo/repo/pull/83"],
+               deps
+             )
+  end
+
+  test "open issue pull request lookup falls through empty search terms" do
+    parent = self()
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", args, _opts ->
+        search = Enum.at(args, Enum.find_index(args, &(&1 == "--search")) + 1)
+        send(parent, {:search, search})
+
+        case search do
+          "LAB-391" ->
+            {:ok, {Jason.encode!([]), 0}}
+
+          "https://linear.app/example/issue/LAB-391/retry-policy" ->
+            {:ok,
+             {Jason.encode!([
+                %{
+                  "number" => 84,
+                  "url" => "https://github.com/octo/repo/pull/84",
+                  "headRefName" => "lab-391-url",
+                  "isDraft" => false,
+                  "mergeStateStatus" => "CLEAN",
+                  "state" => "OPEN",
+                  "title" => "URL match",
+                  "body" => "Linear: https://linear.app/example/issue/LAB-391/retry-policy"
+                }
+              ]), 0}}
+        end
+      end
+    }
+
+    assert {:ok, %{"number" => 84, "__symphonyLookupSource" => "open_issue_pull_request"}} =
+             GitHubPrLookup.lookup_open_issue_pull_request(
+               "octo/repo",
+               "LAB-391",
+               "https://linear.app/example/issue/LAB-391/retry-policy",
+               nil,
+               [],
+               deps
+             )
+
+    assert_received {:search, "LAB-391"}
+    assert_received {:search, "https://linear.app/example/issue/LAB-391/retry-policy"}
+  end
+
+  test "open issue pull request lookup returns nil without search evidence" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        flunk("lookup without search terms should not call gh pr list")
+      end
+    }
+
+    assert {:ok, nil} = GitHubPrLookup.lookup_open_issue_pull_request("octo/repo", nil, " ", nil, [], deps)
+  end
+
+  test "open issue pull request lookup rejects ambiguous issue-key matches" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 85,
+              "url" => "https://github.com/octo/repo/pull/85",
+              "headRefName" => "lab-391-a",
+              "isDraft" => false,
+              "mergeStateStatus" => "CLEAN",
+              "state" => "OPEN",
+              "title" => "LAB-391 first",
+              "body" => "Refs LAB-391"
+            },
+            %{
+              "number" => 86,
+              "url" => "https://github.com/octo/repo/pull/86",
+              "headRefName" => "lab-391-b",
+              "isDraft" => false,
+              "mergeStateStatus" => "CLEAN",
+              "state" => "OPEN",
+              "title" => "LAB-391 second",
+              "body" => "Refs LAB-391"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:error, {:ambiguous_open_issue_pull_requests, ["https://github.com/octo/repo/pull/85", "https://github.com/octo/repo/pull/86"]}} =
+             GitHubPrLookup.lookup_open_issue_pull_request("octo/repo", "LAB-391", nil, nil, [], deps)
+  end
+
+  test "open issue pull request lookup ignores drafts and closed candidates" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 87,
+              "url" => "https://github.com/octo/repo/pull/87",
+              "headRefName" => "lab-391-draft",
+              "isDraft" => true,
+              "mergeStateStatus" => "CLEAN",
+              "state" => "OPEN",
+              "title" => "LAB-391 draft",
+              "body" => "Refs LAB-391"
+            },
+            %{
+              "number" => 88,
+              "url" => "https://github.com/octo/repo/pull/88",
+              "headRefName" => "lab-391-closed",
+              "isDraft" => false,
+              "mergeStateStatus" => "UNKNOWN",
+              "state" => "CLOSED",
+              "title" => "LAB-391 closed",
+              "body" => "Refs LAB-391"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:ok, nil} = GitHubPrLookup.lookup_open_issue_pull_request("octo/repo", "LAB-391", nil, nil, [], deps)
+  end
+
+  test "open issue pull request lookup reports gh command failures" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts -> {:ok, {"no auth", 4}} end
+    }
+
+    assert {:error, {:gh_command_failed, 4}} =
+             GitHubPrLookup.lookup_open_issue_pull_request("octo/repo", "LAB-391", nil, nil, [], deps)
+  end
+
   test "merged issue pull request lookup rejects ambiguous issue-key matches" do
     deps = %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,

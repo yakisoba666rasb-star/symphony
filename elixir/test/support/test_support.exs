@@ -244,17 +244,17 @@ defmodule SymphonyElixir.TestSupport do
         "  same_review_fingerprint_limit: #{yaml_value(same_review_fingerprint_limit)}",
         "  same_test_failure_fingerprint_limit: #{yaml_value(same_test_failure_fingerprint_limit)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
-        retry_yaml(
-          retry_max_attempts,
-          retry_max_continuations,
-          retry_max_handoff_pr_discovery_attempts,
-          retry_max_blocked_review_handoff_attempts,
-          retry_max_review_handoff_attempts,
-          retry_max_done_sync_attempts,
-          retry_base_backoff_ms,
-          retry_max_backoff_ms,
-          retry_continuation_delay_ms
-        ),
+        retry_yaml(%{
+          max_attempts: retry_max_attempts,
+          max_continuations: retry_max_continuations,
+          max_handoff_pr_discovery_attempts: retry_max_handoff_pr_discovery_attempts,
+          max_blocked_review_handoff_attempts: retry_max_blocked_review_handoff_attempts,
+          max_review_handoff_attempts: retry_max_review_handoff_attempts,
+          max_done_sync_attempts: retry_max_done_sync_attempts,
+          base_backoff_ms: retry_base_backoff_ms,
+          max_backoff_ms: retry_max_backoff_ms,
+          continuation_delay_ms: retry_continuation_delay_ms
+        }),
         "codex:",
         "  command: #{yaml_value(codex_command)}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
@@ -276,28 +276,18 @@ defmodule SymphonyElixir.TestSupport do
     Enum.join(sections, "\n") <> "\n"
   end
 
-  defp retry_yaml(
-         max_attempts,
-         max_continuations,
-         max_handoff_pr_discovery_attempts,
-         max_blocked_review_handoff_attempts,
-         max_review_handoff_attempts,
-         max_done_sync_attempts,
-         base_backoff_ms,
-         max_backoff_ms,
-         continuation_delay_ms
-       ) do
+  defp retry_yaml(retry) do
     [
       "retry:",
-      "  max_attempts: #{yaml_value(max_attempts)}",
-      "  max_continuations: #{yaml_value(max_continuations)}",
-      "  max_handoff_pr_discovery_attempts: #{yaml_value(max_handoff_pr_discovery_attempts)}",
-      "  max_blocked_review_handoff_attempts: #{yaml_value(max_blocked_review_handoff_attempts)}",
-      "  max_review_handoff_attempts: #{yaml_value(max_review_handoff_attempts)}",
-      "  max_done_sync_attempts: #{yaml_value(max_done_sync_attempts)}",
-      "  base_backoff_ms: #{yaml_value(base_backoff_ms)}",
-      "  max_backoff_ms: #{yaml_value(max_backoff_ms)}",
-      "  continuation_delay_ms: #{yaml_value(continuation_delay_ms)}"
+      "  max_attempts: #{yaml_value(retry.max_attempts)}",
+      "  max_continuations: #{yaml_value(retry.max_continuations)}",
+      "  max_handoff_pr_discovery_attempts: #{yaml_value(retry.max_handoff_pr_discovery_attempts)}",
+      "  max_blocked_review_handoff_attempts: #{yaml_value(retry.max_blocked_review_handoff_attempts)}",
+      "  max_review_handoff_attempts: #{yaml_value(retry.max_review_handoff_attempts)}",
+      "  max_done_sync_attempts: #{yaml_value(retry.max_done_sync_attempts)}",
+      "  base_backoff_ms: #{yaml_value(retry.base_backoff_ms)}",
+      "  max_backoff_ms: #{yaml_value(retry.max_backoff_ms)}",
+      "  continuation_delay_ms: #{yaml_value(retry.continuation_delay_ms)}"
     ]
     |> Enum.join("\n")
   end
