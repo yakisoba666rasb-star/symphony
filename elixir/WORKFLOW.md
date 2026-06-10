@@ -28,6 +28,13 @@ agent:
   max_concurrent_agents: 1
   max_turns: 20
   max_continuations: 3
+  max_retry_attempts: 5
+retry:
+  max_attempts: 5
+  max_continuations: 3
+  base_backoff_ms: 10000
+  max_backoff_ms: 300000
+  continuation_delay_ms: 1000
 codex:
   command: codex app-server
   thread_sandbox: workspace-write

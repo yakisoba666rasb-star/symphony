@@ -5,7 +5,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   use GenServer
   require Logger
-  import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{
     AgentRunner,
@@ -13,6 +12,7 @@ defmodule SymphonyElixir.Orchestrator do
     GitHubIssue,
     HermesDelegation,
     RepositoryResolver,
+    RetryPolicy,
     ReviewRunner,
     StatusDashboard,
     Tracker,
@@ -21,8 +21,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.Linear.Issue
 
-  @continuation_retry_delay_ms 1_000
-  @failure_retry_base_ms 10_000
   @handoff_pr_lookup_refresh_delay_ms 500
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
@@ -841,9 +839,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp schedule_max_turns_continuation(state, issue_id, running_entry, session_id, reason) do
     next_continuation_count = next_continuation_count_from_running(running_entry)
-    max_continuations = Config.settings!().agent.max_continuations
+    policy = Config.retry_policy(:max_turn_continuation)
+    max_continuations = policy.max_attempts
 
-    if next_continuation_count > max_continuations do
+    if !RetryPolicy.allow_attempt?(next_continuation_count, policy) do
       error = "agent.max_turns continuation limit reached (#{max_continuations}); blocking active issue"
       error = if is_nil(reason), do: error, else: "#{error}: #{inspect(reason)}"
 
@@ -861,6 +860,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> schedule_issue_retry(issue_id, next_retry_attempt_from_running(running_entry), %{
         identifier: running_entry.identifier,
         delay_type: :continuation,
+        policy_context: :max_turn_continuation,
         continuation_count: next_continuation_count,
         error: error,
         worker_host: Map.get(running_entry, :worker_host),
@@ -2482,10 +2482,8 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(issue_id) and is_map(metadata) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
-    delay_ms = retry_delay(next_attempt, metadata)
     old_timer = Map.get(previous_retry, :timer_ref)
     retry_token = make_ref()
-    due_at_ms = System.monotonic_time(:millisecond) + delay_ms
     identifier = pick_retry_identifier(issue_id, previous_retry, metadata)
     error = pick_retry_error(previous_retry, metadata)
     worker_host = pick_retry_worker_host(previous_retry, metadata)
@@ -2494,35 +2492,66 @@ defmodule SymphonyElixir.Orchestrator do
     pr_url = pick_retry_pr_url(previous_retry, metadata)
     delay_type = pick_retry_delay_type(previous_retry, metadata)
     continuation_count = pick_retry_continuation_count(previous_retry, metadata)
+    policy_context = pick_retry_policy_context(previous_retry, metadata)
+    policy = Config.retry_policy(policy_context)
 
     if is_reference(old_timer) do
       Process.cancel_timer(old_timer)
     end
 
-    timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
+    if RetryPolicy.allow_attempt?(next_attempt, policy) do
+      delay_ms = RetryPolicy.backoff_ms(next_attempt, policy)
+      due_at_ms = System.monotonic_time(:millisecond) + delay_ms
 
-    error_suffix = if is_binary(error), do: " error=#{error}", else: ""
+      timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
 
-    Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
+      error_suffix = if is_binary(error), do: " error=#{error}", else: ""
 
-    %{
-      state
-      | retry_attempts:
-          Map.put(state.retry_attempts, issue_id, %{
-            attempt: next_attempt,
-            timer_ref: timer_ref,
-            retry_token: retry_token,
-            due_at_ms: due_at_ms,
-            identifier: identifier,
-            error: error,
-            pr_number: pr_number,
-            pr_url: pr_url,
-            worker_host: worker_host,
-            workspace_path: workspace_path,
-            delay_type: delay_type,
-            continuation_count: continuation_count
-          })
-    }
+      Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
+
+      %{
+        state
+        | retry_attempts:
+            Map.put(state.retry_attempts, issue_id, %{
+              attempt: next_attempt,
+              timer_ref: timer_ref,
+              retry_token: retry_token,
+              due_at_ms: due_at_ms,
+              identifier: identifier,
+              error: error,
+              pr_number: pr_number,
+              pr_url: pr_url,
+              worker_host: worker_host,
+              workspace_path: workspace_path,
+              delay_type: delay_type,
+              policy_context: policy_context,
+              continuation_count: continuation_count
+            })
+      }
+    else
+      terminal_error = RetryPolicy.terminal_reason(policy, next_attempt, error)
+
+      Logger.warning(
+        "Retry attempts exhausted for issue_id=#{issue_id} issue_identifier=#{identifier} " <>
+          "context=#{policy_context} attempt=#{next_attempt}: #{terminal_error}"
+      )
+
+      block_issue_from_entry(
+        state,
+        issue_id,
+        %{
+          identifier: identifier,
+          issue: nil,
+          worker_host: worker_host,
+          workspace_path: workspace_path,
+          session_id: nil,
+          last_codex_message: nil,
+          last_codex_event: nil,
+          last_codex_timestamp: nil
+        },
+        terminal_error
+      )
+    end
   end
 
   defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
@@ -2536,6 +2565,7 @@ defmodule SymphonyElixir.Orchestrator do
           pr_number: Map.get(retry_entry, :pr_number),
           pr_url: Map.get(retry_entry, :pr_url),
           delay_type: Map.get(retry_entry, :delay_type),
+          policy_context: Map.get(retry_entry, :policy_context),
           continuation_count: Map.get(retry_entry, :continuation_count)
         }
 
@@ -2679,19 +2709,6 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
-    if metadata[:delay_type] == :continuation and attempt == 1 do
-      @continuation_retry_delay_ms
-    else
-      failure_retry_delay(attempt)
-    end
-  end
-
-  defp failure_retry_delay(attempt) do
-    max_delay_power = min(attempt - 1, 10)
-    min(@failure_retry_base_ms * (1 <<< max_delay_power), Config.settings!().agent.max_retry_backoff_ms)
-  end
-
   defp normalize_retry_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt
   defp normalize_retry_attempt(_attempt), do: 0
 
@@ -2739,6 +2756,16 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp pick_retry_continuation_count(previous_retry, metadata) do
     metadata[:continuation_count] || Map.get(previous_retry, :continuation_count)
+  end
+
+  defp pick_retry_policy_context(previous_retry, metadata) do
+    metadata[:policy_context] ||
+      Map.get(previous_retry, :policy_context) ||
+      default_retry_policy_context(metadata)
+  end
+
+  defp default_retry_policy_context(metadata) do
+    if continuation_retry?(metadata), do: :max_turn_continuation, else: :agent_failure
   end
 
   defp continuation_retry?(metadata) when is_map(metadata) do

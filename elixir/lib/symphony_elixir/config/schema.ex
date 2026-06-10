@@ -242,6 +242,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
       field(:max_continuations, :integer, default: 3)
+      field(:max_retry_attempts, :integer, default: 5)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_review_fix_loops, :integer, default: 3)
       field(:same_review_fingerprint_limit, :integer, default: 4)
@@ -258,6 +259,7 @@ defmodule SymphonyElixir.Config.Schema do
           :max_concurrent_agents,
           :max_turns,
           :max_continuations,
+          :max_retry_attempts,
           :max_retry_backoff_ms,
           :max_review_fix_loops,
           :same_review_fingerprint_limit,
@@ -269,12 +271,61 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_continuations, greater_than_or_equal_to: 0)
+      |> validate_number(:max_retry_attempts, greater_than_or_equal_to: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> validate_number(:max_review_fix_loops, greater_than_or_equal_to: 0)
       |> validate_number(:same_review_fingerprint_limit, greater_than_or_equal_to: 0)
       |> validate_number(:same_test_failure_fingerprint_limit, greater_than_or_equal_to: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
+    end
+  end
+
+  defmodule Retry do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:max_attempts, :integer)
+      field(:max_continuations, :integer)
+      field(:max_handoff_pr_discovery_attempts, :integer)
+      field(:max_blocked_review_handoff_attempts, :integer)
+      field(:max_review_handoff_attempts, :integer)
+      field(:max_done_sync_attempts, :integer)
+      field(:base_backoff_ms, :integer, default: 10_000)
+      field(:max_backoff_ms, :integer)
+      field(:continuation_delay_ms, :integer, default: 1_000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :max_attempts,
+          :max_continuations,
+          :max_handoff_pr_discovery_attempts,
+          :max_blocked_review_handoff_attempts,
+          :max_review_handoff_attempts,
+          :max_done_sync_attempts,
+          :base_backoff_ms,
+          :max_backoff_ms,
+          :continuation_delay_ms
+        ],
+        empty_values: []
+      )
+      |> validate_number(:max_attempts, greater_than_or_equal_to: 0)
+      |> validate_number(:max_continuations, greater_than_or_equal_to: 0)
+      |> validate_number(:max_handoff_pr_discovery_attempts, greater_than_or_equal_to: 0)
+      |> validate_number(:max_blocked_review_handoff_attempts, greater_than_or_equal_to: 0)
+      |> validate_number(:max_review_handoff_attempts, greater_than_or_equal_to: 0)
+      |> validate_number(:max_done_sync_attempts, greater_than_or_equal_to: 0)
+      |> validate_number(:base_backoff_ms, greater_than: 0)
+      |> validate_number(:max_backoff_ms, greater_than: 0)
+      |> validate_number(:continuation_delay_ms, greater_than: 0)
     end
   end
 
@@ -463,6 +514,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:repository, Repository, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:retry, Retry, on_replace: :update, defaults_to_struct: true)
     embeds_one(:review, Review, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
@@ -565,6 +617,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:repository, with: &Repository.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
+    |> cast_embed(:retry, with: &Retry.changeset/2)
     |> cast_embed(:review, with: &Review.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)

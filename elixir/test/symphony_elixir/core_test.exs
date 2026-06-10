@@ -66,6 +66,9 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.review_state == "In Review"
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
+    assert config.agent.max_retry_attempts == 5
+    assert config.retry.max_attempts == nil
+    assert config.retry.base_backoff_ms == 10_000
     assert config.agent.max_review_fix_loops == 3
     assert config.agent.same_review_fingerprint_limit == 4
     assert config.agent.same_test_failure_fingerprint_limit == 4
@@ -90,6 +93,14 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 5)
     assert Config.settings!().agent.max_turns == 5
+
+    write_workflow_file!(Workflow.workflow_file_path(), max_retry_attempts: -1)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.max_retry_attempts"
+
+    write_workflow_file!(Workflow.workflow_file_path(), retry_max_attempts: 2, retry_base_backoff_ms: 250)
+    assert Config.retry_policy(:agent_failure).max_attempts == 2
+    assert Config.retry_policy(:agent_failure).base_backoff_ms == 250
 
     write_workflow_file!(Workflow.workflow_file_path(),
       same_review_fingerprint_limit: 0,
@@ -1339,6 +1350,62 @@ defmodule SymphonyElixir.CoreTest do
              state.retry_attempts[issue_id]
 
     assert_due_in_range(due_at_ms, 39_500, 40_500)
+  end
+
+  test "abnormal worker exit blocks after retry policy attempt cap" do
+    previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_test_pid = Application.get_env(:symphony_elixir, :test_pid)
+    issue_id = "issue-crash-cap"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :CrashRetryCapOrchestrator)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), max_retry_attempts: 1)
+      Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerRecordsUpdates)
+      Application.put_env(:symphony_elixir, :test_pid, self())
+
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      initial_state = :sys.get_state(pid)
+
+      running_entry = %{
+        pid: self(),
+        ref: ref,
+        identifier: "MT-559-CAP",
+        retry_attempt: 1,
+        issue: %Issue{id: issue_id, identifier: "MT-559-CAP", state: "In Progress"},
+        started_at: DateTime.utc_now()
+      }
+
+      :sys.replace_state(pid, fn _ ->
+        initial_state
+        |> Map.put(:running, %{issue_id => running_entry})
+        |> Map.put(:claimed, MapSet.new([issue_id]))
+        |> Map.put(:retry_attempts, %{})
+      end)
+
+      send(pid, {:DOWN, ref, :process, self(), :boom})
+      Process.sleep(50)
+      state = :sys.get_state(pid)
+
+      assert_receive {:tracker_comment, ^issue_id, comment_body}
+      assert comment_body =~ "agent failure retry limit reached (1)"
+      refute Map.has_key?(state.retry_attempts, issue_id)
+
+      assert %{
+               identifier: "MT-559-CAP",
+               error: "agent failure retry limit reached (1) after attempt 2; blocking issue: agent exited: :boom"
+             } = state.blocked[issue_id]
+    after
+      restore_app_env(:tracker_module, previous_tracker)
+      restore_app_env(:test_pid, previous_test_pid)
+    end
   end
 
   test "first abnormal worker exit waits before retrying" do

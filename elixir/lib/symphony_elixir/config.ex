@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Config do
   """
 
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.RetryPolicy
   alias SymphonyElixir.Workflow
 
   @default_prompt_template """
@@ -78,7 +79,12 @@ defmodule SymphonyElixir.Config do
   @spec max_review_fix_loops() :: non_neg_integer()
   def max_review_fix_loops do
     settings = settings!()
-    settings.review.max_review_fix_loops || settings.agent.max_review_fix_loops
+    settings.review.max_review_fix_loops || RetryPolicy.policy(:review_handoff, settings).max_attempts
+  end
+
+  @spec retry_policy(RetryPolicy.context()) :: RetryPolicy.policy()
+  def retry_policy(context) do
+    RetryPolicy.policy(context, settings!())
   end
 
   @spec blocked_issue_comment(String.t(), String.t()) :: String.t()
