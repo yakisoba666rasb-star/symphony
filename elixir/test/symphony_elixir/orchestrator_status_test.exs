@@ -5,6 +5,23 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     def lookup_workspace_head(_workspace_path, _branch_name), do: {:ok, nil}
   end
 
+  defmodule FakeGitHubIssueIntake do
+    def sync_open_issues_to_linear(settings, adapter) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:github_issue_intake_sync, settings.github_intake.state, adapter})
+
+        _ ->
+          :ok
+      end
+
+      {:ok, %{created: 1, skipped: 2, errors: 0}}
+    end
+  end
+
+  defmodule FakeLinearIntakeTracker do
+  end
+
   defmodule FakeGitHubPrLookupFound do
     def lookup_workspace_head(_workspace_path, _branch_name), do: {:ok, %{"number" => 123, "url" => "https://example.org/pull/123"}}
   end
@@ -724,6 +741,53 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       :ok
     end
+  end
+
+  test "GitHub issue intake sync runs when enabled and respects interval throttle" do
+    previous_github_issue = Application.get_env(:symphony_elixir, :github_issue)
+    previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_recipient = Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_github_issue),
+        do: Application.delete_env(:symphony_elixir, :github_issue),
+        else: Application.put_env(:symphony_elixir, :github_issue, previous_github_issue)
+
+      if is_nil(previous_tracker),
+        do: Application.delete_env(:symphony_elixir, :tracker_module),
+        else: Application.put_env(:symphony_elixir, :tracker_module, previous_tracker)
+
+      if is_nil(previous_recipient),
+        do: Application.delete_env(:symphony_elixir, :tracker_comment_recipient),
+        else: Application.put_env(:symphony_elixir, :tracker_comment_recipient, previous_recipient)
+    end)
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_team_key: "LAB",
+      tracker_all_projects: true,
+      repository_default: "octo/repo",
+      repository_project_routes: %{"octo/repo" => ["Symphony"]},
+      github_intake_enabled: true,
+      github_intake_state: "Backlog",
+      github_intake_interval_ms: 1_000
+    )
+
+    Application.put_env(:symphony_elixir, :github_issue, FakeGitHubIssueIntake)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeLinearIntakeTracker)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    state = Orchestrator.sync_github_issue_intake_for_test(%Orchestrator.State{})
+    assert is_integer(state.last_github_intake_sync_ms)
+    assert_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker}
+
+    _state = Orchestrator.sync_github_issue_intake_for_test(state)
+    refute_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker}
+
+    due_state = %{state | last_github_intake_sync_ms: System.monotonic_time(:millisecond) - 1_001}
+    _state = Orchestrator.sync_github_issue_intake_for_test(due_state)
+    assert_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker}
   end
 
   test "snapshot returns :timeout when snapshot server is unresponsive" do

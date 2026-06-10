@@ -368,6 +368,186 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     Process.put({FakeLinearClient, :graphql_result}, :unexpected)
     assert {:error, :issue_project_update_failed} = Adapter.update_issue_project("issue-1", "project-1")
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "attachmentsForURL" => %{
+             "nodes" => [%{"id" => "attachment-1", "url" => "https://github.com/octo/repo/issues/67", "issue" => %{"id" => "issue-1"}}]
+           }
+         }
+       }}
+    )
+
+    assert {:ok, true} = Adapter.github_issue_synced?("https://github.com/octo/repo/issues/67")
+    assert_receive {:graphql_called, attachment_lookup_query, %{url: "https://github.com/octo/repo/issues/67", first: 10}}
+    assert attachment_lookup_query =~ "attachmentsForURL"
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "teams" => %{
+             "nodes" => [
+               %{
+                 "id" => "team-1",
+                 "states" => %{"nodes" => [%{"id" => "state-backlog", "name" => "Backlog"}]},
+                 "projects" => %{
+                   "nodes" => [
+                     %{"id" => "project-1", "name" => "Symphony", "slugId" => "symphony"},
+                     %{"id" => "project-2", "name" => "Remote-mouse_v1", "slugId" => "remote-mouse-v1"}
+                   ]
+                 }
+               }
+             ]
+           }
+         }
+       }}
+    )
+
+    assert {:ok, %{team_id: "team-1", state_id: "state-backlog", project_id: "project-1", project_source: "Symphony"}} =
+             Adapter.resolve_github_intake_target("LAB", "Backlog", ["Symphony", "repo"])
+
+    assert_receive {:graphql_called, intake_target_query, %{teamKey: "LAB", stateName: "Backlog", first: 250}}
+    assert intake_target_query =~ "teams"
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issueCreate" => %{
+             "success" => true,
+             "issue" => %{"id" => "issue-1", "identifier" => "LAB-900", "url" => "https://linear.app/example/LAB-900"}
+           }
+         }
+       }}
+    )
+
+    assert {:ok, %{"id" => "issue-1"}} =
+             Adapter.create_github_backlog_issue(%{
+               team_id: "team-1",
+               state_id: "state-backlog",
+               project_id: "project-1",
+               title: "Fix source sync",
+               description: "Repo: octo/repo"
+             })
+
+    assert_receive {:graphql_called, create_issue_query, %{input: create_issue_input}}
+    assert create_issue_query =~ "issueCreate"
+    assert create_issue_input.teamId == "team-1"
+    assert create_issue_input.stateId == "state-backlog"
+    assert create_issue_input.projectId == "project-1"
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"attachmentCreate" => %{"success" => true, "attachment" => %{"id" => "attachment-1"}}}}}
+    )
+
+    assert :ok = Adapter.create_issue_attachment("issue-1", "GitHub issue #67", "https://github.com/octo/repo/issues/67")
+    assert_receive {:graphql_called, create_attachment_query, %{input: attachment_input}}
+    assert create_attachment_query =~ "attachmentCreate"
+    assert attachment_input.issueId == "issue-1"
+    assert attachment_input.url == "https://github.com/octo/repo/issues/67"
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"attachmentsForURL" => %{"nodes" => [%{"id" => "attachment-without-issue"}]}}}}
+    )
+
+    assert {:ok, false} = Adapter.github_issue_synced?("https://github.com/octo/repo/issues/68")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :attachment_lookup_down})
+    assert {:error, :attachment_lookup_down} = Adapter.github_issue_synced?("https://github.com/octo/repo/issues/68")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{}}})
+
+    assert {:error, :github_issue_attachment_lookup_failed} =
+             Adapter.github_issue_synced?("https://github.com/octo/repo/issues/68")
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"teams" => %{"nodes" => []}}}}
+    )
+
+    assert {:error, :github_intake_team_not_found} =
+             Adapter.resolve_github_intake_target("LAB", "Backlog", ["Symphony"])
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"teams" => %{"nodes" => [%{"id" => "team-1"}, %{"id" => "team-2"}]}}}}
+    )
+
+    assert {:error, {:github_intake_ambiguous_team, 2}} =
+             Adapter.resolve_github_intake_target("LAB", "Backlog", ["Symphony"])
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "teams" => %{
+             "nodes" => [
+               %{
+                 "id" => "team-1",
+                 "states" => %{"nodes" => [%{"id" => "state-backlog"}]},
+                 "projects" => %{
+                   "nodes" => [
+                     %{"id" => "project-1", "name" => "Worker App", "slugId" => "worker-app"},
+                     %{"id" => "project-2", "name" => "worker_app", "slugId" => "worker-app-2"}
+                   ]
+                 }
+               }
+             ]
+           }
+         }
+       }}
+    )
+
+    assert {:error, {:ambiguous_project_match, projects}} =
+             Adapter.resolve_github_intake_target("LAB", "Backlog", ["worker-app"])
+
+    assert [%{id: "project-1"}, %{id: "project-2"}] = projects
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "teams" => %{
+             "nodes" => [
+               %{
+                 "id" => "team-1",
+                 "states" => %{"nodes" => [%{"id" => "state-backlog"}]},
+                 "projects" => %{"nodes" => [%{"id" => "project-1", "name" => "Symphony", "slugId" => "symphony"}]}
+               }
+             ]
+           }
+         }
+       }}
+    )
+
+    assert {:error, :no_project_match} =
+             Adapter.resolve_github_intake_target("LAB", "Backlog", ["missing"])
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{"issueCreate" => %{"success" => false}}}})
+    assert {:error, :github_backlog_issue_create_failed} = Adapter.create_github_backlog_issue(%{title: "broken"})
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :issue_create_down})
+    assert {:error, :issue_create_down} = Adapter.create_github_backlog_issue(%{title: "boom"})
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{"attachmentCreate" => %{"success" => false}}}})
+
+    assert {:error, :issue_attachment_create_failed} =
+             Adapter.create_issue_attachment("issue-1", "GitHub issue #67", "https://github.com/octo/repo/issues/67")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :attachment_create_down})
+
+    assert {:error, :attachment_create_down} =
+             Adapter.create_issue_attachment("issue-1", "GitHub issue #67", "https://github.com/octo/repo/issues/67")
   end
 
   test "phoenix observability api preserves state, issue, and refresh responses" do

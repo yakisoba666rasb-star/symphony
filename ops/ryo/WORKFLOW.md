@@ -18,6 +18,11 @@ tracker:
     - Duplicate
 polling:
   interval_ms: 30000
+github_intake:
+  enabled: true
+  state: Backlog
+  interval_ms: 300000
+  limit: 100
 workspace:
   root: /home/ryo/workspaces/symphony
 repository:

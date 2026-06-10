@@ -1,7 +1,325 @@
 defmodule SymphonyElixir.GitHubIssueTest do
   use ExUnit.Case
 
+  alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.GitHubIssue
+
+  defmodule FakeLinearIntakeAdapter do
+    def github_issue_synced?(url) do
+      send_recipient({:github_issue_synced?, url})
+      {:ok, Application.get_env(:symphony_elixir, :github_issue_synced?, false)}
+    end
+
+    def resolve_github_intake_target(team_key, state_name, aliases) do
+      send_recipient({:resolve_github_intake_target, team_key, state_name, aliases})
+
+      case Application.get_env(:symphony_elixir, :github_intake_target_result, :ok) do
+        :ok ->
+          {:ok, %{team_id: "team-1", state_id: "state-backlog", project_id: "project-1", project_source: "Symphony"}}
+
+        result ->
+          result
+      end
+    end
+
+    def create_github_backlog_issue(attrs) do
+      send_recipient({:create_github_backlog_issue, attrs})
+
+      case Application.get_env(:symphony_elixir, :github_intake_create_result, :ok) do
+        :ok -> {:ok, %{"id" => "linear-1", "identifier" => "LAB-900", "url" => "https://linear.app/example/LAB-900"}}
+        result -> result
+      end
+    end
+
+    def create_issue_attachment(issue_id, title, url) do
+      send_recipient({:create_issue_attachment, issue_id, title, url})
+      Application.get_env(:symphony_elixir, :github_intake_attachment_result, :ok)
+    end
+
+    defp send_recipient(message) do
+      case Application.get_env(:symphony_elixir, :github_issue_test_recipient) do
+        recipient when is_pid(recipient) -> send(recipient, message)
+        _ -> :ok
+      end
+    end
+  end
+
+  setup do
+    keys = [
+      :github_issue_test_recipient,
+      :github_issue_synced?,
+      :github_intake_target_result,
+      :github_intake_create_result,
+      :github_intake_attachment_result
+    ]
+
+    previous = Map.new(keys, &{&1, Application.get_env(:symphony_elixir, &1, :__missing__)})
+
+    on_exit(fn ->
+      Enum.each(previous, fn
+        {key, :__missing__} -> Application.delete_env(:symphony_elixir, key)
+        {key, value} -> Application.put_env(:symphony_elixir, key, value)
+      end)
+    end)
+
+    Application.put_env(:symphony_elixir, :github_issue_test_recipient, self())
+    :ok
+  end
+
+  test "syncs open GitHub issues into Linear Backlog with attachment dedupe" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", args, _opts ->
+        send(self(), {:command, args})
+
+        case args do
+          [
+            "issue",
+            "list",
+            "--repo",
+            "octo/repo",
+            "--state",
+            "open",
+            "--limit",
+            "25",
+            "--json",
+            "number,title,body,url"
+          ] ->
+            {:ok,
+             {Jason.encode!([
+                %{
+                  "number" => 67,
+                  "title" => "Fix source sync",
+                  "body" => "body text",
+                  "url" => "https://github.com/octo/repo/issues/67"
+                }
+              ]), 0}}
+        end
+      end
+    }
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeAdapter, deps)
+
+    assert_received {:command,
+                     [
+                       "issue",
+                       "list",
+                       "--repo",
+                       "octo/repo",
+                       "--state",
+                       "open",
+                       "--limit",
+                       "25",
+                       "--json",
+                       "number,title,body,url"
+                     ]}
+
+    assert_received {:github_issue_synced?, "https://github.com/octo/repo/issues/67"}
+    assert_received {:resolve_github_intake_target, "LAB", "Backlog", ["Symphony", "repo"]}
+
+    assert_received {:create_github_backlog_issue,
+                     %{
+                       team_id: "team-1",
+                       state_id: "state-backlog",
+                       project_id: "project-1",
+                       title: "Fix source sync",
+                       description: "Repo: octo/repo\n\nGitHub Issue: https://github.com/octo/repo/issues/67\n\nbody text"
+                     }}
+
+    assert_received {:create_issue_attachment, "linear-1", "GitHub issue #67: Fix source sync", "https://github.com/octo/repo/issues/67"}
+  end
+
+  test "sync skips GitHub issues that already have Linear attachments" do
+    Application.put_env(:symphony_elixir, :github_issue_synced?, true)
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{"number" => 67, "title" => "Already synced", "body" => "", "url" => "https://github.com/octo/repo/issues/67"}
+          ]), 0}}
+      end
+    }
+
+    assert {:ok, %{created: 0, skipped: 1, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeAdapter, deps)
+
+    assert_received {:github_issue_synced?, "https://github.com/octo/repo/issues/67"}
+    refute_received {:create_github_backlog_issue, _attrs}
+  end
+
+  test "sync skips GitHub issues when no unique Linear project matches" do
+    Application.put_env(:symphony_elixir, :github_intake_target_result, {:error, :no_project_match})
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{"number" => 67, "title" => "No project", "body" => "", "url" => "https://github.com/octo/repo/issues/67"}
+          ]), 0}}
+      end
+    }
+
+    assert {:ok, %{created: 0, skipped: 1, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeAdapter, deps)
+
+    assert_received {:resolve_github_intake_target, "LAB", "Backlog", ["Symphony", "repo"]}
+    refute_received {:create_github_backlog_issue, _attrs}
+  end
+
+  test "sync is a no-op when GitHub intake is disabled" do
+    settings =
+      intake_settings(%{
+        "github_intake" => %{"enabled" => false}
+      })
+
+    assert {:ok, %{created: 0, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(settings, FakeLinearIntakeAdapter)
+  end
+
+  test "sync returns an adapter capability error before shelling out" do
+    deps = %{
+      find_gh_bin: fn -> flunk("unsupported adapter should stop before finding gh") end,
+      run_command: fn _cmd, _args, _opts -> flunk("unsupported adapter should stop before running gh") end
+    }
+
+    assert {:error, {:linear_adapter_missing_github_intake, String}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), String, deps)
+  end
+
+  test "sync records repo-level gh list failures as errors" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts -> {:ok, {"rate limited", 1}} end
+    }
+
+    assert {:ok, %{created: 0, skipped: 0, errors: 1}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeAdapter, deps)
+  end
+
+  test "sync skips malformed GitHub issue list items and uses fallback titles" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{"title" => "missing url"},
+            %{"number" => 68, "title" => "", "body" => nil, "url" => "https://github.com/octo/repo/issues/68"}
+          ]), 0}}
+      end
+    }
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeAdapter, deps)
+
+    assert_received {:create_github_backlog_issue,
+                     %{
+                       title: "GitHub issue",
+                       description: "Repo: octo/repo\n\nGitHub Issue: https://github.com/octo/repo/issues/68"
+                     }}
+
+    assert_received {:create_issue_attachment, "linear-1", "GitHub issue #68", "https://github.com/octo/repo/issues/68"}
+  end
+
+  test "sync treats ambiguous project and create failures as skip or error" do
+    Application.put_env(
+      :symphony_elixir,
+      :github_intake_target_result,
+      {:error, {:ambiguous_project_match, [%{id: "project-1"}, %{id: "project-2"}]}}
+    )
+
+    deps = single_issue_list_deps()
+
+    assert {:ok, %{created: 0, skipped: 1, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeAdapter, deps)
+
+    Application.put_env(:symphony_elixir, :github_intake_target_result, :ok)
+    Application.put_env(:symphony_elixir, :github_intake_create_result, {:error, :linear_down})
+
+    assert {:ok, %{created: 0, skipped: 0, errors: 1}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeAdapter, deps)
+  end
+
+  test "sync returns malformed gh issue list errors at repo level" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts -> {:ok, {Jason.encode!(%{"not" => "a list"}), 0}} end
+    }
+
+    assert {:ok, %{created: 0, skipped: 0, errors: 1}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeAdapter, deps)
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts -> {:ok, {"{", 0}} end
+    }
+
+    assert {:ok, %{created: 0, skipped: 0, errors: 1}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeAdapter, deps)
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts -> {:error, :enoent} end
+    }
+
+    assert {:ok, %{created: 0, skipped: 0, errors: 1}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeAdapter, deps)
+  end
+
+  test "sync handles GitHub issue payloads without titles or numbers" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{"number" => 69, "body" => "", "url" => "https://github.com/octo/repo/issues/69"},
+            %{"body" => "", "url" => "https://github.com/octo/repo/issues/70"}
+          ]), 0}}
+      end
+    }
+
+    assert {:ok, %{created: 2, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeAdapter, deps)
+
+    assert_received {:create_github_backlog_issue, %{title: "GitHub issue #69"}}
+    assert_received {:create_issue_attachment, "linear-1", "GitHub issue #69", "https://github.com/octo/repo/issues/69"}
+    assert_received {:create_github_backlog_issue, %{title: "GitHub issue"}}
+    assert_received {:create_issue_attachment, "linear-1", "GitHub issue", "https://github.com/octo/repo/issues/70"}
+  end
+
+  test "sync logs created Linear issues without URL using available labels" do
+    Application.put_env(:symphony_elixir, :github_intake_create_result, {:ok, %{"id" => "linear-2", "identifier" => "LAB-902"}})
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(
+               intake_settings(),
+               FakeLinearIntakeAdapter,
+               single_issue_list_deps()
+             )
+
+    Application.put_env(:symphony_elixir, :github_intake_create_result, {:ok, %{"id" => "linear-3"}})
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(
+               intake_settings(),
+               FakeLinearIntakeAdapter,
+               single_issue_list_deps()
+             )
+  end
+
+  test "sync reports created Linear issues that do not return an id as errors" do
+    Application.put_env(:symphony_elixir, :github_intake_create_result, {:ok, %{"identifier" => "LAB-901"}})
+
+    assert {:ok, %{created: 0, skipped: 0, errors: 1}} =
+             GitHubIssue.sync_open_issues_to_linear(
+               intake_settings(),
+               FakeLinearIntakeAdapter,
+               single_issue_list_deps()
+             )
+  end
 
   test "closes open source issue in the matching repository" do
     parent = self()
@@ -177,6 +495,23 @@ defmodule SymphonyElixir.GitHubIssueTest do
              )
   end
 
+  test "returns view command runtime errors" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", ["issue", "view", "67", "--repo", "octo/repo", "--json", "state"], _opts ->
+        {:error, :enoent}
+      end
+    }
+
+    assert {:error, {:gh_issue_view_failed, :enoent}} =
+             GitHubIssue.close_if_open(
+               "octo/repo",
+               "https://github.com/octo/repo/issues/67",
+               "done via PR",
+               deps
+             )
+  end
+
   test "returns invalid view payload errors" do
     deps = %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,
@@ -247,5 +582,56 @@ defmodule SymphonyElixir.GitHubIssueTest do
                "done via PR",
                deps
              )
+  end
+
+  test "returns close command runtime errors" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-gh", ["issue", "view", "67", "--repo", "octo/repo", "--json", "state"], _opts ->
+          {:ok, {Jason.encode!(%{"state" => "OPEN"}), 0}}
+
+        "/tmp/fake-gh", ["issue", "close", "67", "--repo", "octo/repo", "--comment", "done via PR"], _opts ->
+          {:error, :eacces}
+      end
+    }
+
+    assert {:error, {:gh_issue_close_failed, :eacces}} =
+             GitHubIssue.close_if_open(
+               "octo/repo",
+               "https://github.com/octo/repo/issues/67",
+               "done via PR",
+               deps
+             )
+  end
+
+  defp single_issue_list_deps do
+    %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{"number" => 67, "title" => "Fix source sync", "body" => "", "url" => "https://github.com/octo/repo/issues/67"}
+          ]), 0}}
+      end
+    }
+  end
+
+  defp intake_settings(overrides \\ %{}) do
+    config =
+      %{
+        "tracker" => %{"kind" => "linear", "team_key" => "LAB", "api_key" => "token", "all_projects" => true},
+        "github_intake" => %{"enabled" => true, "state" => "Backlog", "limit" => 25},
+        "repository" => %{
+          "default" => "octo/repo",
+          "project_routes" => %{"octo/repo" => ["Symphony"]}
+        }
+      }
+      |> Map.merge(overrides)
+
+    {:ok, settings} =
+      Schema.parse(config)
+
+    settings
   end
 end
