@@ -10,6 +10,26 @@ defmodule SymphonyElixir.CoreTest do
       do: {:ok, %{"number" => 236, "url" => "https://github.example/pull/236"}}
   end
 
+  defmodule FakeGitHubPrLookupReadyHandoff do
+    def lookup_workspace_handoff_pr(workspace_path, branch_name, attachment_urls) do
+      send(test_pid(), {:handoff_pr_lookup, workspace_path, branch_name, attachment_urls})
+
+      {:ok,
+       %{
+         "number" => 248,
+         "url" => "https://github.example/pull/248",
+         "headRefName" => branch_name,
+         "isDraft" => false,
+         "state" => "OPEN",
+         "__symphonyLookupSource" => "branch"
+       }}
+    end
+
+    defp test_pid do
+      Application.fetch_env!(:symphony_elixir, :test_pid)
+    end
+  end
+
   defmodule FakeGitHubPrPublisherError do
     def publish_workspace(_workspace_path, _branch_name, _issue), do: {:error, :publish_blocked}
   end
@@ -2283,6 +2303,99 @@ defmodule SymphonyElixir.CoreTest do
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
       File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner stops clean continuation when ready handoff PR is discoverable" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-ready-pr-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_test_pid = Application.get_env(:symphony_elixir, :test_pid)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+
+      File.mkdir_p!(test_root)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex.trace}"
+      printf 'RUN\\n' >> "$trace_file"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-ready-pr"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-ready-pr-1"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupReadyHandoff)
+      Application.put_env(:symphony_elixir, :test_pid, self())
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git init -b main && git config user.name Test && git config user.email test@example.com && echo first > README.md && git add README.md && git commit -m initial",
+        codex_command: "#{codex_binary} app-server",
+        max_turns: 3
+      )
+
+      state_fetcher = fn [_issue_id] ->
+        send(self(), :unexpected_issue_state_fetch)
+        {:ok, [%Issue{id: "issue-ready-pr", identifier: "MT-READY-PR", state: "In Progress"}]}
+      end
+
+      issue = %Issue{
+        id: "issue-ready-pr",
+        identifier: "MT-READY-PR",
+        title: "Ready PR stops continuation",
+        description: "Runtime should hand off instead of continuing no-op turns",
+        state: "In Progress",
+        branch_name: "feature/ready-pr",
+        attachment_urls: ["https://github.example/pull/248"]
+      }
+
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+
+      workspace = Path.join(workspace_root, "MT-READY-PR")
+      assert_receive {:handoff_pr_lookup, ^workspace, "feature/ready-pr", ["https://github.example/pull/248"]}, 1_000
+      refute_receive :unexpected_issue_state_fetch, 100
+
+      trace = File.read!(trace_file)
+      assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 1
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+
+      if is_nil(previous_lookup),
+        do: Application.delete_env(:symphony_elixir, :github_pr_lookup),
+        else: Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+
+      if is_nil(previous_test_pid),
+        do: Application.delete_env(:symphony_elixir, :test_pid),
+        else: Application.put_env(:symphony_elixir, :test_pid, previous_test_pid)
     end
   end
 

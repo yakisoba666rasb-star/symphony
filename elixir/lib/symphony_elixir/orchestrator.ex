@@ -1325,16 +1325,173 @@ defmodule SymphonyElixir.Orchestrator do
   defp present_string?(_value), do: false
 
   defp lookup_merged_pull_request_for_done(%Issue{} = issue, repo, attachment_urls) do
-    if Enum.any?(attachment_urls, &github_pull_request_url?/1) do
-      case lookup_merged_linked_pull_request(repo, attachment_urls) do
-        {:ok, nil} -> lookup_merged_issue_pull_request(repo, issue)
-        {:error, {:missing_lookup_merged_linked_pull_request, _module}} -> lookup_merged_issue_pull_request(repo, issue)
-        other -> other
-      end
+    if present_string?(issue.branch_name) do
+      lookup_implementation_merged_pull_request_for_done(issue, repo, attachment_urls)
     else
-      lookup_merged_issue_pull_request(repo, issue)
+      lookup_merged_linked_pull_request_for_done(issue, repo, attachment_urls, true)
     end
   end
+
+  defp lookup_implementation_merged_pull_request_for_done(%Issue{} = issue, repo, attachment_urls) do
+    case lookup_merged_issue_pull_request(repo, issue) do
+      {:ok, %{} = pr} ->
+        Logger.info(
+          "Merged PR Done sync selected implementation PR for #{issue_context(issue)} " <>
+            "repo=#{repo} branch=#{issue.branch_name} pr=#{pr_url(pr)} source=#{inspect(pr_lookup_source(pr))}"
+        )
+
+        {:ok, pr}
+
+      {:ok, nil} ->
+        lookup_open_or_linked_pull_request_for_done(issue, repo, attachment_urls)
+
+      {:error, reason} ->
+        Logger.warning(
+          "Merged PR Done sync rejected implementation lookup for #{issue_context(issue)} " <>
+            "repo=#{repo} branch=#{issue.branch_name} reason=#{inspect(reason)}"
+        )
+
+        {:error, reason}
+    end
+  end
+
+  defp lookup_open_or_linked_pull_request_for_done(%Issue{} = issue, repo, attachment_urls) do
+    case lookup_open_issue_pull_request_for_done(repo, issue, attachment_urls) do
+      {:ok, %{} = pr} ->
+        Logger.info(
+          "Merged PR Done sync rejected linked PR attachments for #{issue_context(issue)} " <>
+            "repo=#{repo} branch=#{issue.branch_name}; implementation PR is still open pr=#{pr_url(pr)}"
+        )
+
+        {:ok, nil}
+
+      {:ok, nil} ->
+        Logger.info(
+          "Merged PR Done sync found no merged or open implementation PR for #{issue_context(issue)} " <>
+            "repo=#{repo} branch=#{issue.branch_name}; checking linked PR attachments for branch match"
+        )
+
+        lookup_branch_matched_merged_linked_pull_request_for_done(issue, repo, attachment_urls)
+
+      {:error, reason} ->
+        Logger.warning(
+          "Merged PR Done sync rejected linked PR attachments for #{issue_context(issue)} " <>
+            "repo=#{repo} branch=#{issue.branch_name}; implementation PR lookup failed reason=#{inspect(reason)}"
+        )
+
+        {:error, {:implementation_pr_lookup_failed, reason}}
+    end
+  end
+
+  defp lookup_branch_matched_merged_linked_pull_request_for_done(%Issue{} = issue, repo, attachment_urls) do
+    case lookup_merged_linked_pull_request_for_done(issue, repo, attachment_urls, false) do
+      {:ok, %{} = pr} ->
+        if pr_branch_matches_issue?(pr, issue) do
+          Logger.info(
+            "Merged PR Done sync accepted linked PR attachment for #{issue_context(issue)} " <>
+              "repo=#{repo} branch=#{issue.branch_name} pr=#{pr_url(pr)} head=#{inspect(pr_head_ref(pr))}"
+          )
+
+          {:ok, pr}
+        else
+          Logger.info(
+            "Merged PR Done sync rejected linked PR attachment for #{issue_context(issue)} " <>
+              "repo=#{repo} branch=#{issue.branch_name} pr=#{pr_url(pr)} head=#{inspect(pr_head_ref(pr))} " <>
+              "reason=:branch_mismatch_after_implementation_lookup"
+          )
+
+          {:ok, nil}
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp lookup_merged_linked_pull_request_for_done(%Issue{} = issue, repo, attachment_urls, fallback_to_issue_evidence?) do
+    if Enum.any?(attachment_urls, &github_pull_request_url?/1) do
+      lookup_merged_linked_pull_request(repo, attachment_urls)
+      |> handle_merged_linked_pull_request_for_done(issue, repo, fallback_to_issue_evidence?)
+    else
+      fallback_to_merged_issue_pull_request_for_done(issue, repo, fallback_to_issue_evidence?)
+    end
+  end
+
+  defp handle_merged_linked_pull_request_for_done({:ok, %{} = pr}, issue, repo, fallback_to_issue_evidence?) do
+    if linked_done_sync_pr_matches_issue?(issue, pr, fallback_to_issue_evidence?) do
+      Logger.info(
+        "Merged PR Done sync selected linked PR attachment for #{issue_context(issue)} " <>
+          "repo=#{repo} pr=#{pr_url(pr)} source=#{inspect(pr_lookup_source(pr))}"
+      )
+
+      {:ok, pr}
+    else
+      Logger.info(
+        "Merged PR Done sync rejected linked PR attachment for #{issue_context(issue)} " <>
+          "repo=#{repo} pr=#{pr_url(pr)} linked_branch=#{inspect(pr_head_branch(pr))} " <>
+          "implementation_branch=#{inspect(issue.branch_name)}"
+      )
+
+      {:ok, nil}
+    end
+  end
+
+  defp handle_merged_linked_pull_request_for_done({:ok, nil}, issue, repo, fallback_to_issue_evidence?) do
+    Logger.info(
+      "Merged PR Done sync rejected linked PR attachments for #{issue_context(issue)} " <>
+        "repo=#{repo}; no merged linked PR found"
+    )
+
+    fallback_to_merged_issue_pull_request_for_done(issue, repo, fallback_to_issue_evidence?)
+  end
+
+  defp handle_merged_linked_pull_request_for_done(
+         {:error, {:missing_lookup_merged_linked_pull_request, _module}},
+         issue,
+         repo,
+         fallback_to_issue_evidence?
+       ) do
+    fallback_to_merged_issue_pull_request_for_done(issue, repo, fallback_to_issue_evidence?)
+  end
+
+  defp handle_merged_linked_pull_request_for_done({:error, reason}, issue, repo, _fallback_to_issue_evidence?) do
+    Logger.warning(
+      "Merged PR Done sync rejected linked PR attachments for #{issue_context(issue)} " <>
+        "repo=#{repo} reason=#{inspect(reason)}"
+    )
+
+    {:error, reason}
+  end
+
+  defp handle_merged_linked_pull_request_for_done(other, _issue, _repo, _fallback_to_issue_evidence?), do: other
+
+  defp fallback_to_merged_issue_pull_request_for_done(issue, repo, true),
+    do: lookup_merged_issue_pull_request(repo, issue)
+
+  defp fallback_to_merged_issue_pull_request_for_done(_issue, _repo, false), do: {:ok, nil}
+
+  defp linked_done_sync_pr_matches_issue?(_issue, _pr, true), do: true
+
+  defp linked_done_sync_pr_matches_issue?(%Issue{branch_name: branch_name}, pr, false) do
+    present_string?(branch_name) and pr_head_branch(pr) == branch_name
+  end
+
+  defp pr_head_branch(%{"headRefName" => branch}) when is_binary(branch), do: branch
+  defp pr_head_branch(%{headRefName: branch}) when is_binary(branch), do: branch
+  defp pr_head_branch(_pr), do: nil
+
+  defp pr_lookup_source(%{"__symphonyLookupSource" => source}), do: source
+  defp pr_lookup_source(_pr), do: nil
+
+  defp pr_branch_matches_issue?(%{} = pr, %Issue{branch_name: branch_name}) when is_binary(branch_name) do
+    String.trim(branch_name) != "" and pr_head_ref(pr) == String.trim(branch_name)
+  end
+
+  defp pr_branch_matches_issue?(_pr, _issue), do: false
+
+  defp pr_head_ref(%{"headRefName" => branch}) when is_binary(branch), do: String.trim(branch)
+  defp pr_head_ref(%{headRefName: branch}) when is_binary(branch), do: String.trim(branch)
+  defp pr_head_ref(_pr), do: nil
 
   defp close_source_github_issue_after_done(%Issue{} = issue, repo, pr) do
     issue_url = RepositoryResolver.source_github_issue_url(issue)
@@ -1385,6 +1542,24 @@ defmodule SymphonyElixir.Orchestrator do
 
     if module_exports?(lookup_module, :lookup_merged_issue_pull_request, 4) do
       lookup_module.lookup_merged_issue_pull_request(repo, issue.identifier, issue.url, issue.branch_name)
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp lookup_open_issue_pull_request_for_done(repo, %Issue{} = issue, _attachment_urls) do
+    lookup_module = github_pr_lookup_module()
+
+    if module_exports?(lookup_module, :lookup_open_issue_pull_request, 5) do
+      # Done sync uses open lookup only to detect an active implementation PR.
+      # Linked attachments are handled separately by the merged-linked branch gate.
+      lookup_module.lookup_open_issue_pull_request(
+        repo,
+        issue.identifier,
+        issue.url,
+        issue.branch_name,
+        []
+      )
     else
       {:ok, nil}
     end
@@ -1458,9 +1633,8 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(issue_id) do
     normalize_issue_state(state_name) == "in progress" and
       candidate_issue?(issue, active_states, terminal_states) and
-      !MapSet.member?(state.claimed, issue_id) and
       !MapSet.member?(state.completed, issue_id) and
-      !Map.has_key?(state.running, issue_id) and
+      open_pr_handoff_claim_reconcilable?(state, issue_id) and
       !Map.has_key?(state.blocked, issue_id) and
       !pending_review_handoff_for_issue?(state, issue_id)
   end
@@ -1468,10 +1642,14 @@ defmodule SymphonyElixir.Orchestrator do
   defp open_pr_handoff_reconcile_candidate?(_issue, _state, _active_states, _terminal_states),
     do: false
 
+  defp open_pr_handoff_claim_reconcilable?(%State{} = state, issue_id) do
+    !MapSet.member?(state.claimed, issue_id) or Map.has_key?(state.running, issue_id)
+  end
+
   defp reconcile_active_open_pr_handoff(%Issue{} = issue, %State{} = state) do
     case lookup_open_pr_for_dispatch(issue) do
       {:ok, %{} = pr} ->
-        {:handoff, state} = start_existing_open_pr_handoff(state, issue, pr, reason: :polling_reconcile)
+        {:handoff, state} = start_reconciled_open_pr_handoff(state, issue, pr)
         state
 
       {:ok, nil} ->
@@ -1487,6 +1665,38 @@ defmodule SymphonyElixir.Orchestrator do
 
         state
     end
+  end
+
+  defp start_reconciled_open_pr_handoff(%State{} = state, %Issue{} = issue, %{} = pr) do
+    case Map.get(state.running, issue.id) do
+      nil ->
+        start_existing_open_pr_handoff(state, issue, pr, reason: :polling_reconcile)
+
+      running_entry ->
+        start_running_open_pr_handoff(state, issue, running_entry, pr)
+    end
+  end
+
+  defp start_running_open_pr_handoff(%State{} = state, %Issue{} = issue, running_entry, %{} = pr) do
+    session_id = open_pr_handoff_session_id(:polling_reconcile)
+
+    running_entry =
+      running_entry
+      |> refresh_running_entry_issue(issue)
+      |> Map.put(:branch_name, pr["headRefName"] || Map.get(running_entry, :branch_name) || issue.branch_name)
+      |> Map.put(:session_id, Map.get(running_entry, :session_id) || session_id)
+
+    Logger.info(
+      "Open PR discovered during active running issue reconcile for #{issue_context(issue)}; " <>
+        "stopping implementation worker and starting review handoff pr=#{pr_url(pr)}"
+    )
+
+    state =
+      state
+      |> terminate_running_issue(issue.id, false)
+      |> Map.update!(:claimed, &MapSet.put(&1, issue.id))
+
+    {:handoff, start_review_handoff_task(state, :normal, issue.id, running_entry, session_id, pr, nil)}
   end
 
   defp reconcile_running_issues(%State{} = state) do

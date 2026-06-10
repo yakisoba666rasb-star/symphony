@@ -102,19 +102,23 @@ defmodule SymphonyElixir.GitHubPrLookup do
       )
       when is_binary(repo) and is_list(attachment_urls) do
     with {:ok, gh_bin} <- find_gh_binary(deps) do
-      case lookup_linked_pull_request(repo, branch_name, attachment_urls, deps) do
+      case lookup_open_issue_pull_request_by_issue(repo, issue_identifier, issue_url, branch_name, gh_bin, deps) do
         {:ok, %{} = pr} ->
           {:ok, pr}
 
         {:ok, nil} ->
-          issue_pr_search_terms(issue_identifier, issue_url, branch_name)
-          |> lookup_open_issue_pr_candidates(gh_bin, repo, deps)
-          |> pick_open_issue_pull_request(issue_identifier, issue_url, branch_name)
+          lookup_linked_pull_request(repo, branch_name, attachment_urls, deps)
 
         {:error, reason} ->
           {:error, reason}
       end
     end
+  end
+
+  defp lookup_open_issue_pull_request_by_issue(repo, issue_identifier, issue_url, branch_name, gh_bin, deps) do
+    issue_pr_search_terms(issue_identifier, issue_url, branch_name)
+    |> lookup_open_issue_pr_candidates(gh_bin, repo, deps)
+    |> pick_open_issue_pull_request(issue_identifier, issue_url, branch_name)
   end
 
   @spec runtime_deps() :: deps()
@@ -443,7 +447,7 @@ defmodule SymphonyElixir.GitHubPrLookup do
   defp match_pr_by_head_sha({:error, reason}, _head_sha, _expected_branch), do: {:error, reason}
 
   defp issue_pr_search_terms(issue_identifier, issue_url, branch_name) do
-    [issue_identifier, issue_url, branch_name]
+    [branch_name, issue_url, issue_identifier]
     |> Enum.filter(&present_string?/1)
     |> Enum.map(&String.trim/1)
     |> Enum.uniq()

@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, GitHubPrLookup, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @ignored_dirty_status_pathspecs [
     ":!.symphony-review-verdict.json",
@@ -150,6 +150,53 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp continue_after_clean_turn(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+    case ready_handoff_pr_after_clean_turn(workspace, issue) do
+      {:ok, %{} = pr} ->
+        Logger.info(
+          "Ready PR already discoverable for #{issue_context(issue)} after clean turn; stopping for runtime review handoff " <>
+            "pr=#{pr_url(pr)} branch=#{inspect(issue.branch_name)} source=#{inspect(pr_lookup_source(pr))}"
+        )
+
+        :ok
+
+      {:ok, nil} ->
+        continue_after_clean_turn_issue_state(
+          app_session,
+          workspace,
+          issue,
+          codex_update_recipient,
+          opts,
+          issue_state_fetcher,
+          turn_number,
+          max_turns
+        )
+
+      {:error, reason} ->
+        Logger.warning("Ready PR handoff lookup failed for #{issue_context(issue)} after clean turn; continuing active issue check reason=#{inspect(reason)}")
+
+        continue_after_clean_turn_issue_state(
+          app_session,
+          workspace,
+          issue,
+          codex_update_recipient,
+          opts,
+          issue_state_fetcher,
+          turn_number,
+          max_turns
+        )
+    end
+  end
+
+  defp continue_after_clean_turn_issue_state(
+         app_session,
+         workspace,
+         issue,
+         codex_update_recipient,
+         opts,
+         issue_state_fetcher,
+         turn_number,
+         max_turns
+       ) do
     case continue_with_issue?(issue, issue_state_fetcher) do
       {:continue, refreshed_issue} when turn_number < max_turns ->
         Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
@@ -177,6 +224,73 @@ defmodule SymphonyElixir.AgentRunner do
         {:error, reason}
     end
   end
+
+  defp ready_handoff_pr_after_clean_turn(workspace, %Issue{branch_name: branch_name} = issue)
+       when is_binary(workspace) and is_binary(branch_name) do
+    case String.trim(branch_name) do
+      "" ->
+        {:ok, nil}
+
+      branch_name ->
+        lookup_ready_handoff_pr_after_clean_turn(workspace, branch_name, issue)
+    end
+  end
+
+  defp ready_handoff_pr_after_clean_turn(_workspace, _issue), do: {:ok, nil}
+
+  defp lookup_ready_handoff_pr_after_clean_turn(workspace, branch_name, issue) do
+    lookup_module = Application.get_env(:symphony_elixir, :github_pr_lookup, GitHubPrLookup)
+    attachment_urls = issue_attachment_urls(issue)
+
+    lookup_result =
+      if Code.ensure_loaded?(lookup_module) and function_exported?(lookup_module, :lookup_workspace_handoff_pr, 3) do
+        lookup_module.lookup_workspace_handoff_pr(workspace, branch_name, attachment_urls)
+      else
+        lookup_module.lookup_workspace_head(workspace, branch_name)
+      end
+
+    normalize_ready_handoff_pr_after_clean_turn(lookup_result, issue)
+  end
+
+  defp normalize_ready_handoff_pr_after_clean_turn({:ok, %{} = pr}, issue) do
+    if ready_handoff_pr?(pr) do
+      {:ok, pr}
+    else
+      Logger.info(
+        "PR found for #{issue_context(issue)} after clean turn but rejected for ready handoff " <>
+          "pr=#{pr_url(pr)} state=#{inspect(pr_state(pr))} draft=#{inspect(pr_draft?(pr))}"
+      )
+
+      {:ok, nil}
+    end
+  end
+
+  defp normalize_ready_handoff_pr_after_clean_turn(other, _issue), do: other
+
+  defp issue_attachment_urls(%Issue{attachment_urls: attachment_urls}) when is_list(attachment_urls),
+    do: attachment_urls
+
+  defp issue_attachment_urls(_issue), do: []
+
+  defp ready_handoff_pr?(pr) do
+    pr_state(pr) == "OPEN" and pr_draft?(pr) != true
+  end
+
+  defp pr_state(%{"state" => state}) when is_binary(state), do: String.upcase(state)
+  defp pr_state(%{state: state}) when is_binary(state), do: String.upcase(state)
+  defp pr_state(_pr), do: nil
+
+  defp pr_draft?(%{"isDraft" => draft}), do: draft
+  defp pr_draft?(%{isDraft: draft}), do: draft
+  defp pr_draft?(_pr), do: nil
+
+  defp pr_url(%{"url" => url}) when is_binary(url), do: url
+  defp pr_url(%{url: url}) when is_binary(url), do: url
+  defp pr_url(_pr), do: "unknown"
+
+  defp pr_lookup_source(%{"__symphonyLookupSource" => source}), do: source
+  defp pr_lookup_source(%{__symphonyLookupSource: source}), do: source
+  defp pr_lookup_source(_pr), do: nil
 
   defp workspace_has_changes?(workspace) when is_binary(workspace) do
     case System.cmd("git", ["-C", workspace, "status", "--porcelain", "--"] ++ @ignored_dirty_status_pathspecs, stderr_to_stdout: true) do
