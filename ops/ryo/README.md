@@ -1,8 +1,7 @@
 # Ryo Runtime Deployment
 
 This directory is the Symphony-owned runtime configuration for the Ryo Pi deployment.
-It replaces the previous dependency on `yakisoba666rasb-star/Symphony-Ryo-Lab` as
-the runtime configuration repository.
+It uses the runtime engine repository itself as the deployment source of truth.
 
 ## Target State
 
@@ -10,14 +9,13 @@ the runtime configuration repository.
 - Runtime workflow: `/home/ryo/src/symphony/ops/ryo/WORKFLOW.md`
 - Runtime workspace root: `/home/ryo/workspaces/symphony`
 - Runtime Linear project: `Symphony`
-- Legacy Lab repo dispatch: disabled by route alias mismatch
+- Runtime repository route: `yakisoba666rasb-star/symphony` -> `Symphony`
 
 `repository.project_routes` keeps repository/project ownership explicit:
 
 - `yakisoba666rasb-star/symphony` must be in Linear project `Symphony`.
-- `yakisoba666rasb-star/Symphony-Ryo-Lab` maps to
-  `ArchivedSymphonyRyoLabDoNotDispatch`, which intentionally matches no active
-  Linear project after the Lab repo is retired.
+- Repositories whose Linear project does not match the repository name must
+  provide their own explicit route before dispatch.
 
 ## Install
 
@@ -40,11 +38,11 @@ sudo systemctl restart auto-template.service
 curl -fsS http://127.0.0.1:4000/api/v1/state
 ```
 
-## Archive Checklist For `Symphony-Ryo-Lab`
+## Legacy Lab Cleanup Checklist
 
 1. Merge this deployment change.
 2. Confirm `systemctl cat symphony-engine.service` references only `/home/ryo/src/symphony`.
 3. Confirm `/api/v1/state` is healthy and the dashboard project is `Symphony`.
-4. Move or close remaining active `Symphony-Ryo-Lab` Linear issues.
-5. Archive the GitHub repository instead of deleting it immediately.
+4. Move or close remaining active issues from the retired Lab project.
+5. Archive the retired GitHub repository instead of deleting it immediately.
 6. Keep the archive for at least one runtime cycle before permanent deletion.

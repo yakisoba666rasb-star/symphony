@@ -194,7 +194,7 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(hooks, "after_create") =~ "your-org/your-repo"
 
     workflow_text = File.read!(Path.expand("WORKFLOW.md", File.cwd!()))
-    refute workflow_text =~ "yakisoba666rasb-star/Symphony-Ryo-Lab"
+    refute workflow_text =~ "yakisoba666rasb-star/symphony"
     refute workflow_text =~ "kasotuosawari-design/auto_template"
     refute workflow_text =~ "symphony-ryo-fd7f55525d1a"
     refute workflow_text =~ "danger-full-access"
@@ -1537,7 +1537,7 @@ defmodule SymphonyElixir.CoreTest do
       "Ticket {{ issue.identifier }} repo={{ repository.slug }} clone={{ repository.clone_url }} source={{ repository.github_issue_url }}"
 
     write_workflow_file!(Workflow.workflow_file_path(),
-      repository_default: "yakisoba666rasb-star/Symphony-Ryo-Lab",
+      repository_default: "yakisoba666rasb-star/symphony",
       prompt: workflow_prompt
     )
 

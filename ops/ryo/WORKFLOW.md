@@ -27,8 +27,6 @@ repository:
     yakisoba666rasb-star/symphony:
       - Symphony
       - afe8a6524892
-    yakisoba666rasb-star/Symphony-Ryo-Lab:
-      - ArchivedSymphonyRyoLabDoNotDispatch
   validation:
     profiles:
       yakisoba666rasb-star/symphony: |

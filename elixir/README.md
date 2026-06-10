@@ -168,8 +168,8 @@ repository:
     your-org/symphony:
       - symphony
       - runtime
-    your-org/Symphony-Ryo-Lab:
-      - Symphony-Ryo-Lab
+    your-org/worker-app:
+      - Worker App
 ```
 
 - For path values, `~` is expanded to the home directory.

@@ -1,6 +1,6 @@
 # Symphony Automation Stabilization Plan
 
-Status: Draft
+Status: Phase 1 implemented
 Last updated: 2026-06-10
 
 ## Goal
@@ -17,7 +17,7 @@ Required invariants:
 - A merged PR moves the Linear issue to Done and closes the source GitHub
   issue. No half-synced states (one side open, the other Done).
 - The runtime depends only on `yakisoba666rasb-star/symphony` (Pi side).
-  No references to Symphony-Ryo-Lab or Mac-side configuration remain.
+  No legacy Lab or Mac-side configuration is used for dispatch.
 - Blocks are reduced: recoverable conditions auto-recover, retries are
   bounded, and every terminal block leaves an actionable reason on Linear.
 
@@ -36,11 +36,10 @@ Already implemented (PR #62, #63, #77, #78):
 
 Remaining gaps:
 
-- **A. Legacy Lab residue**: stale clone at `~/symphony` (far behind
-  origin/main, WORKFLOW.md still referencing Symphony-Ryo-Lab), old clone at
-  `~/Github/yakisoba666rasb-star/Symphony-Ryo-Lab`, `legacy-lab` directory
-  under the symphony config dir, and Symphony-Ryo-Lab references in
-  `core_test.exs` / `workspace_and_config_test.exs`.
+- **A. Operator-side legacy cleanup**: repository-level runtime config and
+  test fixtures are cleaned up by Phase 1. Operators still need to archive
+  any stale local clones and retired config directories that exist on
+  individual machines.
 - **B. Known stability issues in Backlog**: LAB-387 (SHA fallback second
   stage unreachable, limit-100 truncation), LAB-389 (Orchestrator god
   module), LAB-388 (coverage gate excludes core modules).
@@ -55,14 +54,14 @@ Remaining gaps:
 
 ### Phase 1: Environment unification and legacy cleanup
 
-Mostly operational; one small PR.
+Implemented in this PR.
 
-1. Update or remove the stale `~/symphony` clone; document
-   `~/src/symphony` as the single runtime checkout.
-2. Decide archive-or-delete for the old Symphony-Ryo-Lab clone and the
-   `legacy-lab` config directory.
-3. Replace Symphony-Ryo-Lab references in tests and WORKFLOW.md template
-   with the current repo (single small PR).
+1. Document `/home/ryo/src/symphony` as the single runtime checkout.
+2. Remove legacy Lab repository routes from the Pi runtime workflow.
+3. Replace legacy Lab references in tests and documentation with the current
+   repo or neutral fixture repositories.
+4. Leave local clone deletion as an operator step, because it is machine state
+   rather than repository state.
 
 Outcome: removes the root cause of wrong-repo attachments and clones.
 
