@@ -327,31 +327,21 @@ defmodule SymphonyElixir.GitHubPrLookup do
   defp lookup_workspace_head_commit_pull_request(repo, workspace_path, expected_branch, deps) do
     with {:ok, gh_bin} <- find_gh_binary(deps),
          {:ok, git_bin} <- find_git_binary(deps),
-         {:ok, head_sha} <- query_workspace_head_sha(workspace_path, git_bin, deps),
-         {:ok, nil} <-
-           lookup_workspace_head_commit_pull_request_state(
-             gh_bin,
-             repo,
-             head_sha,
-             expected_branch,
-             "open",
-             deps
-           ) do
-      lookup_workspace_head_commit_pull_request_state(gh_bin, repo, head_sha, expected_branch, "all", deps)
+         {:ok, head_sha} <- query_workspace_head_sha(workspace_path, git_bin, deps) do
+      lookup_workspace_head_commit_pull_request_by_sha(gh_bin, repo, head_sha, expected_branch, deps)
     else
       :none -> {:ok, nil}
-      {:ok, %{} = pr} -> {:ok, pr}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp lookup_workspace_head_commit_pull_request_state(gh_bin, repo, head_sha, expected_branch, state, deps) do
-    command = github_pr_list_by_state_args(repo, state)
+  defp lookup_workspace_head_commit_pull_request_by_sha(gh_bin, repo, head_sha, expected_branch, deps) do
+    command = github_pull_requests_for_commit_args(repo, head_sha)
 
     case normalize_command_result(deps.run_command.(gh_bin, command, stderr_to_stdout: true)) do
       {:ok, {output, 0}} ->
         output
-        |> parse_gh_pr_list_response()
+        |> parse_commit_pull_request_response()
         |> match_pr_by_head_sha(head_sha, expected_branch)
 
       {:ok, {_output, status}} ->
@@ -387,6 +377,23 @@ defmodule SymphonyElixir.GitHubPrLookup do
       {:error, reason} -> {:error, {:gh_json_error, reason}}
     end
   end
+
+  defp parse_commit_pull_request_response(output) do
+    with {:ok, prs} <- parse_gh_pr_list_response(output) do
+      {:ok, Enum.map(prs, &normalize_commit_pull_request/1)}
+    end
+  end
+
+  defp normalize_commit_pull_request(%{"head" => %{} = head} = pr) do
+    pr
+    |> Map.put_new("url", pr["html_url"])
+    |> Map.put_new("headRefName", head["ref"])
+    |> Map.put_new("headRefOid", head["sha"])
+    |> Map.put_new("isDraft", pr["draft"])
+    |> Map.put_new("mergeStateStatus", pr["mergeable_state"])
+  end
+
+  defp normalize_commit_pull_request(pr), do: pr
 
   defp match_pr_by_head_sha({:ok, prs}, head_sha, expected_branch) do
     prs
@@ -656,18 +663,12 @@ defmodule SymphonyElixir.GitHubPrLookup do
     ]
   end
 
-  defp github_pr_list_by_state_args(repo, state) do
+  defp github_pull_requests_for_commit_args(repo, sha) do
     [
-      "pr",
-      "list",
-      "--repo",
-      repo,
-      "--state",
-      state,
-      "--limit",
-      "100",
-      "--json",
-      "number,url,headRefName,headRefOid,isDraft,mergeStateStatus,state"
+      "api",
+      "-H",
+      "Accept: application/vnd.github+json",
+      "/repos/#{repo}/commits/#{sha}/pulls"
     ]
   end
 

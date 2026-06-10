@@ -85,7 +85,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        repository_default: "yakisoba666rasb-star/Symphony-Ryo-Lab",
+        repository_default: "yakisoba666rasb-star/symphony",
         hook_after_create: """
         printf '%s' "$SYMPHONY_REPOSITORY" > repo.txt
         printf '%s' "$SYMPHONY_REPOSITORY_OWNER" > owner.txt
@@ -120,15 +120,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:ok, settings} =
              Schema.parse(%{
                "repository" => %{
-                 "default" => "yakisoba666rasb-star/Symphony-Ryo-Lab",
-                 "allowed" => ["yakisoba666rasb-star/Symphony-Ryo-Lab"],
+                 "default" => "yakisoba666rasb-star/symphony",
+                 "allowed" => ["yakisoba666rasb-star/symphony"],
                  "clone_protocol" => "ssh"
                }
              })
 
     assert {:ok, repository} = RepositoryResolver.resolve(%Issue{identifier: "LAB-1"}, settings)
-    assert repository.slug == "yakisoba666rasb-star/Symphony-Ryo-Lab"
-    assert repository.clone_url == "git@github.com:yakisoba666rasb-star/Symphony-Ryo-Lab.git"
+    assert repository.slug == "yakisoba666rasb-star/symphony"
+    assert repository.clone_url == "git@github.com:yakisoba666rasb-star/symphony.git"
 
     issue = %Issue{
       identifier: "LAB-338",
@@ -143,19 +143,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:ok, settings} =
              Schema.parse(%{
                "repository" => %{
-                 "allowed" => ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"]
+                 "allowed" => ["yakisoba666rasb-star/symphony", "kasotuosawari-design/auto_template"]
                }
              })
 
     issue = %Issue{
       identifier: "LAB-CONFLICT",
       description: """
-      Repo: yakisoba666rasb-star/Symphony-Ryo-Lab
+      Repo: yakisoba666rasb-star/symphony
       Source: https://github.com/kasotuosawari-design/auto_template/issues/338
       """
     }
 
-    assert {:error, {:repository_source_conflict, "yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"}} =
+    assert {:error, {:repository_source_conflict, "yakisoba666rasb-star/symphony", "kasotuosawari-design/auto_template"}} =
              RepositoryResolver.resolve(issue, settings)
   end
 
@@ -163,19 +163,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:ok, settings} =
              Schema.parse(%{
                "repository" => %{
-                 "allowed" => ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"]
+                 "allowed" => ["yakisoba666rasb-star/symphony", "kasotuosawari-design/auto_template"]
                }
              })
 
     issue = %Issue{
       identifier: "LAB-AMBIGUOUS",
       description: """
-      See https://github.com/yakisoba666rasb-star/Symphony-Ryo-Lab/issues/1
+      See https://github.com/yakisoba666rasb-star/symphony/issues/1
       and https://github.com/kasotuosawari-design/auto_template/issues/338
       """
     }
 
-    assert {:error, {:ambiguous_repository_urls, ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"]}} =
+    assert {:error, {:ambiguous_repository_urls, ["yakisoba666rasb-star/symphony", "kasotuosawari-design/auto_template"]}} =
              RepositoryResolver.resolve(issue, settings)
   end
 
@@ -274,7 +274,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:ok, settings} =
              Schema.parse(%{
                "repository" => %{
-                 "allowed" => ["yakisoba666rasb-star/Symphony-Ryo-Lab", "kasotuosawari-design/auto_template"]
+                 "allowed" => ["yakisoba666rasb-star/symphony", "kasotuosawari-design/auto_template"]
                }
              })
 
@@ -284,7 +284,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       Repo: kasotuosawari-design/auto_template
 
       Related design note:
-      https://github.com/yakisoba666rasb-star/Symphony-Ryo-Lab/issues/1
+      https://github.com/yakisoba666rasb-star/symphony/issues/1
       """
     }
 
@@ -318,10 +318,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       tracker_team_key: "LAB",
       tracker_project_slug: nil,
       tracker_all_projects: true,
-      repository_default: "yakisoba666rasb-star/Symphony-Ryo-Lab",
+      repository_default: "yakisoba666rasb-star/symphony",
       repository_project_routes: %{
         "yakisoba666rasb-star/symphony" => ["symphony", "runtime"],
-        "yakisoba666rasb-star/Symphony-Ryo-Lab" => ["Symphony-Ryo-Lab"]
+        "example-org/worker-app" => ["Worker App"]
       }
     )
 
@@ -350,7 +350,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       identifier: "LAB-370",
       title: "Bluetooth HID: track host connection separately from app registration",
       state: "Todo",
-      project_name: "Symphony-Ryo-Lab",
+      project_name: "Symphony",
       attachment_urls: ["https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/63"]
     }
 
@@ -364,34 +364,34 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       description: "Repo: yakisoba666rasb-star/symphony"
     }
 
-    lab_project_runtime_issue = %Issue{
+    wrong_project_runtime_issue = %Issue{
       id: "issue-386",
       identifier: "LAB-386",
       title: "GitHub issue creation should sync to Linear Backlog",
       state: "In Progress",
-      project_name: "Symphony-Ryo-Lab",
-      project_slug: "symphony-ryo-lab-dd6010d9231e",
+      project_name: "Wrong Project",
+      project_slug: "wrong-project",
       description: "Repo: yakisoba666rasb-star/symphony"
     }
 
-    lab_project_lab_issue = %Issue{
+    worker_project_worker_issue = %Issue{
       id: "issue-387",
       identifier: "LAB-387",
-      title: "Lab repo issue",
+      title: "Worker app issue",
       state: "In Progress",
-      project_name: "Symphony-Ryo-Lab",
-      project_slug: "symphony-ryo-lab-dd6010d9231e",
-      description: "Repo: yakisoba666rasb-star/Symphony-Ryo-Lab"
+      project_name: "Worker App",
+      project_slug: "worker-app",
+      description: "Repo: example-org/worker-app"
     }
 
-    runtime_project_lab_issue = %Issue{
+    runtime_project_worker_issue = %Issue{
       id: "issue-388",
       identifier: "LAB-388",
-      title: "Lab repo issue in runtime project",
+      title: "Worker app issue in runtime project",
       state: "In Progress",
       project_name: "symphony",
       project_slug: "symphony-afe8a6524892",
-      description: "Repo: yakisoba666rasb-star/Symphony-Ryo-Lab"
+      description: "Repo: example-org/worker-app"
     }
 
     unprojected_remote_issue = %Issue{
@@ -409,17 +409,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       identifier: "LAB-371",
       title: "Unlinked project issue",
       state: "Todo",
-      project_name: "Symphony-Ryo-Lab"
+      project_name: "Symphony"
     }
 
     assert Orchestrator.should_dispatch_issue_for_test(remote_issue, state)
     assert Orchestrator.should_dispatch_issue_for_test(synced_project_issue, state)
     assert Orchestrator.should_dispatch_issue_for_test(runtime_project_issue, state)
-    assert Orchestrator.should_dispatch_issue_for_test(lab_project_lab_issue, state)
+    assert Orchestrator.should_dispatch_issue_for_test(worker_project_worker_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(unprojected_remote_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(mismatched_project_issue, state)
-    refute Orchestrator.should_dispatch_issue_for_test(lab_project_runtime_issue, state)
-    refute Orchestrator.should_dispatch_issue_for_test(runtime_project_lab_issue, state)
+    refute Orchestrator.should_dispatch_issue_for_test(wrong_project_runtime_issue, state)
+    refute Orchestrator.should_dispatch_issue_for_test(runtime_project_worker_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(no_hint_issue, state)
   end
 
@@ -427,7 +427,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(),
       repository_project_routes: %{
         "yakisoba666rasb-star/symphony" => "symphony",
-        "yakisoba666rasb-star/Symphony-Ryo-Lab" => ["Symphony-Ryo-Lab", "lab"]
+        "example-org/worker-app" => ["Worker App", "worker"]
       }
     )
 
@@ -435,7 +435,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Config.settings!().repository.project_routes == %{
              "yakisoba666rasb-star/symphony" => "symphony",
-             "yakisoba666rasb-star/Symphony-Ryo-Lab" => ["Symphony-Ryo-Lab", "lab"]
+             "example-org/worker-app" => ["Worker App", "worker"]
            }
 
     write_workflow_file!(Workflow.workflow_file_path(), repository_project_routes: "symphony")

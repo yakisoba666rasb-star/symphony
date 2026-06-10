@@ -1124,24 +1124,25 @@ defmodule SymphonyElixir.Orchestrator do
     module = github_issue_module()
     comment = source_github_issue_close_comment(issue, pr)
 
-    cond do
-      not function_exported?(module, :close_if_open, 3) ->
-        Logger.warning("Skipping source GitHub issue close for #{issue_context(issue)}; #{inspect(module)} does not export close_if_open/3")
+    if function_exported?(module, :close_if_open, 3) do
+      case module.close_if_open(repo, issue_url, comment) do
+        {:ok, :closed} ->
+          Logger.info("Closed source GitHub issue for #{issue_context(issue)} repo=#{repo} issue=#{issue_url}")
 
-      true ->
-        case module.close_if_open(repo, issue_url, comment) do
-          {:ok, :closed} ->
-            Logger.info("Closed source GitHub issue for #{issue_context(issue)} repo=#{repo} issue=#{issue_url}")
+        {:ok, _status} ->
+          :ok
 
-          {:ok, _status} ->
-            :ok
-
-          {:error, reason} ->
-            Logger.warning(
-              "Merged PR Done sync could not close source GitHub issue for #{issue_context(issue)} " <>
-                "repo=#{repo} issue=#{inspect(issue_url)} reason=#{inspect(reason)}"
-            )
-        end
+        {:error, reason} ->
+          Logger.warning(
+            "Merged PR Done sync could not close source GitHub issue for #{issue_context(issue)} " <>
+              "repo=#{repo} issue=#{inspect(issue_url)} reason=#{inspect(reason)}"
+          )
+      end
+    else
+      Logger.warning(
+        "Skipping source GitHub issue close for #{issue_context(issue)}; " <>
+          "#{inspect(module)} does not export close_if_open/3"
+      )
     end
   end
 
