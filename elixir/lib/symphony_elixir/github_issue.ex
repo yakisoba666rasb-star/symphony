@@ -9,10 +9,13 @@ defmodule SymphonyElixir.GitHubIssue do
           required(:run_command) => (String.t(), [String.t()], keyword() -> command_result())
         }
 
+  @spec close_if_open(String.t(), String.t() | nil, String.t()) ::
+          {:ok, :closed | :already_closed | :not_applicable} | {:error, term()}
+  def close_if_open(repo, issue_url, comment),
+    do: close_if_open(repo, issue_url, comment, runtime_deps())
+
   @spec close_if_open(String.t(), String.t() | nil, String.t(), deps()) ::
           {:ok, :closed | :already_closed | :not_applicable} | {:error, term()}
-  def close_if_open(repo, issue_url, comment, deps \\ runtime_deps())
-
   def close_if_open(repo, issue_url, comment, deps)
       when is_binary(repo) and is_binary(issue_url) and is_binary(comment) do
     with {:ok, number} <- issue_number_for_repo(repo, issue_url),
