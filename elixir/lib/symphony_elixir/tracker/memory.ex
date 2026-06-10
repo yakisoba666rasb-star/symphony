@@ -47,6 +47,18 @@ defmodule SymphonyElixir.Tracker.Memory do
     :ok
   end
 
+  @spec fetch_issue_team_projects(String.t()) :: {:ok, [map()]} | {:error, term()}
+  def fetch_issue_team_projects(issue_id) when is_binary(issue_id) do
+    send_event({:memory_tracker_fetch_issue_team_projects, issue_id})
+    {:ok, Application.get_env(:symphony_elixir, :memory_tracker_projects, [])}
+  end
+
+  @spec update_issue_project(String.t(), String.t()) :: :ok | {:error, term()}
+  def update_issue_project(issue_id, project_id) do
+    send_event({:memory_tracker_project_update, issue_id, project_id})
+    :ok
+  end
+
   defp configured_issues do
     Application.get_env(:symphony_elixir, :memory_tracker_issues, [])
   end

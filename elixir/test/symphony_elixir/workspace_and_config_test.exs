@@ -514,6 +514,330 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute Orchestrator.should_dispatch_issue_for_test(no_hint_issue, state)
   end
 
+  test "auto-assigns missing Linear project from resolved repository unique project match" do
+    previous_projects = Application.get_env(:symphony_elixir, :memory_tracker_projects)
+    previous_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_projects, previous_projects)
+      restore_app_env(:memory_tracker_recipient, previous_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_team_key: "LAB",
+      tracker_project_slug: nil,
+      tracker_all_projects: true,
+      repository_default: "yakisoba666rasb-star/symphony",
+      repository_project_routes: %{
+        "yakisoba666rasb-star/symphony" => ["Symphony"]
+      }
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_projects, [
+      %{"id" => "project-1", "name" => "auto_template", "slugId" => "auto-template"},
+      %{"id" => "project-2", "name" => "Symphony", "slugId" => "symphony-afe8a6524892"}
+    ])
+
+    issue = %Issue{
+      id: "issue-396",
+      identifier: "LAB-396",
+      title: "Auto-assign project",
+      state: "Todo",
+      project_name: nil,
+      project_slug: nil,
+      attachment_urls: ["https://github.com/yakisoba666rasb-star/symphony/issues/541"]
+    }
+
+    assert {:ok, :updated} = SymphonyElixir.Tracker.update_issue_project_from_repository(issue)
+    assert_receive {:memory_tracker_fetch_issue_team_projects, "issue-396"}
+    assert_receive {:memory_tracker_project_update, "issue-396", "project-2"}
+  end
+
+  test "auto-assigns missing Linear project from repository name fallback" do
+    previous_projects = Application.get_env(:symphony_elixir, :memory_tracker_projects)
+    previous_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_projects, previous_projects)
+      restore_app_env(:memory_tracker_recipient, previous_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_team_key: "LAB",
+      tracker_project_slug: nil,
+      tracker_all_projects: true,
+      repository_default: "yakisoba666rasb-star/symphony",
+      repository_project_routes: %{}
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_projects, [
+      %{"id" => "project-1", "name" => "auto_template", "slugId" => "auto-template"}
+    ])
+
+    issue = %Issue{
+      id: "issue-395",
+      identifier: "LAB-395",
+      title: "Template issue",
+      state: "Todo",
+      attachment_urls: ["https://github.com/kasotuosawari-design/auto_template/issues/541"]
+    }
+
+    assert {:ok, :updated} = SymphonyElixir.Tracker.update_issue_project_from_repository(issue)
+    assert_receive {:memory_tracker_project_update, "issue-395", "project-1"}
+  end
+
+  test "auto-assign skips ambiguous and missing project matches" do
+    previous_projects = Application.get_env(:symphony_elixir, :memory_tracker_projects)
+    previous_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_projects, previous_projects)
+      restore_app_env(:memory_tracker_recipient, previous_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_team_key: "LAB",
+      tracker_project_slug: nil,
+      tracker_all_projects: true,
+      repository_default: "yakisoba666rasb-star/symphony"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    ambiguous_issue = %Issue{
+      id: "issue-ambiguous",
+      identifier: "LAB-AMB",
+      title: "Ambiguous",
+      state: "Todo",
+      description: "Repo: example-org/worker-app"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_projects, [
+      %{"id" => "project-1", "name" => "Worker App", "slugId" => "worker-app"},
+      %{"id" => "project-2", "name" => "worker_app", "slugId" => "worker-app-2"}
+    ])
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, :skipped} = SymphonyElixir.Tracker.update_issue_project_from_repository(ambiguous_issue)
+      end)
+
+    assert log =~ "multiple matching projects"
+    refute_receive {:memory_tracker_project_update, "issue-ambiguous", _}
+
+    no_match_issue = %Issue{
+      id: "issue-no-match",
+      identifier: "LAB-NO",
+      title: "No match",
+      state: "Todo",
+      description: "Repo: example-org/no-match"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_projects, [
+      %{"id" => "project-3", "name" => "Other", "slugId" => "other"}
+    ])
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, :skipped} = SymphonyElixir.Tracker.update_issue_project_from_repository(no_match_issue)
+      end)
+
+    assert log =~ "no matching project"
+    refute_receive {:memory_tracker_project_update, "issue-no-match", _}
+  end
+
+  test "auto-assign does not use default repository without an issue repository hint" do
+    previous_projects = Application.get_env(:symphony_elixir, :memory_tracker_projects)
+    previous_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_projects, previous_projects)
+      restore_app_env(:memory_tracker_recipient, previous_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_team_key: "LAB",
+      tracker_project_slug: nil,
+      tracker_all_projects: true,
+      repository_default: "yakisoba666rasb-star/symphony"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_projects, [
+      %{"id" => "project-2", "name" => "Symphony", "slugId" => "symphony"}
+    ])
+
+    issue = %Issue{
+      id: "issue-no-hint",
+      identifier: "LAB-NOHINT",
+      title: "No repository hint",
+      state: "Todo"
+    }
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, :skipped} = SymphonyElixir.Tracker.update_issue_project_from_repository(issue)
+      end)
+
+    assert log =~ "no repository hint"
+    refute_receive {:memory_tracker_fetch_issue_team_projects, "issue-no-hint"}
+    refute_receive {:memory_tracker_project_update, "issue-no-hint", _}
+  end
+
+  test "auto-assign skips issues that already have a project or cannot be safely updated" do
+    previous_projects = Application.get_env(:symphony_elixir, :memory_tracker_projects)
+    previous_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_projects, previous_projects)
+      restore_app_env(:memory_tracker_recipient, previous_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_team_key: "LAB",
+      tracker_project_slug: nil,
+      tracker_all_projects: true,
+      repository_default: "yakisoba666rasb-star/symphony"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    projected_issue = %Issue{
+      id: "issue-projected",
+      identifier: "LAB-PROJECTED",
+      title: "Already projected",
+      state: "Todo",
+      project_name: "Symphony",
+      attachment_urls: ["https://github.com/yakisoba666rasb-star/symphony/issues/541"]
+    }
+
+    assert {:ok, :skipped} = SymphonyElixir.Tracker.update_issue_project_from_repository(projected_issue)
+    refute_receive {:memory_tracker_fetch_issue_team_projects, "issue-projected"}
+
+    missing_id_issue = %Issue{
+      id: nil,
+      identifier: "LAB-NOID",
+      title: "Missing id",
+      state: "Todo",
+      attachment_urls: ["https://github.com/yakisoba666rasb-star/symphony/issues/541"]
+    }
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, :skipped} = SymphonyElixir.Tracker.update_issue_project_from_repository(missing_id_issue)
+      end)
+
+    assert log =~ "issue has no id"
+    assert {:ok, :skipped} = SymphonyElixir.Tracker.update_issue_project_from_repository(%{id: "not-an-issue"})
+  end
+
+  test "auto-assign skips repository resolution errors and matched projects without ids" do
+    previous_projects = Application.get_env(:symphony_elixir, :memory_tracker_projects)
+    previous_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_projects, previous_projects)
+      restore_app_env(:memory_tracker_recipient, previous_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_team_key: "LAB",
+      tracker_project_slug: nil,
+      tracker_all_projects: true,
+      repository_default: "yakisoba666rasb-star/symphony"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    ambiguous_repo_issue = %Issue{
+      id: "issue-repo-ambiguous",
+      identifier: "LAB-REPOAMB",
+      title: "Ambiguous repo",
+      state: "Todo",
+      description: """
+      https://github.com/example-org/one/issues/1
+      https://github.com/example-org/two/issues/2
+      """
+    }
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, :skipped} = SymphonyElixir.Tracker.update_issue_project_from_repository(ambiguous_repo_issue)
+      end)
+
+    assert log =~ "repository/project lookup failed"
+
+    Application.put_env(:symphony_elixir, :memory_tracker_projects, [
+      %{"name" => "auto_template", "slugId" => "auto-template"}
+    ])
+
+    missing_project_id_issue = %Issue{
+      id: "issue-project-without-id",
+      identifier: "LAB-NOPROJID",
+      title: "Project without id",
+      state: "Todo",
+      attachment_urls: ["https://github.com/kasotuosawari-design/auto_template/issues/541"]
+    }
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, :skipped} =
+                 SymphonyElixir.Tracker.update_issue_project_from_repository(missing_project_id_issue)
+      end)
+
+    assert log =~ "matched project has no id"
+    refute_receive {:memory_tracker_project_update, "issue-project-without-id", _}
+  end
+
+  test "auto-assigned issue is not dispatched in the same poll cycle" do
+    previous_projects = Application.get_env(:symphony_elixir, :memory_tracker_projects)
+    previous_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      restore_app_env(:memory_tracker_projects, previous_projects)
+      restore_app_env(:memory_tracker_recipient, previous_recipient)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_team_key: "LAB",
+      tracker_project_slug: nil,
+      tracker_all_projects: true,
+      repository_default: "yakisoba666rasb-star/symphony",
+      repository_project_routes: %{
+        "yakisoba666rasb-star/symphony" => ["Symphony"]
+      }
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_projects, [
+      %{"id" => "project-2", "name" => "Symphony", "slugId" => "symphony"}
+    ])
+
+    issue = %Issue{
+      id: "issue-same-cycle",
+      identifier: "LAB-SAME",
+      title: "Same cycle skip",
+      state: "Todo",
+      attachment_urls: ["https://github.com/yakisoba666rasb-star/symphony/issues/541"]
+    }
+
+    assert [] = Orchestrator.auto_assign_missing_projects_for_test([issue])
+    assert_receive {:memory_tracker_project_update, "issue-same-cycle", "project-2"}
+  end
+
   test "config validates explicit repository project routes" do
     write_workflow_file!(Workflow.workflow_file_path(),
       repository_project_routes: %{
@@ -2369,4 +2693,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.rm_rf(test_root)
     end
   end
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 end

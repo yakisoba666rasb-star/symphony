@@ -23,6 +23,30 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @issue_team_projects_query """
+  query SymphonyIssueTeamProjects($issueId: String!, $first: Int!) {
+    issue(id: $issueId) {
+      team {
+        projects(first: $first) {
+          nodes {
+            id
+            name
+            slugId
+          }
+        }
+      }
+    }
+  }
+  """
+
+  @update_project_mutation """
+  mutation SymphonyUpdateIssueProject($issueId: String!, $projectId: String!) {
+    issueUpdate(id: $issueId, input: {projectId: $projectId}) {
+      success
+    }
+  }
+  """
+
   @state_lookup_query """
   query SymphonyResolveStateId($issueId: String!, $stateName: String!) {
     issue(id: $issueId) {
@@ -70,6 +94,32 @@ defmodule SymphonyElixir.Linear.Adapter do
       false -> {:error, :issue_update_failed}
       {:error, reason} -> {:error, reason}
       _ -> {:error, :issue_update_failed}
+    end
+  end
+
+  @spec fetch_issue_team_projects(String.t()) :: {:ok, [map()]} | {:error, term()}
+  def fetch_issue_team_projects(issue_id) when is_binary(issue_id) do
+    with {:ok, response} <- client_module().graphql(@issue_team_projects_query, %{issueId: issue_id, first: 250}),
+         projects when is_list(projects) <-
+           get_in(response, ["data", "issue", "team", "projects", "nodes"]) do
+      {:ok, projects}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :issue_team_projects_not_found}
+    end
+  end
+
+  @spec update_issue_project(String.t(), String.t()) :: :ok | {:error, term()}
+  def update_issue_project(issue_id, project_id)
+      when is_binary(issue_id) and is_binary(project_id) do
+    with {:ok, response} <-
+           client_module().graphql(@update_project_mutation, %{issueId: issue_id, projectId: project_id}),
+         true <- get_in(response, ["data", "issueUpdate", "success"]) == true do
+      :ok
+    else
+      false -> {:error, :issue_project_update_failed}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :issue_project_update_failed}
     end
   end
 
