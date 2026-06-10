@@ -24,7 +24,7 @@ lint:
 	$(MIX) lint
 
 coverage:
-	$(MIX) test --cover
+	$(MIX) test --cover --max-cases 1
 
 test:
 	$(MIX) test
