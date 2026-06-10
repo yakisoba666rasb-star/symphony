@@ -61,10 +61,12 @@ defmodule SymphonyElixir.RepositoryResolver do
     source_slug = source_url && repo_from_github_url(source_url)
     github_slugs = github_slugs(text)
     inferred_slug = single_github_slug(github_slugs)
-    slug = explicit_slug || source_slug || inferred_slug || normalize_blank(settings.repository.default)
+    selected_slug = explicit_slug || source_slug || inferred_slug
 
     with :ok <- validate_source_consistency(explicit_slug, source_slug),
          :ok <- validate_github_url_ambiguity(explicit_slug || source_slug, github_slugs),
+         {:ok, route_slug} <- project_route_fallback_slug(selected_slug, issue_or_identifier, settings),
+         slug = selected_slug || route_slug || normalize_blank(settings.repository.default),
          {:ok, slug} <- normalize_slug(slug) do
       {:ok,
        build_context(
@@ -98,6 +100,18 @@ defmodule SymphonyElixir.RepositoryResolver do
     not is_nil(repo_from_explicit_line(text)) or github_slugs(text) != []
   end
 
+  @spec project_route_slug(map() | String.t() | nil, Config.Schema.t() | nil) ::
+          {:ok, String.t()} | :none | {:error, {:ambiguous_repository_project_routes, [String.t()]}}
+  def project_route_slug(issue_or_identifier, settings \\ nil) do
+    settings = settings || Config.settings!()
+
+    case project_route_repository_matches(issue_or_identifier, settings) do
+      [] -> :none
+      [slug] -> {:ok, slug}
+      slugs -> {:error, {:ambiguous_repository_project_routes, slugs}}
+    end
+  end
+
   defp issue_text(%Issue{} = issue) do
     [issue.title, issue.description, issue.url | issue.attachment_urls || []]
     |> Enum.reject(&is_nil/1)
@@ -126,6 +140,81 @@ defmodule SymphonyElixir.RepositoryResolver do
   end
 
   defp issue_text(_issue_or_identifier), do: ""
+
+  defp project_route_fallback_slug(nil, issue_or_identifier, settings) do
+    case project_route_slug(issue_or_identifier, settings) do
+      {:ok, slug} -> {:ok, slug}
+      :none -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp project_route_fallback_slug(_selected_slug, _issue_or_identifier, _settings), do: {:ok, nil}
+
+  defp project_route_repository_matches(issue_or_identifier, settings) do
+    issue_tokens = issue_project_route_tokens(issue_or_identifier)
+
+    settings
+    |> get_in([Access.key(:repository), Access.key(:project_routes)])
+    |> repository_project_route_entries()
+    |> Enum.filter(fn {_repo_slug, route_tokens} ->
+      Enum.any?(issue_tokens, fn issue_token ->
+        Enum.any?(route_tokens, &(issue_token == &1))
+      end)
+    end)
+    |> Enum.map(fn {repo_slug, _route_tokens} -> repo_slug end)
+    |> Enum.uniq()
+  end
+
+  defp repository_project_route_entries(project_routes) when is_map(project_routes) do
+    project_routes
+    |> Enum.map(fn {repo_slug, aliases} ->
+      {
+        canonical_repository_slug(to_string(repo_slug)) || "",
+        aliases |> List.wrap() |> Enum.map(&route_token/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()
+      }
+    end)
+    |> Enum.reject(fn {repo_slug, route_tokens} ->
+      repo_slug == "" or route_tokens == []
+    end)
+  end
+
+  defp repository_project_route_entries(_project_routes), do: []
+
+  defp issue_project_route_tokens(%Issue{} = issue) do
+    [issue.project_name, issue.project_slug]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&route_token/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp issue_project_route_tokens(%{} = issue) do
+    [
+      "project_name",
+      "projectName",
+      "project_slug",
+      "projectSlug",
+      :project_name,
+      :projectName,
+      :project_slug,
+      :projectSlug
+    ]
+    |> Enum.map(&Map.get(issue, &1))
+    |> List.flatten()
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&route_token/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp issue_project_route_tokens(_issue_or_identifier), do: []
+
+  defp route_token(value) when is_binary(value) do
+    value
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9]/, "")
+  end
+
+  defp route_token(_value), do: ""
 
   defp repo_from_explicit_line(text) when is_binary(text) do
     case Regex.run(@repo_line_regex, text, capture: :all_but_first) do

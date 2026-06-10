@@ -2611,11 +2611,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp issue_matches_unique_project_route?(%Issue{} = issue, settings) do
-    case project_route_repository_matches(issue, settings) do
-      [{_repo_slug, _repo_name}] ->
+    case RepositoryResolver.project_route_slug(issue, settings) do
+      {:ok, _repo_slug} ->
         true
 
-      [] ->
+      :none ->
         Logger.debug(
           "Skipping dispatch; Linear project does not match any repository route for #{issue_context(issue)} " <>
             "project_name=#{inspect(issue.project_name)} project_slug=#{inspect(issue.project_slug)}"
@@ -2623,10 +2623,10 @@ defmodule SymphonyElixir.Orchestrator do
 
         false
 
-      matches ->
+      {:error, {:ambiguous_repository_project_routes, repo_slugs}} ->
         Logger.debug(
           "Skipping dispatch; Linear project matches multiple repository routes for #{issue_context(issue)} " <>
-            "repos=#{inspect(Enum.map(matches, &elem(&1, 0)))} " <>
+            "repos=#{inspect(repo_slugs)} " <>
             "project_name=#{inspect(issue.project_name)} project_slug=#{inspect(issue.project_slug)}"
         )
 
@@ -2664,38 +2664,6 @@ defmodule SymphonyElixir.Orchestrator do
       end)
     end
   end
-
-  defp project_route_repository_matches(%Issue{} = issue, settings) do
-    issue_tokens = issue_project_route_tokens(issue)
-
-    settings
-    |> get_in([Access.key(:repository), Access.key(:project_routes)])
-    |> repository_project_route_entries()
-    |> Enum.filter(fn {_repo_slug, _repo_name, route_tokens} ->
-      Enum.any?(issue_tokens, fn issue_token ->
-        Enum.any?(route_tokens, &(issue_token == &1))
-      end)
-    end)
-    |> Enum.map(fn {repo_slug, repo_name, _route_tokens} -> {repo_slug, repo_name} end)
-  end
-
-  defp repository_project_route_entries(project_routes) when is_map(project_routes) do
-    project_routes
-    |> Enum.map(fn {repo_slug, aliases} ->
-      canonical_repo_slug = canonical_route_repo_token(repo_slug)
-
-      {
-        canonical_repo_slug,
-        repository_name_from_slug(canonical_repo_slug),
-        aliases |> List.wrap() |> Enum.map(&route_token/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()
-      }
-    end)
-    |> Enum.reject(fn {repo_slug, _repo_name, route_tokens} ->
-      repo_slug == "" or route_tokens == []
-    end)
-  end
-
-  defp repository_project_route_entries(_project_routes), do: []
 
   defp linear_project_matches_repository_name?(%Issue{} = issue, repo_name) when is_binary(repo_name) do
     repo_token = route_token(repo_name)
@@ -2742,12 +2710,6 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp canonical_route_repo_token(value), do: value |> to_string() |> canonical_route_repo_token()
-
-  defp repository_name_from_slug(repo_slug) when is_binary(repo_slug) do
-    repo_slug
-    |> String.split("/", parts: 2)
-    |> List.last()
-  end
 
   defp issue_project_route_tokens(%Issue{} = issue) do
     [issue.project_name, issue.project_slug]
