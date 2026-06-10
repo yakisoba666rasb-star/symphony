@@ -1,6 +1,6 @@
 # Repository and Linear Project Routing
 
-Status: design contract for LAB-396
+Status: implemented (LAB-396, PR #88)
 Last updated: 2026-06-10
 
 ## Goal
