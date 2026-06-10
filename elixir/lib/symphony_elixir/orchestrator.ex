@@ -2592,7 +2592,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_matches_all_projects_repository_route?(%Issue{} = issue, settings) do
     if RepositoryResolver.repository_hint?(issue),
       do: issue_matches_repository_hint_route?(issue, settings),
-      else: false
+      else: issue_matches_unique_project_route?(issue, settings)
   end
 
   defp issue_matches_repository_hint_route?(%Issue{} = issue, settings) do
@@ -2606,6 +2606,30 @@ defmodule SymphonyElixir.Orchestrator do
         false
 
       _invalid ->
+        false
+    end
+  end
+
+  defp issue_matches_unique_project_route?(%Issue{} = issue, settings) do
+    case RepositoryResolver.project_route_slug(issue, settings) do
+      {:ok, _repo_slug} ->
+        true
+
+      :none ->
+        Logger.debug(
+          "Skipping dispatch; Linear project does not match any repository route for #{issue_context(issue)} " <>
+            "project_name=#{inspect(issue.project_name)} project_slug=#{inspect(issue.project_slug)}"
+        )
+
+        false
+
+      {:error, {:ambiguous_repository_project_routes, repo_slugs}} ->
+        Logger.debug(
+          "Skipping dispatch; Linear project matches multiple repository routes for #{issue_context(issue)} " <>
+            "repos=#{inspect(repo_slugs)} " <>
+            "project_name=#{inspect(issue.project_name)} project_slug=#{inspect(issue.project_slug)}"
+        )
+
         false
     end
   end

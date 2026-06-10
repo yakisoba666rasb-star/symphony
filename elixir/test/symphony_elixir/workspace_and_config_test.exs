@@ -313,7 +313,61 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert repository.github_issue_url == "https://github.com/ryo1111-qqq/Remote-mouse_v1/issues/62"
   end
 
-  test "all-projects dispatch requires GitHub hint and matching Linear project" do
+  test "repository resolver falls back to unique Linear project route before default" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "default" => "yakisoba666rasb-star/symphony",
+                 "project_routes" => %{
+                   "yakisoba666rasb-star/symphony" => ["Symphony"],
+                   "example-org/worker-app" => ["Worker App"]
+                 }
+               }
+             })
+
+    issue = %Issue{
+      identifier: "LAB-WORKER",
+      title: "Worker app issue without repository hint",
+      project_name: "Worker App",
+      project_slug: "worker-app"
+    }
+
+    assert {:ok, "example-org/worker-app"} = RepositoryResolver.project_route_slug(issue, settings)
+    assert {:ok, repository} = RepositoryResolver.resolve(issue, settings)
+    assert repository.slug == "example-org/worker-app"
+    assert repository.clone_url == "https://github.com/example-org/worker-app.git"
+  end
+
+  test "repository resolver rejects ambiguous Linear project route fallback" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "default" => "yakisoba666rasb-star/symphony",
+                 "project_routes" => %{
+                   "yakisoba666rasb-star/symphony" => ["Symphony"],
+                   "example-org/worker-app" => ["Symphony"]
+                 }
+               }
+             })
+
+    issue = %Issue{
+      identifier: "LAB-AMBIGUOUS-PROJECT",
+      title: "Ambiguous project route issue",
+      project_name: "Symphony"
+    }
+
+    assert {:error, {:ambiguous_repository_project_routes, project_route_slugs}} =
+             RepositoryResolver.project_route_slug(issue, settings)
+
+    assert Enum.sort(project_route_slugs) == ["example-org/worker-app", "yakisoba666rasb-star/symphony"]
+
+    assert {:error, {:ambiguous_repository_project_routes, resolved_slugs}} =
+             RepositoryResolver.resolve(issue, settings)
+
+    assert Enum.sort(resolved_slugs) == ["example-org/worker-app", "yakisoba666rasb-star/symphony"]
+  end
+
+  test "all-projects dispatch accepts unique project route without GitHub hint" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_team_key: "LAB",
       tracker_project_slug: nil,
@@ -409,17 +463,54 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       identifier: "LAB-371",
       title: "Unlinked project issue",
       state: "Todo",
-      project_name: "Symphony"
+      project_name: "Symphony",
+      project_slug: "symphony-afe8a6524892"
+    }
+
+    no_hint_worker_project_issue = %Issue{
+      id: "issue-394",
+      identifier: "LAB-394",
+      title: "Worker issue without repo hint",
+      state: "Todo",
+      project_name: "Worker App",
+      project_slug: "worker-app"
     }
 
     assert Orchestrator.should_dispatch_issue_for_test(remote_issue, state)
     assert Orchestrator.should_dispatch_issue_for_test(synced_project_issue, state)
     assert Orchestrator.should_dispatch_issue_for_test(runtime_project_issue, state)
     assert Orchestrator.should_dispatch_issue_for_test(worker_project_worker_issue, state)
+    assert Orchestrator.should_dispatch_issue_for_test(no_hint_issue, state)
+    assert Orchestrator.should_dispatch_issue_for_test(no_hint_worker_project_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(unprojected_remote_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(mismatched_project_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(wrong_project_runtime_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(runtime_project_worker_issue, state)
+  end
+
+  test "all-projects dispatch rejects ambiguous project routes without GitHub hint" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_team_key: "LAB",
+      tracker_project_slug: nil,
+      tracker_all_projects: true,
+      repository_default: "yakisoba666rasb-star/symphony",
+      repository_project_routes: %{
+        "yakisoba666rasb-star/symphony" => ["Symphony"],
+        "example-org/worker-app" => ["Symphony"]
+      }
+    )
+
+    state = %Orchestrator.State{running: %{}, claimed: MapSet.new(), blocked: %{}, max_concurrent_agents: 3}
+
+    no_hint_issue = %Issue{
+      id: "issue-394",
+      identifier: "LAB-394",
+      title: "Add regression coverage for issue-key boundary matching",
+      state: "Todo",
+      project_name: "Symphony",
+      project_slug: "symphony-afe8a6524892"
+    }
+
     refute Orchestrator.should_dispatch_issue_for_test(no_hint_issue, state)
   end
 
