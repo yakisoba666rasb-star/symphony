@@ -414,6 +414,7 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
     workspace = "/tmp/owner-workspace-head-sha-fallback"
     parent = self()
     head_sha = "c346f466a2cf61b390b75160b9a760c62345d6f3"
+    commit_pulls_path = "/repos/octo/repo/commits/#{head_sha}/pulls"
 
     deps = %{
       find_git_bin: fn -> "/tmp/fake-git" end,
@@ -443,17 +444,19 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
             ["pr", "list", "--repo", "octo/repo", "--state", _state, "--json", _fields, "--head", _head] ->
               {:ok, {"[]", 0}}
 
-            ["pr", "list", "--repo", "octo/repo", "--state", "open", "--limit", "100", "--json", _fields] ->
+            ["api", "-H", "Accept: application/vnd.github+json", ^commit_pulls_path] ->
               {:ok,
                {Jason.encode!([
                   %{
                     "number" => 204,
-                    "url" => "https://github.com/octo/repo/pull/204",
-                    "headRefName" => "lab-381-dedupe-slack-handoff",
-                    "headRefOid" => head_sha,
-                    "isDraft" => false,
-                    "mergeStateStatus" => "CLEAN",
-                    "state" => "OPEN"
+                    "html_url" => "https://github.com/octo/repo/pull/204",
+                    "head" => %{
+                      "ref" => "lab-381-dedupe-slack-handoff",
+                      "sha" => head_sha
+                    },
+                    "draft" => false,
+                    "mergeable_state" => "clean",
+                    "state" => "open"
                   }
                 ]), 0}}
           end
@@ -476,12 +479,14 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
              )
 
     assert_received {:command, :git, ["-C", ^workspace, "rev-parse", "HEAD"]}
-    assert_received {:command, :gh, ["pr", "list", "--repo", "octo/repo", "--state", "open", "--limit", "100", "--json", _fields]}
+    assert_received {:command, :gh, ["api", "-H", "Accept: application/vnd.github+json", ^commit_pulls_path]}
   end
 
-  test "workspace handoff head sha lookup falls back to all PRs when open list misses" do
+  test "workspace handoff head sha lookup uses commit PR API instead of all-list fallback" do
     workspace = "/tmp/owner-workspace-head-sha-all-fallback"
     head_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    commit_pulls_path = "/repos/octo/repo/commits/#{head_sha}/pulls"
+    parent = self()
 
     deps = %{
       find_git_bin: fn -> "/tmp/fake-git" end,
@@ -496,24 +501,22 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
           end
 
         "/tmp/fake-gh", args, _opts ->
+          send(parent, {:command, :gh, args})
+
           case args do
             ["pr", "list", "--repo", "octo/repo", "--state", _state, "--json", _fields, "--head", _head] ->
               {:ok, {"[]", 0}}
 
-            ["pr", "list", "--repo", "octo/repo", "--state", "open", "--limit", "100", "--json", _fields] ->
-              {:ok, {"[]", 0}}
-
-            ["pr", "list", "--repo", "octo/repo", "--state", "all", "--limit", "100", "--json", _fields] ->
+            ["api", "-H", "Accept: application/vnd.github+json", ^commit_pulls_path] ->
               {:ok,
                {Jason.encode!([
                   %{
                     "number" => 205,
-                    "url" => "https://github.com/octo/repo/pull/205",
-                    "headRefName" => "workspace-branch",
-                    "headRefOid" => head_sha,
-                    "isDraft" => false,
-                    "mergeStateStatus" => "CLEAN",
-                    "state" => "OPEN"
+                    "html_url" => "https://github.com/octo/repo/pull/205",
+                    "head" => %{"ref" => "workspace-branch", "sha" => head_sha},
+                    "draft" => false,
+                    "mergeable_state" => "clean",
+                    "state" => "open"
                   }
                 ]), 0}}
           end
@@ -531,11 +534,14 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
                [],
                deps
              )
+
+    refute_received {:command, :gh, ["pr", "list", "--repo", "octo/repo", "--state", "all", "--limit", "100" | _rest]}
   end
 
   test "workspace handoff head sha lookup returns nil without an open non-draft match" do
     workspace = "/tmp/owner-workspace-head-sha-no-match"
     head_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    commit_pulls_path = "/repos/octo/repo/commits/#{head_sha}/pulls"
 
     deps = %{
       find_git_bin: fn -> "/tmp/fake-git" end,
@@ -554,27 +560,27 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
             ["pr", "list", "--repo", "octo/repo", "--state", _state, "--json", _fields, "--head", _head] ->
               {:ok, {"[]", 0}}
 
-            ["pr", "list", "--repo", "octo/repo", "--state", state, "--limit", "100", "--json", _fields]
-            when state in ["open", "all"] ->
+            ["api", "-H", "Accept: application/vnd.github+json", ^commit_pulls_path] ->
               {:ok,
                {Jason.encode!([
                   %{
                     "number" => 206,
-                    "url" => "https://github.com/octo/repo/pull/206",
-                    "headRefName" => "workspace-branch",
-                    "headRefOid" => head_sha,
-                    "isDraft" => true,
-                    "mergeStateStatus" => "CLEAN",
-                    "state" => "OPEN"
+                    "html_url" => "https://github.com/octo/repo/pull/206",
+                    "head" => %{"ref" => "workspace-branch", "sha" => head_sha},
+                    "draft" => true,
+                    "mergeable_state" => "clean",
+                    "state" => "open"
                   },
                   %{
                     "number" => 207,
-                    "url" => "https://github.com/octo/repo/pull/207",
-                    "headRefName" => "workspace-branch",
-                    "headRefOid" => "cccccccccccccccccccccccccccccccccccccccc",
-                    "isDraft" => false,
-                    "mergeStateStatus" => "CLEAN",
-                    "state" => "OPEN"
+                    "html_url" => "https://github.com/octo/repo/pull/207",
+                    "head" => %{
+                      "ref" => "workspace-branch",
+                      "sha" => "cccccccccccccccccccccccccccccccccccccccc"
+                    },
+                    "draft" => false,
+                    "mergeable_state" => "clean",
+                    "state" => "open"
                   }
                 ]), 0}}
           end
@@ -662,6 +668,7 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
   test "workspace handoff lookup falls back to workspace head sha when linked PR attachments are ambiguous" do
     workspace = "/tmp/owner-workspace-ambiguous-linked-pr-head-sha"
     head_sha = "dddddddddddddddddddddddddddddddddddddddd"
+    commit_pulls_path = "/repos/octo/repo/commits/#{head_sha}/pulls"
 
     deps = %{
       find_git_bin: fn -> "/tmp/fake-git" end,
@@ -680,17 +687,16 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
             ["pr", "list", "--repo", "octo/repo", "--state", _state, "--json", _fields, "--head", _head] ->
               {:ok, {"[]", 0}}
 
-            ["pr", "list", "--repo", "octo/repo", "--state", "open", "--limit", "100", "--json", _fields] ->
+            ["api", "-H", "Accept: application/vnd.github+json", ^commit_pulls_path] ->
               {:ok,
                {Jason.encode!([
                   %{
                     "number" => 81,
-                    "url" => "https://github.com/octo/repo/pull/81",
-                    "headRefName" => "workspace-branch",
-                    "headRefOid" => head_sha,
-                    "isDraft" => false,
-                    "mergeStateStatus" => "CLEAN",
-                    "state" => "OPEN"
+                    "html_url" => "https://github.com/octo/repo/pull/81",
+                    "head" => %{"ref" => "workspace-branch", "sha" => head_sha},
+                    "draft" => false,
+                    "mergeable_state" => "clean",
+                    "state" => "open"
                   }
                 ]), 0}}
 

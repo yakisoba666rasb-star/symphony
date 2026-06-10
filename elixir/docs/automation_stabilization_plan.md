@@ -1,6 +1,6 @@
 # Symphony Automation Stabilization Plan
 
-Status: Phase 1 implemented
+Status: Phase 2 implemented
 Last updated: 2026-06-10
 
 ## Goal
@@ -33,6 +33,9 @@ Already implemented (PR #62, #63, #77, #78):
 | Done sync closes source GitHub issue (`Fixes #N` + runtime close) | Done (#78) |
 | Review handoff dedupe / blocked-state recovery | Done (#77) |
 | Runtime env points to `yakisoba666rasb-star/symphony` | Done |
+| Workspace HEAD SHA PR discovery avoids `--limit 100` list truncation | Done (#70) |
+| Done sync only inspects issues with PR attachment or branch evidence | Done |
+| Merged issue-key matching uses token boundaries and limit 50 | Done |
 
 Remaining gaps:
 
@@ -40,14 +43,9 @@ Remaining gaps:
   test fixtures are cleaned up by Phase 1. Operators still need to archive
   any stale local clones and retired config directories that exist on
   individual machines.
-- **B. Known stability issues in Backlog**: LAB-387 (SHA fallback second
-  stage unreachable, limit-100 truncation), LAB-389 (Orchestrator god
+- **B. Known stability issues in Backlog**: LAB-389 (Orchestrator god
   module), LAB-388 (coverage gate excludes core modules).
-- **C. Risks flagged in PR #77 review**: Done sync evidence predicate is
-  true for nearly all issues (API call growth per poll cycle), substring
-  issue-key matching (`LAB-1` matches `LAB-10`), `gh pr list --limit 20`
-  cap.
-- **D. Block observability**: block comments exist, but retry limits /
+- **C. Block observability**: block comments exist, but retry limits /
   backoff are not unified and there is no detection of silent stalls.
 
 ## Implementation Plan
@@ -67,17 +65,18 @@ Outcome: removes the root cause of wrong-repo attachments and clones.
 
 ### Phase 2: Hardening the sync paths
 
-4. **LAB-387**: fix unreachable `--state all` second stage in the SHA
-   fallback and the limit-100 truncation. PR-detection failure is the top
-   cause of false blocks, so this goes first.
-5. **Done sync throttling** (new issue): `issue_has_done_sync_evidence?`
-   returns true for any issue with an identifier/URL/branch, so every poll
-   cycle runs `gh pr list --search` for nearly every active/review issue.
-   Mitigate with a lower-frequency cycle for attachment-less issues, or a
-   negative-result cache with backoff.
-6. **Word-boundary issue-key matching + limit raise** (new issue): match
-   issue keys with word boundaries instead of substring containment; raise
-   `--limit` from 20 to 50 or more.
+Implemented.
+
+4. **LAB-387 / GitHub issue #70**: workspace HEAD SHA handoff lookup now
+   calls GitHub's commit-to-PRs API directly instead of doing
+   `gh pr list --state open --limit 100` followed by the unreachable
+   `--state all --limit 100` pass.
+5. **Done sync throttling**: `issue_has_done_sync_evidence?` only enters
+   merged-PR lookup when the Linear issue has a GitHub PR attachment or a
+   branch name. Identifier-only or issue-URL-only rows are skipped.
+6. **Word-boundary issue-key matching + limit raise**: merged issue PR
+   lookup uses token-boundary matching, so `LAB-1` does not match
+   `LAB-10`, and merged search uses `--limit 50`.
 
 ### Phase 3: Systematic block reduction
 
