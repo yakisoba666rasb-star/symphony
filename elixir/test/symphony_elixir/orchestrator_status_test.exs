@@ -85,6 +85,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule FakeGitHubIssueCloser do
+    def close_if_open(repo, issue_url, comment) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:github_issue_close_called, repo, issue_url, comment})
+
+        _ ->
+          :ok
+      end
+
+      {:ok, :closed}
+    end
+  end
+
   defmodule FakeGitHubPrPublisherError do
     def publish_workspace(_workspace_path, _branch_name, _issue), do: {:error, :publish_blocked}
   end
@@ -321,7 +335,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              branch_name: "lab-381-body-linked",
              project_name: "repo",
              description: "Repo: https://github.com/octo/repo",
-             attachment_urls: []
+             attachment_urls: ["https://github.com/octo/repo/issues/381"]
            },
            %Issue{
              id: "issue-identifier-url-only",
@@ -1266,6 +1280,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     )
 
     previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_github_issue = Application.get_env(:symphony_elixir, :github_issue)
     previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
 
     previous_tracker_state_update_recipient =
@@ -1279,6 +1294,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         Application.delete_env(:symphony_elixir, :github_pr_lookup)
       else
         Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_github_issue) do
+        Application.delete_env(:symphony_elixir, :github_issue)
+      else
+        Application.put_env(:symphony_elixir, :github_issue, previous_github_issue)
       end
 
       if is_nil(previous_tracker_module) do
@@ -1309,6 +1330,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupMergedLinkedPr)
+    Application.put_env(:symphony_elixir, :github_issue, FakeGitHubIssueCloser)
     Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerMergedLinkedPrIssues)
     Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
     Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
@@ -1343,6 +1365,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert "In Review" in state_names
 
     assert_receive {:merged_pr_lookup_called, ["https://github.com/octo/repo/pull/200"]}, 200
+    refute_receive {:merged_pr_lookup_called, ["https://github.com/octo/repo/issues/381"]}, 100
 
     assert_receive {:merged_issue_pr_lookup_called, "MT-381", "https://linear.app/example/issue/MT-381/body-linked-merged-pr", "lab-381-body-linked"},
                    200
@@ -1352,6 +1375,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_receive {:tracker_state_update_called, "issue-review-merged", "Done"}, 200
     assert_receive {:tracker_state_update_called, "issue-progress-merged", "Done"}, 200
     assert_receive {:tracker_state_update_called, "issue-body-linked-merged", "Done"}, 200
+
+    assert_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", close_comment}, 200
+    assert close_comment =~ "https://github.com/octo/repo/pull/201"
+    assert close_comment =~ "MT-381"
 
     assert MapSet.member?(state.completed, "issue-review-merged")
     assert MapSet.member?(state.completed, "issue-progress-merged")
