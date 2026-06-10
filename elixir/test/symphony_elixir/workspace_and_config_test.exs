@@ -139,6 +139,41 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert repository.slug == "kasotuosawari-design/auto_template"
   end
 
+  test "workflow config supports opt-in GitHub issue intake" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "tracker" => %{"kind" => "linear", "team_key" => "LAB", "api_key" => "token", "all_projects" => true},
+               "github_intake" => %{"enabled" => true, "state" => "Backlog", "interval_ms" => 120_000, "limit" => 25},
+               "repository" => %{
+                 "default" => "yakisoba666rasb-star/symphony",
+                 "project_routes" => %{"yakisoba666rasb-star/symphony" => ["Symphony"]}
+               }
+             })
+
+    assert settings.github_intake.enabled == true
+    assert settings.github_intake.state == "Backlog"
+    assert settings.github_intake.interval_ms == 120_000
+    assert settings.github_intake.limit == 25
+  end
+
+  test "workflow config rejects invalid GitHub issue intake settings" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "github_intake" => %{"enabled" => true, "state" => "", "interval_ms" => 0, "limit" => 501}
+             })
+
+    assert message =~ "github_intake"
+    assert message =~ "state"
+    assert message =~ "interval_ms"
+    assert message =~ "limit"
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{"github_intake" => %{"enabled" => true, "state" => "   "}})
+
+    assert message =~ "github_intake"
+    assert message =~ "state"
+  end
+
   test "repository resolver rejects conflicting explicit repo and GitHub source URL" do
     assert {:ok, settings} =
              Schema.parse(%{

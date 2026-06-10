@@ -36,6 +36,8 @@ defmodule SymphonyElixir.Orchestrator do
     Runtime state for the orchestrator polling loop.
     """
 
+    @type t :: %__MODULE__{}
+
     defstruct [
       :poll_interval_ms,
       :max_concurrent_agents,
@@ -49,6 +51,7 @@ defmodule SymphonyElixir.Orchestrator do
       blocked: %{},
       retry_attempts: %{},
       pending_review_handoffs: %{},
+      last_github_intake_sync_ms: nil,
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -992,6 +995,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> sync_merged_linked_pull_requests_to_done()
 
     with :ok <- Config.validate!(),
+         state <- maybe_sync_github_issue_intake(state),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
          issues <- auto_assign_missing_projects(issues),
          true <- available_slots(state) > 0 do
@@ -1056,6 +1060,48 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp auto_assign_missing_projects(issues), do: issues
+
+  defp maybe_sync_github_issue_intake(%State{} = state) do
+    settings = Config.settings!()
+
+    cond do
+      not settings.github_intake.enabled ->
+        state
+
+      not github_issue_intake_due?(state, settings) ->
+        state
+
+      true ->
+        run_github_issue_intake_sync(settings)
+        %{state | last_github_intake_sync_ms: System.monotonic_time(:millisecond)}
+    end
+  end
+
+  defp run_github_issue_intake_sync(settings) do
+    module = github_issue_module()
+    adapter = tracker_module()
+
+    if module_exports?(module, :sync_open_issues_to_linear, 2) do
+      log_github_issue_intake_result(module.sync_open_issues_to_linear(settings, adapter))
+    else
+      Logger.debug("Skipping GitHub issue intake sync; #{inspect(module)} does not export sync_open_issues_to_linear/2")
+    end
+  end
+
+  defp log_github_issue_intake_result({:ok, %{created: created, skipped: skipped, errors: errors}}) do
+    Logger.info("GitHub issue intake sync completed created=#{created} skipped=#{skipped} errors=#{errors}")
+  end
+
+  defp log_github_issue_intake_result({:error, reason}) do
+    Logger.warning("Skipping GitHub issue intake sync; failed: #{inspect(reason)}")
+  end
+
+  defp github_issue_intake_due?(%State{last_github_intake_sync_ms: nil}, _settings), do: true
+
+  defp github_issue_intake_due?(%State{last_github_intake_sync_ms: last_sync_ms}, settings)
+       when is_integer(last_sync_ms) do
+    System.monotonic_time(:millisecond) - last_sync_ms >= settings.github_intake.interval_ms
+  end
 
   defp sync_merged_linked_pull_requests_to_done(%State{} = state) do
     states = post_merge_done_sync_states()
@@ -1800,6 +1846,12 @@ defmodule SymphonyElixir.Orchestrator do
   @spec auto_assign_missing_projects_for_test([Issue.t()]) :: [Issue.t()]
   def auto_assign_missing_projects_for_test(issues) when is_list(issues) do
     auto_assign_missing_projects(issues)
+  end
+
+  @doc false
+  @spec sync_github_issue_intake_for_test(State.t()) :: State.t()
+  def sync_github_issue_intake_for_test(%State{} = state) do
+    maybe_sync_github_issue_intake(state)
   end
 
   @doc false

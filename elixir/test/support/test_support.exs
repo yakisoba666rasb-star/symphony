@@ -110,6 +110,10 @@ defmodule SymphonyElixir.TestSupport do
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
           tracker_review_state: "In Review",
           poll_interval_ms: 30_000,
+          github_intake_enabled: false,
+          github_intake_state: "Backlog",
+          github_intake_interval_ms: 300_000,
+          github_intake_limit: 100,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           dirty_workspace_retention_days: 7,
           repository_default: nil,
@@ -168,6 +172,10 @@ defmodule SymphonyElixir.TestSupport do
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
+    github_intake_enabled = Keyword.get(config, :github_intake_enabled)
+    github_intake_state = Keyword.get(config, :github_intake_state)
+    github_intake_interval_ms = Keyword.get(config, :github_intake_interval_ms)
+    github_intake_limit = Keyword.get(config, :github_intake_limit)
     tracker_review_state = Keyword.get(config, :tracker_review_state)
     workspace_root = Keyword.get(config, :workspace_root)
     dirty_workspace_retention_days = Keyword.get(config, :dirty_workspace_retention_days)
@@ -230,6 +238,7 @@ defmodule SymphonyElixir.TestSupport do
         "  review_state: #{yaml_value(tracker_review_state)}",
         "polling:",
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
+        github_intake_yaml(github_intake_enabled, github_intake_state, github_intake_interval_ms, github_intake_limit),
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
         "  dirty_workspace_retention_days: #{yaml_value(dirty_workspace_retention_days)}",
@@ -288,6 +297,19 @@ defmodule SymphonyElixir.TestSupport do
       "  base_backoff_ms: #{yaml_value(retry.base_backoff_ms)}",
       "  max_backoff_ms: #{yaml_value(retry.max_backoff_ms)}",
       "  continuation_delay_ms: #{yaml_value(retry.continuation_delay_ms)}"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp github_intake_yaml(false, "Backlog", 300_000, 100), do: nil
+
+  defp github_intake_yaml(enabled, state, interval_ms, limit) do
+    [
+      "github_intake:",
+      "  enabled: #{yaml_value(enabled)}",
+      "  state: #{yaml_value(state)}",
+      "  interval_ms: #{yaml_value(interval_ms)}",
+      "  limit: #{yaml_value(limit)}"
     ]
     |> Enum.join("\n")
   end

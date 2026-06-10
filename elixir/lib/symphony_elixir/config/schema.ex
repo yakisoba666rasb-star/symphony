@@ -97,6 +97,36 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule GitHubIntake do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:state, :string, default: "Backlog")
+      field(:interval_ms, :integer, default: 300_000)
+      field(:limit, :integer, default: 100)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :state, :interval_ms, :limit], empty_values: [])
+      |> validate_required([:state])
+      |> validate_number(:interval_ms, greater_than: 0)
+      |> validate_number(:limit, greater_than: 0, less_than_or_equal_to: 500)
+      |> validate_change(:state, &validate_non_blank/2)
+    end
+
+    defp validate_non_blank(field, value) when is_binary(value) do
+      if String.trim(value) == "", do: [{field, "must not be blank"}], else: []
+    end
+
+    defp validate_non_blank(field, _value), do: [{field, "must not be blank"}]
+  end
+
   defmodule Workspace do
     @moduledoc false
     use Ecto.Schema
@@ -510,6 +540,7 @@ defmodule SymphonyElixir.Config.Schema do
   embedded_schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:github_intake, GitHubIntake, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:repository, Repository, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
@@ -613,6 +644,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast(attrs, [])
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
+    |> cast_embed(:github_intake, with: &GitHubIntake.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:repository, with: &Repository.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
