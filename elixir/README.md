@@ -155,7 +155,9 @@ Notes:
 - When `tracker.all_projects: true`, Symphony only dispatches issues whose repository hint matches
   their Linear project. By default the repository name must match the project name or slug. Use
   `repository.project_routes` to make the project/repository mapping explicit when names differ.
-  Route keys must use GitHub repository slug form (`owner/repo`), not HTTPS or SSH URLs:
+  Route keys must use GitHub repository slug form (`owner/repo`), not HTTPS or SSH URLs. See
+  [Repository and Linear Project Routing](docs/project_routing.md) for the shared dispatch and
+  project-assignment contract:
 
 ```yaml
 tracker:
