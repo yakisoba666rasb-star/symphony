@@ -881,7 +881,7 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
                  "--limit",
                  "50",
                  "--search",
-                 "LAB-382",
+                 "lab-382-async-review-handoff",
                  "--json",
                  "number,url,headRefName,isDraft,mergeStateStatus,state,mergedAt,title,body"
                ]
@@ -928,34 +928,30 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
       run_command: fn "/tmp/fake-gh", args, _opts ->
         send(parent, {:command, :gh, args})
 
-        assert args == [
-                 "pr",
-                 "list",
-                 "--repo",
-                 "octo/repo",
-                 "--state",
-                 "open",
-                 "--limit",
-                 "50",
-                 "--search",
-                 "LAB-391",
-                 "--json",
-                 "number,url,headRefName,isDraft,mergeStateStatus,state,title,body"
-               ]
+        search = Enum.at(args, Enum.find_index(args, &(&1 == "--search")) + 1)
 
-        {:ok,
-         {Jason.encode!([
-            %{
-              "number" => 83,
-              "url" => "https://github.com/octo/repo/pull/83",
-              "headRefName" => "LAB-391-retry-policy",
-              "isDraft" => false,
-              "mergeStateStatus" => "CLEAN",
-              "state" => "OPEN",
-              "title" => "LAB-391 retry policy",
-              "body" => "Refs LAB-391\nLinear: https://linear.app/example/issue/LAB-391/retry-policy"
-            }
-          ]), 0}}
+        case search do
+          "aenima611111/lab-391-linear-generated-branch" ->
+            {:ok, {Jason.encode!([]), 0}}
+
+          "https://linear.app/example/issue/LAB-391/retry-policy" ->
+            {:ok, {Jason.encode!([]), 0}}
+
+          "LAB-391" ->
+            {:ok,
+             {Jason.encode!([
+                %{
+                  "number" => 83,
+                  "url" => "https://github.com/octo/repo/pull/83",
+                  "headRefName" => "LAB-391-retry-policy",
+                  "isDraft" => false,
+                  "mergeStateStatus" => "CLEAN",
+                  "state" => "OPEN",
+                  "title" => "LAB-391 retry policy",
+                  "body" => "Refs LAB-391\nLinear: https://linear.app/example/issue/LAB-391/retry-policy"
+                }
+              ]), 0}}
+        end
       end
     }
 
@@ -977,11 +973,14 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
     assert_received {:command, :gh, ["pr", "list", "--repo", "octo/repo", "--state", "open" | _rest]}
   end
 
-  test "open issue pull request lookup prefers linked PR attachments" do
+  test "open issue pull request lookup falls back to linked PR attachments" do
     deps = %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,
       run_command: fn "/tmp/fake-gh", args, _opts ->
         case args do
+          ["pr", "list" | _rest] ->
+            {:ok, {Jason.encode!([]), 0}}
+
           ["pr", "view", "83", "--repo", "octo/repo", "--json", fields] ->
             assert fields == "number,url,headRefName,isDraft,mergeStateStatus,state"
 
@@ -994,9 +993,6 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
                 "mergeStateStatus" => "CLEAN",
                 "state" => "OPEN"
               }), 0}}
-
-          ["pr", "list" | _rest] ->
-            flunk("search should not run when a linked open PR is present")
         end
       end
     }
@@ -1012,6 +1008,54 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
                nil,
                "aenima611111/lab-391-linear-generated-branch",
                ["https://github.com/octo/repo/pull/83"],
+               deps
+             )
+  end
+
+  test "open issue pull request lookup prefers branch implementation evidence over linked PR attachments" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-gh", ["pr", "list" | args], _opts ->
+          search = Enum.at(args, Enum.find_index(args, &(&1 == "--search")) + 1)
+
+          case search do
+            "lab-396-implementation" ->
+              {:ok,
+               {Jason.encode!([
+                  %{
+                    "number" => 88,
+                    "url" => "https://github.com/octo/repo/pull/88",
+                    "headRefName" => "lab-396-implementation",
+                    "isDraft" => false,
+                    "mergeStateStatus" => "CLEAN",
+                    "state" => "OPEN",
+                    "title" => "LAB-396 implementation",
+                    "body" => "Refs LAB-396"
+                  }
+                ]), 0}}
+
+            _other ->
+              {:ok, {Jason.encode!([]), 0}}
+          end
+
+        "/tmp/fake-gh", ["pr", "view" | _args], _opts ->
+          flunk("linked PR should not be viewed when branch implementation evidence exists")
+      end
+    }
+
+    assert {:ok,
+            %{
+              "number" => 88,
+              "__symphonyLookupSource" => "open_issue_pull_request",
+              "__symphonyMatchedBranch" => "lab-396-implementation"
+            }} =
+             GitHubPrLookup.lookup_open_issue_pull_request(
+               "octo/repo",
+               "LAB-396",
+               "https://linear.app/example/issue/LAB-396/example",
+               "lab-396-implementation",
+               ["https://github.com/octo/repo/pull/87"],
                deps
              )
   end
@@ -1057,8 +1101,8 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
                deps
              )
 
-    assert_received {:search, "LAB-391"}
     assert_received {:search, "https://linear.app/example/issue/LAB-391/retry-policy"}
+    refute_received {:search, "LAB-391"}
   end
 
   test "open issue pull request lookup returns nil without search evidence" do
@@ -1253,8 +1297,8 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
                deps
              )
 
-    assert_received {:search, "LAB-382"}
     assert_received {:search, "https://linear.app/example/issue/LAB-382/example"}
+    refute_received {:search, "LAB-382"}
   end
 
   test "merged issue pull request lookup finds branch-only merged PR" do
