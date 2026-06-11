@@ -4069,9 +4069,16 @@ defmodule SymphonyElixir.Orchestrator do
         }
       end)
 
+    reviewing =
+      state.pending_review_handoffs
+      |> Enum.map(fn {_ref, metadata} ->
+        review_handoff_snapshot_entry(metadata)
+      end)
+
     {:reply,
      %{
        running: running,
+       reviewing: reviewing,
        retrying: retrying,
        blocked: blocked,
        codex_totals: state.codex_totals,
@@ -4107,6 +4114,29 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp blocked_issue_state(%{issue: %Issue{state: state}}), do: state
   defp blocked_issue_state(_metadata), do: nil
+
+  defp review_handoff_snapshot_entry(metadata) when is_map(metadata) do
+    running_entry = Map.get(metadata, :running_entry, %{})
+    issue = Map.get(metadata, :issue)
+
+    %{
+      issue_id: Map.get(metadata, :issue_id) || issue_id_from_review_issue(issue),
+      identifier: review_handoff_identifier(running_entry, issue),
+      pr_url: pr_url(Map.get(metadata, :pr)),
+      mode: Map.get(metadata, :mode),
+      session_id: Map.get(metadata, :session_id),
+      started_at: Map.get(metadata, :started_at),
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    }
+  end
+
+  defp issue_id_from_review_issue(%Issue{id: issue_id}), do: issue_id
+  defp issue_id_from_review_issue(_issue), do: nil
+
+  defp review_handoff_identifier(%{identifier: identifier}, _issue) when is_binary(identifier), do: identifier
+  defp review_handoff_identifier(_running_entry, %Issue{identifier: identifier}) when is_binary(identifier), do: identifier
+  defp review_handoff_identifier(_running_entry, _issue), do: nil
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
     token_delta = extract_token_delta(running_entry, update)
