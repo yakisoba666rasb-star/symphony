@@ -1,7 +1,8 @@
 # Symphony Automation Stabilization Plan
 
-Status: Phases 1-2.5 implemented; Phase 3 retry policy implemented
-Last updated: 2026-06-10 (evening)
+Status: Phases 1-2.5 implemented; Phase 3 retry policy implemented;
+intake sync merged and runtime-enabled (#90, #94)
+Last updated: 2026-06-11
 
 ## Goal
 
@@ -21,7 +22,7 @@ Required invariants:
 - Blocks are reduced: recoverable conditions auto-recover, retries are
   bounded, and every terminal block leaves an actionable reason on Linear.
 
-## Current State (verified 2026-06-10)
+## Current State (verified 2026-06-11)
 
 Already implemented:
 
@@ -39,21 +40,14 @@ Already implemented:
 | Unified retry policy with bounded attempts and Linear-visible reasons (LAB-391) | Done (#83) |
 | Auto-assign Linear Project from repository evidence (LAB-396) | Done (#88) |
 | Full loop verified end-to-end: dispatch -> implement -> self-review -> rework -> approve -> merge -> Done | Verified 2026-06-10 (LAB-391) |
-| GitHub issue -> Linear Backlog intake sync | In review (PR #90) |
+| GitHub issue -> Linear Backlog intake sync (two-stage dedupe, boundary matching) | Done (#90, #94); engine rebuilt/restarted from `origin/main` on 2026-06-11 |
 
-Remaining gaps:
-
-- **A. GitHub issue -> Linear intake**: PR #90 adds opt-in polling intake.
-  Follow-ups after merge: dedupe gap when attachmentCreate fails after
-  issueCreate, archived-issue re-import, attempt caching for unmatchable
-  issues, and moving intake off the orchestrator poll path.
-- **B. Known stability issues in Backlog**: LAB-389 (Orchestrator god
-  module), LAB-388 (coverage gate excludes core modules).
-- **C. Stall detection**: retry/backoff is unified (#83), but there is still
-  no detection of silent stalls (running issues with no progress events).
-- **D. Done sync API churn**: merged-PR Done sync evidence checks still run
-  every poll cycle (~30s); interval throttling would reduce GitHub/Linear
-  API consumption.
+Remaining gaps: see [Zero-Touch GitHub Issue Loop](zero_touch_loop.md) for
+the consolidated design (W1-W6): intake failure
+fingerprint cache, async intake, Done sync interval gating, stall detection,
+label-gated zero-touch promotion, and E2E measurement. Known maintainability
+issues remain in Backlog: LAB-389 (Orchestrator god module), LAB-388
+(coverage gate excludes core modules).
 
 ## Implementation Plan
 
@@ -131,6 +125,6 @@ Implemented (#88).
 ## Recommended Order
 
 Phase 1 (done) -> Phase 2 (done) -> LAB-396 (done) -> LAB-391 retry policy
-(done) -> GitHub intake (PR #90) -> stall detection -> Done sync throttling ->
-LAB-389. New issues should be filed in Linear so Symphony itself can
-implement them.
+(done) -> GitHub intake (done: #90, #94; W0 enabled) -> zero-touch loop W1-W6 (see
+[zero_touch_loop.md](zero_touch_loop.md)) -> LAB-389. New issues should be
+filed in Linear so Symphony itself can implement them.
