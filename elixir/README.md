@@ -153,9 +153,11 @@ Notes:
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
 - When `tracker.all_projects: true`, Symphony only dispatches issues whose repository hint matches
-  their Linear project. By default the repository name must match the project name or slug. Use
-  `repository.project_routes` to make the project/repository mapping explicit when names differ.
-  Route keys must use GitHub repository slug form (`owner/repo`), not HTTPS or SSH URLs. See
+  their Linear project. By default the repository name must match the project name or slug. Set
+  `repository.allowed_owners` to enable dynamic routes from Linear Project descriptions or links
+  containing GitHub repository URLs for those owners. Use `repository.project_routes` as explicit
+  overrides when names differ or a static mapping should win. Route keys must use GitHub repository
+  slug form (`owner/repo`), not HTTPS or SSH URLs. See
   [Repository and Linear Project Routing](docs/project_routing.md) for the shared dispatch and
   project-assignment contract:
 
@@ -166,6 +168,8 @@ tracker:
   all_projects: true
 repository:
   default: your-org/default-repo
+  allowed_owners:
+    - your-org
   project_routes:
     your-org/symphony:
       - symphony

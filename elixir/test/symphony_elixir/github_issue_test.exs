@@ -2,7 +2,7 @@ defmodule SymphonyElixir.GitHubIssueTest do
   use ExUnit.Case
 
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.GitHubIssue
+  alias SymphonyElixir.{GitHubIssue, RepositoryRoutes}
 
   defmodule FakeLinearIntakeAdapter do
     def github_issue_synced?(url) do
@@ -55,6 +55,25 @@ defmodule SymphonyElixir.GitHubIssueTest do
     end
   end
 
+  defmodule FakeLinearProjectClient do
+    def graphql(_query, %{teamKey: "LAB", first: 250}) do
+      {:ok,
+       %{
+         "data" => %{
+           "teams" => %{
+             "nodes" => [
+               %{
+                 "projects" => %{
+                   "nodes" => Application.get_env(:symphony_elixir, :github_intake_projects, [])
+                 }
+               }
+             ]
+           }
+         }
+       }}
+    end
+  end
+
   setup do
     keys = [
       :github_issue_test_recipient,
@@ -62,12 +81,17 @@ defmodule SymphonyElixir.GitHubIssueTest do
       :github_intake_description_issue,
       :github_intake_target_result,
       :github_intake_create_result,
-      :github_intake_attachment_result
+      :github_intake_attachment_result,
+      :github_intake_projects,
+      :linear_client_module
     ]
 
     previous = Map.new(keys, &{&1, Application.get_env(:symphony_elixir, &1, :__missing__)})
+    RepositoryRoutes.clear_cache()
 
     on_exit(fn ->
+      RepositoryRoutes.clear_cache()
+
       Enum.each(previous, fn
         {key, :__missing__} -> Application.delete_env(:symphony_elixir, key)
         {key, value} -> Application.put_env(:symphony_elixir, key, value)
@@ -141,6 +165,52 @@ defmodule SymphonyElixir.GitHubIssueTest do
                      }}
 
     assert_received {:create_issue_attachment, "linear-1", "GitHub issue #67: Fix source sync", "https://github.com/octo/repo/issues/67"}
+  end
+
+  test "sync scans dynamically discovered project repository routes" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearProjectClient)
+
+    Application.put_env(:symphony_elixir, :github_intake_projects, [
+      %{
+        "id" => "project-1",
+        "name" => "Symphony",
+        "slugId" => "symphony",
+        "description" => "Repo: https://github.com/yakisoba666rasb-star/symphony"
+      }
+    ])
+
+    settings =
+      intake_settings(%{
+        "repository" => %{
+          "allowed_owners" => ["yakisoba666rasb-star"]
+        }
+      })
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", args, _opts ->
+        send(self(), {:gh_args, args})
+
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 67,
+              "title" => "Fix source sync",
+              "body" => "",
+              "url" => "https://github.com/yakisoba666rasb-star/symphony/issues/67"
+            }
+          ]), 0}}
+      end,
+      monotonic_time_ms: fn -> System.monotonic_time(:millisecond) end
+    }
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(settings, FakeLinearIntakeAdapter, deps)
+
+    assert_received {:gh_args, args}
+    assert Enum.slice(args, 0, 3) == ["issue", "list", "--repo"]
+    assert Enum.at(args, 3) == "yakisoba666rasb-star/symphony"
+    assert_received {:resolve_github_intake_target, "LAB", "Backlog", ["Symphony", "symphony"]}
   end
 
   test "sync imports configured label matches into the first active tracker state" do

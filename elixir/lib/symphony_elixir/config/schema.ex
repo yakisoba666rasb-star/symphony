@@ -219,14 +219,16 @@ defmodule SymphonyElixir.Config.Schema do
       field(:default, :string)
       field(:clone_protocol, :string, default: "https")
       field(:project_routes, :map, default: %{})
+      field(:allowed_owners, {:array, :string}, default: [])
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:default, :clone_protocol, :project_routes], empty_values: [])
+      |> cast(attrs, [:default, :clone_protocol, :project_routes, :allowed_owners], empty_values: [])
       |> validate_change(:default, &validate_optional_repository_slug/2)
       |> validate_change(:project_routes, &validate_project_routes/2)
+      |> validate_change(:allowed_owners, &validate_allowed_owners/2)
       |> validate_inclusion(:clone_protocol, ["https", "ssh"])
     end
 
@@ -282,6 +284,24 @@ defmodule SymphonyElixir.Config.Schema do
     end
 
     defp valid_project_route_alias?(_value), do: false
+
+    defp validate_allowed_owners(_field, value) when value in [nil, []], do: []
+
+    defp validate_allowed_owners(field, value) when is_list(value) do
+      if Enum.all?(value, &valid_repository_owner?/1) do
+        []
+      else
+        [{field, "must be a list of GitHub owner names"}]
+      end
+    end
+
+    defp validate_allowed_owners(field, _value), do: [{field, "must be a list of GitHub owner names"}]
+
+    defp valid_repository_owner?(value) when is_binary(value) do
+      Regex.match?(~r/^[A-Za-z0-9_.-]+$/, String.trim(value))
+    end
+
+    defp valid_repository_owner?(_value), do: false
   end
 
   defmodule Worker do

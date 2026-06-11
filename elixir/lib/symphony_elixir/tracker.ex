@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Tracker do
 
   require Logger
 
-  alias SymphonyElixir.{Config, RepositoryResolver}
+  alias SymphonyElixir.{Config, RepositoryResolver, RepositoryRoutes}
   alias SymphonyElixir.Linear.Issue
 
   @callback fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
@@ -134,8 +134,8 @@ defmodule SymphonyElixir.Tracker do
   defp project_alias_groups(settings, repo_slug, repo_name) do
     route_aliases =
       settings
-      |> get_in([Access.key(:repository), Access.key(:project_routes)])
-      |> project_route_aliases(repo_slug)
+      |> RepositoryRoutes.effective_project_routes()
+      |> RepositoryRoutes.project_route_aliases(repo_slug)
 
     [
       {:project_route, route_aliases, :exact},
@@ -175,19 +175,6 @@ defmodule SymphonyElixir.Tracker do
 
   defp alias_matches_project_token?(alias_token, project_token, :exact), do: project_token == alias_token
 
-  defp project_route_aliases(project_routes, repo_slug) when is_map(project_routes) do
-    canonical_repo_token = canonical_route_repo_token(repo_slug)
-
-    project_routes
-    |> Enum.find_value([], fn {raw_repo, aliases} ->
-      if canonical_route_repo_token(raw_repo) == canonical_repo_token do
-        List.wrap(aliases)
-      end
-    end)
-  end
-
-  defp project_route_aliases(_project_routes, _repo_slug), do: []
-
   defp project_tokens(project) when is_map(project) do
     [project_value(project, "name"), project_value(project, "slugId"), project_value(project, "slug_id")]
     |> Enum.map(&route_token/1)
@@ -221,16 +208,6 @@ defmodule SymphonyElixir.Tracker do
   end
 
   defp route_token(_value), do: ""
-
-  defp canonical_route_repo_token(value) when is_binary(value) do
-    value
-    |> String.trim()
-    |> String.trim_leading("https://github.com/")
-    |> String.trim_trailing(".git")
-    |> String.downcase()
-  end
-
-  defp canonical_route_repo_token(value), do: value |> to_string() |> canonical_route_repo_token()
 
   defp issue_project_present?(%Issue{project_name: project_name, project_slug: project_slug}) do
     route_token(project_name) != "" or route_token(project_slug) != ""

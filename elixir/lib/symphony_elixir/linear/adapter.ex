@@ -99,6 +99,47 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @team_projects_query """
+  query SymphonyTeamProjects($teamKey: String!, $first: Int!) {
+    teams(filter: {key: {eq: $teamKey}}, first: 1) {
+      nodes {
+        projects(first: $first) {
+          nodes {
+            id
+            name
+            slugId
+            description
+            url
+            links(first: 20) {
+              nodes {
+                url
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  """
+
+  @team_projects_description_query """
+  query SymphonyTeamProjects($teamKey: String!, $first: Int!) {
+    teams(filter: {key: {eq: $teamKey}}, first: 1) {
+      nodes {
+        projects(first: $first) {
+          nodes {
+            id
+            name
+            slugId
+            description
+            url
+          }
+        }
+      }
+    }
+  }
+  """
+
   @create_issue_mutation """
   mutation SymphonyCreateGitHubBacklogIssue($input: IssueCreateInput!) {
     issueCreate(input: $input) {
@@ -244,6 +285,14 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
+  @spec fetch_team_projects(String.t()) :: {:ok, [map()]} | {:error, term()}
+  def fetch_team_projects(team_key) when is_binary(team_key) do
+    case fetch_team_projects_with_query(@team_projects_query, team_key) do
+      {:ok, projects} -> {:ok, projects}
+      {:error, _reason} -> fetch_team_projects_with_query(@team_projects_description_query, team_key)
+    end
+  end
+
   @spec update_issue_project(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_project(issue_id, project_id)
       when is_binary(issue_id) and is_binary(project_id) do
@@ -345,6 +394,17 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   defp client_module do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
+  end
+
+  defp fetch_team_projects_with_query(query, team_key) do
+    with {:ok, response} <- client_module().graphql(query, %{teamKey: team_key, first: 250}),
+         projects when is_list(projects) <-
+           get_in(response, ["data", "teams", "nodes", Access.at(0), "projects", "nodes"]) do
+      {:ok, projects}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :team_projects_not_found}
+    end
   end
 
   defp attachment_issue_id?(%{"issue" => %{"id" => issue_id}}) when is_binary(issue_id), do: true

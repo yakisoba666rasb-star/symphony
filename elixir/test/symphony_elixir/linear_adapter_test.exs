@@ -27,6 +27,36 @@ defmodule SymphonyElixir.LinearAdapterTest do
     end
   end
 
+  defmodule FakeLinearProjectFallbackClient do
+    def graphql(query, %{teamKey: "LAB", first: 250}) do
+      if String.contains?(query, "links(") do
+        {:error, {:linear_graphql_errors, [%{"message" => "unknown field links"}]}}
+      else
+        {:ok,
+         %{
+           "data" => %{
+             "teams" => %{
+               "nodes" => [
+                 %{
+                   "projects" => %{
+                     "nodes" => [
+                       %{
+                         "id" => "project-1",
+                         "name" => "Symphony",
+                         "slugId" => "symphony",
+                         "description" => "https://github.com/yakisoba666rasb-star/symphony"
+                       }
+                     ]
+                   }
+                 }
+               ]
+             }
+           }
+         }}
+      end
+    end
+  end
+
   setup do
     previous = Application.get_env(:symphony_elixir, :linear_client_module)
     Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearEvidenceClient)
@@ -56,5 +86,12 @@ defmodule SymphonyElixir.LinearAdapterTest do
 
   test "passes through zero-touch evidence GraphQL errors" do
     assert {:error, :linear_down} = Adapter.fetch_zero_touch_evidence("error")
+  end
+
+  test "fetches team projects and falls back when project links are not available" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearProjectFallbackClient)
+
+    assert {:ok, [%{"name" => "Symphony", "description" => description}]} = Adapter.fetch_team_projects("LAB")
+    assert description == "https://github.com/yakisoba666rasb-star/symphony"
   end
 end
