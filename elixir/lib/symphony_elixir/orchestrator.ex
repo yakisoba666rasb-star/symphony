@@ -52,6 +52,7 @@ defmodule SymphonyElixir.Orchestrator do
       retry_attempts: %{},
       pending_review_handoffs: %{},
       github_intake_attempts: %{},
+      github_intake_task: nil,
       last_github_intake_sync_ms: nil,
       last_done_sync_ms: nil,
       codex_totals: nil,
@@ -129,6 +130,32 @@ defmodule SymphonyElixir.Orchestrator do
     state = maybe_dispatch(state)
     state = schedule_tick(state, state.poll_interval_ms)
     state = %{state | poll_check_in_progress: false}
+
+    notify_dashboard()
+    {:noreply, state}
+  end
+
+  def handle_info({ref, {result, attempts}}, %{github_intake_task: %Task{ref: ref}} = state)
+      when is_reference(ref) and is_map(attempts) do
+    Process.demonitor(ref, [:flush])
+    log_github_issue_intake_result(result)
+
+    state = %{
+      state
+      | github_intake_attempts: attempts,
+        github_intake_task: nil,
+        last_github_intake_sync_ms: System.monotonic_time(:millisecond)
+    }
+
+    notify_dashboard()
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{github_intake_task: %Task{ref: ref}} = state)
+      when is_reference(ref) do
+    Logger.warning("GitHub issue intake sync task exited before completion: #{inspect(reason)}")
+
+    state = %{state | github_intake_task: nil}
 
     notify_dashboard()
     {:noreply, state}
@@ -1070,18 +1097,27 @@ defmodule SymphonyElixir.Orchestrator do
       not settings.github_intake.enabled ->
         state
 
+      match?(%Task{}, state.github_intake_task) ->
+        warn_if_github_issue_intake_task_overdue(state, settings)
+
       not github_issue_intake_due?(state, settings) ->
         state
 
       true ->
-        github_intake_attempts = run_github_issue_intake_sync(settings, state.github_intake_attempts)
+        task = start_github_issue_intake_task(settings, state.github_intake_attempts)
 
         %{
           state
-          | github_intake_attempts: github_intake_attempts,
+          | github_intake_task: task,
             last_github_intake_sync_ms: System.monotonic_time(:millisecond)
         }
     end
+  end
+
+  defp start_github_issue_intake_task(settings, attempts) do
+    Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
+      run_github_issue_intake_sync(settings, attempts)
+    end)
   end
 
   defp run_github_issue_intake_sync(settings, attempts) do
@@ -1091,18 +1127,35 @@ defmodule SymphonyElixir.Orchestrator do
     if module_exports?(module, :sync_open_issues_to_linear, 3) do
       case module.sync_open_issues_to_linear(settings, adapter, attempts) do
         {:ok, result, attempts} ->
-          log_github_issue_intake_result({:ok, result})
-          attempts
+          {{:ok, result}, attempts}
 
         result ->
-          log_github_issue_intake_result(result)
-          attempts
+          {result, attempts}
       end
     else
       Logger.debug("Skipping GitHub issue intake sync; #{inspect(module)} does not export sync_open_issues_to_linear/3")
-      attempts
+      {{:skip, :missing_export}, attempts}
     end
   end
+
+  defp warn_if_github_issue_intake_task_overdue(
+         %State{last_github_intake_sync_ms: started_ms, github_intake_task: %Task{} = task} = state,
+         settings
+       )
+       when is_integer(started_ms) do
+    elapsed_ms = System.monotonic_time(:millisecond) - started_ms
+
+    if elapsed_ms >= settings.github_intake.interval_ms do
+      Logger.warning(
+        "GitHub issue intake sync task still running after #{elapsed_ms}ms " <>
+          "interval_ms=#{settings.github_intake.interval_ms} pid=#{inspect(task.pid)}"
+      )
+    end
+
+    state
+  end
+
+  defp warn_if_github_issue_intake_task_overdue(%State{} = state, _settings), do: state
 
   defp log_github_issue_intake_result({:ok, %{created: created, skipped: skipped, errors: errors}}) do
     Logger.info("GitHub issue intake sync completed created=#{created} skipped=#{skipped} errors=#{errors}")
@@ -1111,6 +1164,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp log_github_issue_intake_result({:error, reason}) do
     Logger.warning("Skipping GitHub issue intake sync; failed: #{inspect(reason)}")
   end
+
+  defp log_github_issue_intake_result({:skip, :missing_export}), do: :ok
 
   defp github_issue_intake_due?(%State{last_github_intake_sync_ms: nil}, _settings), do: true
 
