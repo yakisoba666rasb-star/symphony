@@ -19,6 +19,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule FakeGitHubIssueIntakeCrash do
+    def sync_open_issues_to_linear(_settings, _adapter, _attempts) do
+      raise "github intake failed"
+    end
+  end
+
   defmodule FakeLinearIntakeTracker do
   end
 
@@ -743,7 +749,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
-  test "GitHub issue intake sync runs when enabled and respects interval throttle" do
+  test "GitHub issue intake runs asynchronously and respects interval throttle" do
     previous_github_issue = Application.get_env(:symphony_elixir, :github_issue)
     previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
     previous_recipient = Application.get_env(:symphony_elixir, :tracker_comment_recipient)
@@ -780,20 +786,116 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     state = Orchestrator.sync_github_issue_intake_for_test(%Orchestrator.State{})
     assert is_integer(state.last_github_intake_sync_ms)
+    assert %Task{ref: ref} = state.github_intake_task
+    assert state.github_intake_attempts == %{}
+
+    assert_receive {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, %{}}
+
+    _state = Orchestrator.sync_github_issue_intake_for_test(state)
+    refute_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, _attempts}
+
+    assert_receive {^ref, {result, attempts}}
+    assert {:ok, %{created: 1, skipped: 2, errors: 0}} = result
+
+    {:noreply, state} = Orchestrator.handle_info({ref, {result, attempts}}, state)
+
+    assert state.github_intake_task == nil
 
     assert state.github_intake_attempts == %{
              "https://github.com/octo/repo/issues/1" => %{reason: :down, attempts: 1, last_attempt_ms: 1}
            }
 
-    assert_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, %{}}
-
-    _state = Orchestrator.sync_github_issue_intake_for_test(state)
-    refute_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, _attempts}
-
     due_state = %{state | last_github_intake_sync_ms: System.monotonic_time(:millisecond) - 1_001}
     expected_attempts = state.github_intake_attempts
     _state = Orchestrator.sync_github_issue_intake_for_test(due_state)
-    assert_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, ^expected_attempts}
+    assert_receive {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, ^expected_attempts}
+  end
+
+  test "GitHub issue intake warns while single-flight task remains overdue" do
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_team_key: "LAB",
+      tracker_all_projects: true,
+      repository_default: "octo/repo",
+      repository_project_routes: %{"octo/repo" => ["Symphony"]},
+      github_intake_enabled: true,
+      github_intake_state: "Backlog",
+      github_intake_interval_ms: 1_000
+    )
+
+    task = %Task{pid: self(), ref: make_ref(), owner: self(), mfa: {:erlang, :apply, 2}}
+
+    state = %Orchestrator.State{
+      github_intake_task: task,
+      last_github_intake_sync_ms: System.monotonic_time(:millisecond) - 1_001
+    }
+
+    log =
+      capture_log(fn ->
+        assert ^state = Orchestrator.sync_github_issue_intake_for_test(state)
+      end)
+
+    assert log =~ "GitHub issue intake sync task still running"
+  end
+
+  test "GitHub issue intake task crash clears state and preserves interval throttle" do
+    previous_github_issue = Application.get_env(:symphony_elixir, :github_issue)
+    previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_recipient = Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_github_issue),
+        do: Application.delete_env(:symphony_elixir, :github_issue),
+        else: Application.put_env(:symphony_elixir, :github_issue, previous_github_issue)
+
+      if is_nil(previous_tracker),
+        do: Application.delete_env(:symphony_elixir, :tracker_module),
+        else: Application.put_env(:symphony_elixir, :tracker_module, previous_tracker)
+
+      if is_nil(previous_recipient),
+        do: Application.delete_env(:symphony_elixir, :tracker_comment_recipient),
+        else: Application.put_env(:symphony_elixir, :tracker_comment_recipient, previous_recipient)
+    end)
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_team_key: "LAB",
+      tracker_all_projects: true,
+      repository_default: "octo/repo",
+      repository_project_routes: %{"octo/repo" => ["Symphony"]},
+      github_intake_enabled: true,
+      github_intake_state: "Backlog",
+      github_intake_interval_ms: 1_000
+    )
+
+    Application.put_env(:symphony_elixir, :github_issue, FakeGitHubIssueIntakeCrash)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeLinearIntakeTracker)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    state = Orchestrator.sync_github_issue_intake_for_test(%Orchestrator.State{})
+    assert %Task{ref: ref} = state.github_intake_task
+    last_sync_ms = state.last_github_intake_sync_ms
+
+    assert_receive {:DOWN, ^ref, :process, _pid, {%RuntimeError{message: "github intake failed"}, _stack}}
+
+    log =
+      capture_log(fn ->
+        {:noreply, state} =
+          Orchestrator.handle_info(
+            {:DOWN, ref, :process, state.github_intake_task.pid, {%RuntimeError{message: "github intake failed"}, []}},
+            state
+          )
+
+        assert state.github_intake_task == nil
+        assert state.last_github_intake_sync_ms == last_sync_ms
+
+        _state = Orchestrator.sync_github_issue_intake_for_test(state)
+        refute_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, _attempts}
+      end)
+
+    assert log =~ "GitHub issue intake sync task exited before completion"
   end
 
   test "Done sync runs immediately and respects interval throttle" do
