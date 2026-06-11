@@ -235,6 +235,30 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert message =~ "interval_ms must be greater than or equal to polling.interval_ms"
   end
 
+  test "workflow config supports review rework interval gating" do
+    assert {:ok, settings} = Schema.parse(%{})
+    assert settings.review_rework.interval_ms == 120_000
+
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "polling" => %{"interval_ms" => 30_000},
+               "review_rework" => %{"enabled" => true, "interval_ms" => 180_000}
+             })
+
+    assert settings.review_rework.interval_ms == 180_000
+  end
+
+  test "workflow config rejects review rework interval below polling interval" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "polling" => %{"interval_ms" => 30_000},
+               "review_rework" => %{"interval_ms" => 29_999}
+             })
+
+    assert message =~ "review_rework"
+    assert message =~ "interval_ms must be greater than or equal to polling.interval_ms"
+  end
+
   test "workflow config supports stall detection settings" do
     assert {:ok, settings} = Schema.parse(%{})
     assert settings.stall.enabled == true

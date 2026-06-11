@@ -58,6 +58,7 @@ defmodule SymphonyElixir.Orchestrator do
       github_intake_task: nil,
       last_github_intake_sync_ms: nil,
       last_done_sync_ms: nil,
+      last_review_rework_sync_ms: nil,
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -1228,6 +1229,13 @@ defmodule SymphonyElixir.Orchestrator do
     System.monotonic_time(:millisecond) - last_sync_ms >= settings.done_sync.interval_ms
   end
 
+  defp review_rework_sync_due?(%State{last_review_rework_sync_ms: nil}, _settings), do: true
+
+  defp review_rework_sync_due?(%State{last_review_rework_sync_ms: last_sync_ms}, settings)
+       when is_integer(last_sync_ms) do
+    System.monotonic_time(:millisecond) - last_sync_ms >= settings.review_rework.interval_ms
+  end
+
   defp sync_merged_linked_pull_requests_to_done(%State{} = state) do
     states = post_merge_done_sync_states()
     module = tracker_module()
@@ -1815,8 +1823,13 @@ defmodule SymphonyElixir.Orchestrator do
       !module_exports?(module, :fetch_issues_by_states, 1) ->
         state
 
+      not review_rework_sync_due?(state, settings) ->
+        state
+
       true ->
-        do_reconcile_review_rework_requests(state, module, states, settings.review_rework)
+        state
+        |> do_reconcile_review_rework_requests(module, states, settings.review_rework)
+        |> Map.put(:last_review_rework_sync_ms, System.monotonic_time(:millisecond))
     end
   end
 
