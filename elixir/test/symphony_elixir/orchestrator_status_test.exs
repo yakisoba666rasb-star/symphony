@@ -4025,6 +4025,201 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert %{^review_ref => %{issue_id: ^issue_id}} = state.pending_review_handoffs
   end
 
+  test "orchestrator snapshot exposes pending review handoffs as reviewing entries" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+
+    issue_id = "issue-reviewing-snapshot"
+    orchestrator_name = Module.concat(__MODULE__, :ReviewingSnapshotOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    review_ref = make_ref()
+    started_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid, 15_000)
+
+    :sys.replace_state(pid, fn _ ->
+      Map.put(initial_state, :pending_review_handoffs, %{
+        review_ref => %{
+          mode: :normal,
+          issue_id: issue_id,
+          running_entry: %{
+            identifier: "MT-REVIEWING",
+            worker_host: "dm-dev2",
+            workspace_path: "/workspaces/MT-REVIEWING"
+          },
+          session_id: "thread-reviewing",
+          pr: %{"url" => "https://github.com/acme/repo/pull/101"},
+          started_at: started_at
+        }
+      })
+    end)
+
+    assert %{
+             reviewing: [
+               %{
+                 issue_id: ^issue_id,
+                 identifier: "MT-REVIEWING",
+                 pr_url: "https://github.com/acme/repo/pull/101",
+                 mode: :normal,
+                 session_id: "thread-reviewing",
+                 started_at: ^started_at,
+                 worker_host: "dm-dev2",
+                 workspace_path: "/workspaces/MT-REVIEWING"
+               }
+             ]
+           } = Orchestrator.snapshot(orchestrator_name, 5_000)
+  end
+
+  test "orchestrator removes pending review handoff after approved result" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+
+    previous_tracker_state_update_recipient =
+      Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
+
+    previous_tracker_comment_recipient = Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+
+      if is_nil(previous_tracker_state_update_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_state_update_recipient)
+      else
+        Application.put_env(:symphony_elixir, :tracker_state_update_recipient, previous_tracker_state_update_recipient)
+      end
+
+      if is_nil(previous_tracker_comment_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+      else
+        Application.put_env(:symphony_elixir, :tracker_comment_recipient, previous_tracker_comment_recipient)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-reviewing-approved"
+    orchestrator_name = Module.concat(__MODULE__, :ReviewingApprovedOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    review_ref = make_ref()
+
+    running_entry = %{
+      issue_id: issue_id,
+      identifier: "MT-REVIEW-OK",
+      issue: %Issue{id: issue_id, identifier: "MT-REVIEW-OK", state: "In Progress"},
+      session_id: "thread-review-ok",
+      last_codex_message: nil,
+      last_codex_event: nil,
+      last_codex_timestamp: nil
+    }
+
+    initial_state = :sys.get_state(pid, 15_000)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+      |> Map.put(:pending_review_handoffs, %{
+        review_ref => %{
+          mode: :normal,
+          issue_id: issue_id,
+          running_entry: running_entry,
+          session_id: "thread-review-ok",
+          pr: %{"url" => "https://github.com/acme/repo/pull/102"},
+          tracker: FakeTrackerUpdateInReview,
+          started_at: DateTime.utc_now()
+        }
+      })
+    end)
+
+    send(pid, {
+      review_ref,
+      {:ok, %{approved_equivalent: true, blocking_findings: [], tests_required: [], residual_risk: ""}}
+    })
+
+    assert_receive {:tracker_state_update_called, ^issue_id, _state_name}
+
+    state = :sys.get_state(pid, 15_000)
+    assert state.pending_review_handoffs == %{}
+    assert %{reviewing: []} = Orchestrator.snapshot(orchestrator_name, 5_000)
+  end
+
+  test "orchestrator removes pending review handoff when task DOWN is not normal" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+
+    on_exit(fn ->
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+
+    issue_id = "issue-reviewing-down"
+    orchestrator_name = Module.concat(__MODULE__, :ReviewingDownOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    review_ref = make_ref()
+
+    running_entry = %{
+      issue_id: issue_id,
+      identifier: "MT-REVIEW-DOWN",
+      issue: %Issue{id: issue_id, identifier: "MT-REVIEW-DOWN", state: "In Progress"},
+      session_id: "thread-review-down",
+      last_codex_message: nil,
+      last_codex_event: nil,
+      last_codex_timestamp: nil
+    }
+
+    initial_state = :sys.get_state(pid, 15_000)
+
+    :sys.replace_state(pid, fn _ ->
+      Map.put(initial_state, :pending_review_handoffs, %{
+        review_ref => %{
+          mode: :normal,
+          issue_id: issue_id,
+          running_entry: running_entry,
+          session_id: "thread-review-down",
+          pr: %{"url" => "https://github.com/acme/repo/pull/103"},
+          started_at: DateTime.utc_now()
+        }
+      })
+    end)
+
+    send(pid, {:DOWN, review_ref, :process, self(), :shutdown})
+
+    state = :sys.get_state(pid, 15_000)
+    assert state.pending_review_handoffs == %{}
+    assert Map.has_key?(state.blocked, issue_id)
+  end
+
   test "orchestrator does not duplicate blocked review recovery while review is pending" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
 

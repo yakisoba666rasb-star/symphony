@@ -664,7 +664,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1},
+             "counts" => %{"running" => 1, "reviewing" => 1, "retrying" => 1, "blocked" => 1},
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -679,6 +679,18 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
                  "last_event_at" => nil,
                  "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
+               }
+             ],
+             "reviewing" => [
+               %{
+                 "issue_id" => "issue-reviewing",
+                 "issue_identifier" => "MT-REVIEW",
+                 "pr_url" => "https://github.com/acme/repo/pull/42",
+                 "mode" => "normal",
+                 "session_id" => "thread-review",
+                 "started_at" => state_payload["reviewing"] |> List.first() |> Map.fetch!("started_at"),
+                 "worker_host" => "dm-dev3",
+                 "workspace_path" => "/workspaces/MT-REVIEW"
                }
              ],
              "retrying" => [
@@ -740,6 +752,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                "last_event_at" => nil,
                "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
              },
+             "reviewing" => nil,
              "retry" => nil,
              "blocked" => nil,
              "logs" => %{"codex_session_logs" => []},
@@ -752,6 +765,19 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert %{"status" => "retrying", "retry" => %{"attempt" => 2, "error" => "boom"}} =
              json_response(conn, 200)
+
+    conn = get(build_conn(), "/api/v1/MT-REVIEW")
+
+    assert %{
+             "status" => "reviewing",
+             "issue_id" => "issue-reviewing",
+             "reviewing" => %{
+               "pr_url" => "https://github.com/acme/repo/pull/42",
+               "mode" => "normal",
+               "session_id" => "thread-review"
+             },
+             "workspace" => %{"path" => "/workspaces/MT-REVIEW", "host" => "dm-dev3"}
+           } = json_response(conn, 200)
 
     conn = get(build_conn(), "/api/v1/MT-BLOCKED")
 
@@ -891,8 +917,11 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, view, html} = live(build_conn(), "/")
     assert html =~ "Operations Dashboard"
     assert html =~ "MT-HTTP"
+    assert html =~ "MT-REVIEW"
     assert html =~ "MT-RETRY"
     assert html =~ "MT-BLOCKED"
+    assert html =~ "Open PR"
+    assert html =~ "Review handoffs"
     assert html =~ "rendered"
     assert html =~ "turn blocked: waiting for user input"
     assert html =~ "Runtime"
@@ -986,7 +1015,13 @@ defmodule SymphonyElixir.ExtensionsTest do
       |> get("/api/v1/state")
 
     assert authorized_conn.status == 200
-    assert Jason.decode!(authorized_conn.resp_body)["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1}
+
+    assert Jason.decode!(authorized_conn.resp_body)["counts"] == %{
+             "running" => 1,
+             "reviewing" => 1,
+             "retrying" => 1,
+             "blocked" => 1
+           }
   end
 
   test "http server serves embedded assets, accepts form posts, and rejects invalid hosts" do
@@ -1023,7 +1058,13 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1}
+
+    assert response.body["counts"] == %{
+             "running" => 1,
+             "reviewing" => 1,
+             "retrying" => 1,
+             "blocked" => 1
+           }
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200
@@ -1094,6 +1135,18 @@ defmodule SymphonyElixir.ExtensionsTest do
           attempt: 2,
           due_in_ms: 2_000,
           error: "boom"
+        }
+      ],
+      reviewing: [
+        %{
+          issue_id: "issue-reviewing",
+          identifier: "MT-REVIEW",
+          pr_url: "https://github.com/acme/repo/pull/42",
+          mode: :normal,
+          session_id: "thread-review",
+          started_at: DateTime.utc_now(),
+          worker_host: "dm-dev3",
+          workspace_path: "/workspaces/MT-REVIEW"
         }
       ],
       blocked: [

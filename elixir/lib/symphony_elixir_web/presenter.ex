@@ -15,10 +15,12 @@ defmodule SymphonyElixirWeb.Presenter do
           generated_at: generated_at,
           counts: %{
             running: length(snapshot.running),
+            reviewing: length(Map.get(snapshot, :reviewing, [])),
             retrying: length(snapshot.retrying),
             blocked: length(Map.get(snapshot, :blocked, []))
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
+          reviewing: Enum.map(Map.get(snapshot, :reviewing, []), &reviewing_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
           codex_totals: snapshot.codex_totals,
@@ -38,13 +40,14 @@ defmodule SymphonyElixirWeb.Presenter do
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
         running = Enum.find(snapshot.running, &(&1.identifier == issue_identifier))
+        reviewing = Enum.find(Map.get(snapshot, :reviewing, []), &(&1.identifier == issue_identifier))
         retry = Enum.find(snapshot.retrying, &(&1.identifier == issue_identifier))
         blocked = Enum.find(Map.get(snapshot, :blocked, []), &(&1.identifier == issue_identifier))
 
-        if is_nil(running) and is_nil(retry) and is_nil(blocked) do
+        if is_nil(running) and is_nil(reviewing) and is_nil(retry) and is_nil(blocked) do
           {:error, :issue_not_found}
         else
-          {:ok, issue_payload_body(issue_identifier, running, retry, blocked)}
+          {:ok, issue_payload_body(issue_identifier, running, reviewing, retry, blocked)}
         end
 
       _ ->
@@ -63,20 +66,21 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  defp issue_payload_body(issue_identifier, running, retry, blocked) do
+  defp issue_payload_body(issue_identifier, running, reviewing, retry, blocked) do
     %{
       issue_identifier: issue_identifier,
-      issue_id: issue_id_from_entries(running, retry, blocked),
-      status: issue_status(running, retry, blocked),
+      issue_id: issue_id_from_entries(running, reviewing, retry, blocked),
+      status: issue_status(running, reviewing, retry, blocked),
       workspace: %{
-        path: workspace_path(issue_identifier, running, retry, blocked),
-        host: workspace_host(running, retry, blocked)
+        path: workspace_path(issue_identifier, running, reviewing, retry, blocked),
+        host: workspace_host(running, reviewing, retry, blocked)
       },
       attempts: %{
         restart_count: restart_count(retry),
         current_retry_attempt: retry_attempt(retry)
       },
       running: running && running_issue_payload(running),
+      reviewing: reviewing && reviewing_issue_payload(reviewing),
       retry: retry && retry_issue_payload(retry),
       blocked: blocked && blocked_issue_payload(blocked),
       logs: %{
@@ -88,16 +92,21 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp issue_id_from_entries(running, retry, blocked),
-    do: (running && running.issue_id) || (retry && retry.issue_id) || (blocked && blocked.issue_id)
+  defp issue_id_from_entries(running, reviewing, retry, blocked),
+    do:
+      (running && running.issue_id) ||
+        (reviewing && reviewing.issue_id) ||
+        (retry && retry.issue_id) ||
+        (blocked && blocked.issue_id)
 
   defp restart_count(retry), do: max(retry_attempt(retry) - 1, 0)
   defp retry_attempt(nil), do: 0
   defp retry_attempt(retry), do: retry.attempt || 0
 
-  defp issue_status(running, _retry, _blocked) when not is_nil(running), do: "running"
-  defp issue_status(nil, retry, _blocked) when not is_nil(retry), do: "retrying"
-  defp issue_status(nil, nil, _blocked), do: "blocked"
+  defp issue_status(running, _reviewing, _retry, _blocked) when not is_nil(running), do: "running"
+  defp issue_status(nil, reviewing, _retry, _blocked) when not is_nil(reviewing), do: "reviewing"
+  defp issue_status(nil, nil, retry, _blocked) when not is_nil(retry), do: "retrying"
+  defp issue_status(nil, nil, nil, _blocked), do: "blocked"
 
   defp running_entry_payload(entry) do
     %{
@@ -127,6 +136,19 @@ defmodule SymphonyElixirWeb.Presenter do
       attempt: entry.attempt,
       due_at: due_at_iso8601(entry.due_in_ms),
       error: entry.error,
+      worker_host: Map.get(entry, :worker_host),
+      workspace_path: Map.get(entry, :workspace_path)
+    }
+  end
+
+  defp reviewing_entry_payload(entry) do
+    %{
+      issue_id: entry.issue_id,
+      issue_identifier: entry.identifier,
+      pr_url: Map.get(entry, :pr_url),
+      mode: entry.mode && to_string(entry.mode),
+      session_id: entry.session_id,
+      started_at: iso8601(entry.started_at),
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path)
     }
@@ -177,6 +199,17 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
+  defp reviewing_issue_payload(reviewing) do
+    %{
+      pr_url: Map.get(reviewing, :pr_url),
+      mode: reviewing.mode && to_string(reviewing.mode),
+      session_id: reviewing.session_id,
+      started_at: iso8601(reviewing.started_at),
+      worker_host: Map.get(reviewing, :worker_host),
+      workspace_path: Map.get(reviewing, :workspace_path)
+    }
+  end
+
   defp blocked_issue_payload(blocked) do
     %{
       worker_host: Map.get(blocked, :worker_host),
@@ -191,15 +224,17 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp workspace_path(issue_identifier, running, retry, blocked) do
+  defp workspace_path(issue_identifier, running, reviewing, retry, blocked) do
     (running && Map.get(running, :workspace_path)) ||
+      (reviewing && Map.get(reviewing, :workspace_path)) ||
       (retry && Map.get(retry, :workspace_path)) ||
       (blocked && Map.get(blocked, :workspace_path)) ||
       Path.join(Config.settings!().workspace.root, issue_identifier)
   end
 
-  defp workspace_host(running, retry, blocked) do
+  defp workspace_host(running, reviewing, retry, blocked) do
     (running && Map.get(running, :worker_host)) ||
+      (reviewing && Map.get(reviewing, :worker_host)) ||
       (retry && Map.get(retry, :worker_host)) ||
       (blocked && Map.get(blocked, :worker_host))
   end

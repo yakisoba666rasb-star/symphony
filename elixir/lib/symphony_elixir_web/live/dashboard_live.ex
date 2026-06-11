@@ -86,6 +86,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
+            <p class="metric-label">Reviewing</p>
+            <p class="metric-value numeric"><%= @payload.counts.reviewing %></p>
+            <p class="metric-detail">PR handoffs waiting on the async review loop.</p>
+          </article>
+
+          <article class="metric-card">
             <p class="metric-label">Retrying</p>
             <p class="metric-value numeric"><%= @payload.counts.retrying %></p>
             <p class="metric-detail">Issues waiting for the next retry window.</p>
@@ -110,6 +116,71 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
             <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
           </article>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Review handoffs</h2>
+              <p class="section-copy">Ready PRs currently passing through the async self-review gate.</p>
+            </div>
+          </div>
+
+          <%= if @payload.reviewing == [] do %>
+            <p class="empty-state">No review handoffs pending.</p>
+          <% else %>
+            <div class="table-wrap">
+              <table class="data-table" style="min-width: 760px;">
+                <thead>
+                  <tr>
+                    <th>Issue</th>
+                    <th>Mode</th>
+                    <th>Session</th>
+                    <th>Elapsed</th>
+                    <th>PR</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr :for={entry <- @payload.reviewing}>
+                    <td>
+                      <div class="issue-stack">
+                        <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                      </div>
+                    </td>
+                    <td>
+                      <span class={state_badge_class(entry.mode || "reviewing")}>
+                        <%= entry.mode || "reviewing" %>
+                      </span>
+                    </td>
+                    <td>
+                      <%= if entry.session_id do %>
+                        <button
+                          type="button"
+                          class="subtle-button"
+                          data-label="Copy ID"
+                          data-copy={entry.session_id}
+                          onclick="navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
+                        >
+                          Copy ID
+                        </button>
+                      <% else %>
+                        <span class="muted">n/a</span>
+                      <% end %>
+                    </td>
+                    <td class="numeric"><%= format_runtime_seconds(runtime_seconds_from_started_at(entry.started_at, @now)) %></td>
+                    <td>
+                      <%= if entry.pr_url && entry.pr_url != "unknown" do %>
+                        <a class="issue-link" href={entry.pr_url}>Open PR</a>
+                      <% else %>
+                        <span class="muted">n/a</span>
+                      <% end %>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          <% end %>
         </section>
 
         <section class="section-card">
@@ -348,6 +419,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp total_runtime_seconds(payload, now) do
     completed_runtime_seconds(payload) +
       Enum.reduce(payload.running, 0, fn entry, total ->
+        total + runtime_seconds_from_started_at(entry.started_at, now)
+      end) +
+      Enum.reduce(payload.reviewing, 0, fn entry, total ->
         total + runtime_seconds_from_started_at(entry.started_at, now)
       end)
   end
