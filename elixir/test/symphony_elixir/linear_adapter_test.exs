@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.LinearAdapterTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias SymphonyElixir.Linear.Adapter
 
@@ -27,45 +27,61 @@ defmodule SymphonyElixir.LinearAdapterTest do
     end
   end
 
-  defmodule FakeLinearProjectFallbackClient do
+  defmodule FakeLinearProjectClient do
     def graphql(query, %{teamKey: "LAB", first: 250}) do
-      if String.contains?(query, "links(") do
-        {:error, {:linear_graphql_errors, [%{"message" => "unknown field links"}]}}
-      else
-        {:ok,
-         %{
-           "data" => %{
-             "teams" => %{
-               "nodes" => [
-                 %{
-                   "projects" => %{
-                     "nodes" => [
-                       %{
-                         "id" => "project-1",
-                         "name" => "Symphony",
-                         "slugId" => "symphony",
-                         "description" => "https://github.com/yakisoba666rasb-star/symphony"
+      send_recipient({:team_projects_query, String.contains?(query, "externalLinks("), String.contains?(query, "links(")})
+
+      {:ok,
+       %{
+         "data" => %{
+           "teams" => %{
+             "nodes" => [
+               %{
+                 "projects" => %{
+                   "nodes" => [
+                     %{
+                       "id" => "project-1",
+                       "name" => "Symphony",
+                       "slugId" => "symphony",
+                       "description" => "https://github.com/yakisoba666rasb-star/symphony",
+                       "externalLinks" => %{
+                         "nodes" => [%{"url" => "https://github.com/yakisoba666rasb-star/worker-app"}]
                        }
-                     ]
-                   }
+                     }
+                   ]
                  }
-               ]
-             }
+               }
+             ]
            }
-         }}
+         }
+       }}
+    end
+
+    defp send_recipient(message) do
+      case Application.get_env(:symphony_elixir, :linear_adapter_test_recipient) do
+        recipient when is_pid(recipient) -> send(recipient, message)
+        _ -> :ok
       end
     end
   end
 
   setup do
     previous = Application.get_env(:symphony_elixir, :linear_client_module)
+    previous_recipient = Application.get_env(:symphony_elixir, :linear_adapter_test_recipient)
     Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearEvidenceClient)
+    Application.put_env(:symphony_elixir, :linear_adapter_test_recipient, self())
 
     on_exit(fn ->
       if is_nil(previous) do
         Application.delete_env(:symphony_elixir, :linear_client_module)
       else
         Application.put_env(:symphony_elixir, :linear_client_module, previous)
+      end
+
+      if is_nil(previous_recipient) do
+        Application.delete_env(:symphony_elixir, :linear_adapter_test_recipient)
+      else
+        Application.put_env(:symphony_elixir, :linear_adapter_test_recipient, previous_recipient)
       end
     end)
   end
@@ -88,10 +104,14 @@ defmodule SymphonyElixir.LinearAdapterTest do
     assert {:error, :linear_down} = Adapter.fetch_zero_touch_evidence("error")
   end
 
-  test "fetches team projects and falls back when project links are not available" do
-    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearProjectFallbackClient)
+  test "fetches team projects with current external link connection" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearProjectClient)
 
-    assert {:ok, [%{"name" => "Symphony", "description" => description}]} = Adapter.fetch_team_projects("LAB")
+    assert {:ok, [%{"name" => "Symphony", "description" => description, "externalLinks" => external_links}]} =
+             Adapter.fetch_team_projects("LAB")
+
     assert description == "https://github.com/yakisoba666rasb-star/symphony"
+    assert get_in(external_links, ["nodes", Access.at(0), "url"]) == "https://github.com/yakisoba666rasb-star/worker-app"
+    assert_receive {:team_projects_query, true, false}
   end
 end

@@ -9,22 +9,28 @@ defmodule SymphonyElixir.RepositoryRoutesTest do
 
   defmodule FakeLinearProjectClient do
     def graphql(query, %{teamKey: "LAB", first: 250}) do
-      send_recipient({:team_projects_query, String.contains?(query, "links(")})
+      send_recipient({:team_projects_query, String.contains?(query, "externalLinks("), String.contains?(query, "links(")})
 
-      {:ok,
-       %{
-         "data" => %{
-           "teams" => %{
-             "nodes" => [
-               %{
-                 "projects" => %{
-                   "nodes" => Application.get_env(:symphony_elixir, :repository_routes_projects, [])
-                 }
+      case Application.get_env(:symphony_elixir, :repository_routes_error) do
+        nil ->
+          {:ok,
+           %{
+             "data" => %{
+               "teams" => %{
+                 "nodes" => [
+                   %{
+                     "projects" => %{
+                       "nodes" => Application.get_env(:symphony_elixir, :repository_routes_projects, [])
+                     }
+                   }
+                 ]
                }
-             ]
-           }
-         }
-       }}
+             }
+           }}
+
+        reason ->
+          {:error, reason}
+      end
     end
 
     defp send_recipient(message) do
@@ -38,10 +44,12 @@ defmodule SymphonyElixir.RepositoryRoutesTest do
   setup do
     previous_client = Application.get_env(:symphony_elixir, :linear_client_module, :__missing__)
     previous_projects = Application.get_env(:symphony_elixir, :repository_routes_projects, :__missing__)
+    previous_error = Application.get_env(:symphony_elixir, :repository_routes_error, :__missing__)
     previous_recipient = Application.get_env(:symphony_elixir, :repository_routes_test_recipient, :__missing__)
 
     Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearProjectClient)
     Application.put_env(:symphony_elixir, :repository_routes_projects, [])
+    Application.delete_env(:symphony_elixir, :repository_routes_error)
     Application.put_env(:symphony_elixir, :repository_routes_test_recipient, self())
     RepositoryRoutes.clear_cache()
 
@@ -49,6 +57,7 @@ defmodule SymphonyElixir.RepositoryRoutesTest do
       RepositoryRoutes.clear_cache()
       restore_env(:linear_client_module, previous_client)
       restore_env(:repository_routes_projects, previous_projects)
+      restore_env(:repository_routes_error, previous_error)
       restore_env(:repository_routes_test_recipient, previous_recipient)
     end)
 
@@ -66,7 +75,7 @@ defmodule SymphonyElixir.RepositoryRoutesTest do
       })
 
     assert RepositoryRoutes.effective_project_routes(settings) == %{"octo/repo" => ["Octo"]}
-    refute_receive {:team_projects_query, _links?}
+    refute_receive {:team_projects_query, _external_links?, _legacy_links?}
   end
 
   test "discovers allowlisted project repository URL from description" do
@@ -88,7 +97,7 @@ defmodule SymphonyElixir.RepositoryRoutesTest do
         "id" => "project-1",
         "name" => "Worker App",
         "slugId" => "worker-app",
-        "links" => %{"nodes" => [%{"url" => "https://github.com/yakisoba666rasb-star/worker-app"}]}
+        "externalLinks" => %{"nodes" => [%{"url" => "https://github.com/yakisoba666rasb-star/worker-app"}]}
       }
     ])
 
@@ -140,7 +149,56 @@ defmodule SymphonyElixir.RepositoryRoutesTest do
         assert RepositoryRoutes.effective_project_routes(settings) == %{}
       end)
 
-    assert log =~ "ambiguous Linear project repository route"
+    assert log =~ "duplicate_repository_route"
+  end
+
+  test "does not repeat unchanged rejection warnings after refresh" do
+    Application.put_env(:symphony_elixir, :repository_routes_projects, [
+      project("External", "https://github.com/not-allowed/service")
+    ])
+
+    settings =
+      settings(%{
+        "github_intake" => %{"interval_ms" => 1}
+      })
+
+    first_log =
+      capture_log(fn ->
+        assert RepositoryRoutes.effective_project_routes(settings) == %{}
+      end)
+
+    Process.sleep(2)
+
+    second_log =
+      capture_log(fn ->
+        assert RepositoryRoutes.effective_project_routes(settings) == %{}
+      end)
+
+    assert first_log =~ "owner_not_allowed"
+    refute second_log =~ "owner_not_allowed"
+  end
+
+  test "missing repository URLs are debug-only and unchanged sets do not repeat" do
+    Application.put_env(:symphony_elixir, :repository_routes_projects, [
+      project("Unregistered", nil)
+    ])
+
+    settings =
+      settings(%{
+        "github_intake" => %{"interval_ms" => 1}
+      })
+
+    log =
+      capture_log([level: :debug], fn ->
+        assert RepositoryRoutes.effective_project_routes(settings) == %{}
+        Process.sleep(2)
+        assert RepositoryRoutes.effective_project_routes(settings) == %{}
+      end)
+
+    assert log =~ "[debug]"
+    assert log =~ "no_repository_url"
+    refute log =~ "[warning]"
+    assert count_occurrences(log, "no_repository_url") == 1
   end
 
   test "static project routes win over dynamic discovery" do
@@ -169,8 +227,30 @@ defmodule SymphonyElixir.RepositoryRoutesTest do
     assert RepositoryRoutes.effective_project_routes(settings)["yakisoba666rasb-star/symphony"] == ["Symphony"]
     assert RepositoryRoutes.effective_project_routes(settings)["yakisoba666rasb-star/symphony"] == ["Symphony"]
 
-    assert_receive {:team_projects_query, true}
-    refute_receive {:team_projects_query, _links?}
+    assert_receive {:team_projects_query, true, false}
+    refute_receive {:team_projects_query, _external_links?, _legacy_links?}
+  end
+
+  test "negative-caches failed dynamic discovery and serves static routes" do
+    Application.put_env(:symphony_elixir, :repository_routes_error, :linear_down)
+
+    settings =
+      settings(%{
+        "repository" => %{
+          "allowed_owners" => ["yakisoba666rasb-star"],
+          "project_routes" => %{"yakisoba666rasb-star/symphony" => ["Static Symphony"]}
+        }
+      })
+
+    log =
+      capture_log(fn ->
+        assert RepositoryRoutes.effective_project_routes(settings) == %{"yakisoba666rasb-star/symphony" => ["Static Symphony"]}
+        assert RepositoryRoutes.effective_project_routes(settings) == %{"yakisoba666rasb-star/symphony" => ["Static Symphony"]}
+      end)
+
+    assert log =~ "Failed to discover Linear project repository routes"
+    assert_receive {:team_projects_query, true, false}
+    refute_receive {:team_projects_query, _external_links?, _legacy_links?}
   end
 
   defp settings(overrides \\ %{}) do
@@ -198,4 +278,11 @@ defmodule SymphonyElixir.RepositoryRoutesTest do
 
   defp restore_env(key, :__missing__), do: Application.delete_env(:symphony_elixir, key)
   defp restore_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
+
+  defp count_occurrences(text, pattern) do
+    text
+    |> String.split(pattern)
+    |> length()
+    |> Kernel.-(1)
+  end
 end

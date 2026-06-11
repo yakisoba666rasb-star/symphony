@@ -33,11 +33,17 @@ project assignment paths:
 5. `repository.default` only when no stronger evidence exists.
 
 Dynamic discovery is disabled by default. Set `repository.allowed_owners` to
-trusted GitHub owners, then add a GitHub repository URL to a Linear Project
-description or project link. Static `repository.project_routes` entries win over
-dynamic routes for the same repository. A project with multiple repository URLs,
-a repository claimed by multiple projects, or a repository outside the allowlist
-is ignored and logged.
+trusted GitHub owners, then add exactly one GitHub repository URL to a Linear
+Project description or external link. Static `repository.project_routes` entries
+win over dynamic routes for the same repository. A project with multiple
+repository URLs, a repository claimed by multiple projects, or a repository
+outside the allowlist is ignored and logged only when the rejection set changes.
+
+Keep PR, issue, and cross-repository reference links out of the Project
+description when dynamic discovery is enabled. A description that contains the
+canonical repository URL plus GitHub URLs for other repositories is ambiguous
+and is rejected as `multiple_repository_urls`; put those references in project
+updates or documents instead.
 
 Static project-route keys must use canonical GitHub slug form:
 
