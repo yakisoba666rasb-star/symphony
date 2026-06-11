@@ -51,6 +51,7 @@ defmodule SymphonyElixir.Orchestrator do
       blocked: %{},
       retry_attempts: %{},
       pending_review_handoffs: %{},
+      github_intake_attempts: %{},
       last_github_intake_sync_ms: nil,
       codex_totals: nil,
       codex_rate_limits: nil
@@ -1072,19 +1073,33 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       true ->
-        run_github_issue_intake_sync(settings)
-        %{state | last_github_intake_sync_ms: System.monotonic_time(:millisecond)}
+        github_intake_attempts = run_github_issue_intake_sync(settings, state.github_intake_attempts)
+
+        %{
+          state
+          | github_intake_attempts: github_intake_attempts,
+            last_github_intake_sync_ms: System.monotonic_time(:millisecond)
+        }
     end
   end
 
-  defp run_github_issue_intake_sync(settings) do
+  defp run_github_issue_intake_sync(settings, attempts) do
     module = github_issue_module()
     adapter = tracker_module()
 
-    if module_exports?(module, :sync_open_issues_to_linear, 2) do
-      log_github_issue_intake_result(module.sync_open_issues_to_linear(settings, adapter))
+    if module_exports?(module, :sync_open_issues_to_linear, 3) do
+      case module.sync_open_issues_to_linear(settings, adapter, attempts) do
+        {:ok, result, attempts} ->
+          log_github_issue_intake_result({:ok, result})
+          attempts
+
+        result ->
+          log_github_issue_intake_result(result)
+          attempts
+      end
     else
-      Logger.debug("Skipping GitHub issue intake sync; #{inspect(module)} does not export sync_open_issues_to_linear/2")
+      Logger.debug("Skipping GitHub issue intake sync; #{inspect(module)} does not export sync_open_issues_to_linear/3")
+      attempts
     end
   end
 

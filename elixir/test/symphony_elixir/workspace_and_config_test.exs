@@ -143,7 +143,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:ok, settings} =
              Schema.parse(%{
                "tracker" => %{"kind" => "linear", "team_key" => "LAB", "api_key" => "token", "all_projects" => true},
-               "github_intake" => %{"enabled" => true, "state" => "Backlog", "interval_ms" => 120_000, "limit" => 25},
+               "github_intake" => %{
+                 "enabled" => true,
+                 "state" => "Backlog",
+                 "interval_ms" => 120_000,
+                 "retry_ttl_ms" => 240_000,
+                 "limit" => 25
+               },
                "repository" => %{
                  "default" => "yakisoba666rasb-star/symphony",
                  "project_routes" => %{"yakisoba666rasb-star/symphony" => ["Symphony"]}
@@ -153,18 +159,29 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert settings.github_intake.enabled == true
     assert settings.github_intake.state == "Backlog"
     assert settings.github_intake.interval_ms == 120_000
+    assert settings.github_intake.retry_ttl_ms == 240_000
     assert settings.github_intake.limit == 25
+
+    assert {:ok, settings} = Schema.parse(%{"github_intake" => %{"enabled" => true, "interval_ms" => 300_000}})
+    assert settings.github_intake.retry_ttl_ms == 3_600_000
   end
 
   test "workflow config rejects invalid GitHub issue intake settings" do
     assert {:error, {:invalid_workflow_config, message}} =
              Schema.parse(%{
-               "github_intake" => %{"enabled" => true, "state" => "", "interval_ms" => 0, "limit" => 501}
+               "github_intake" => %{
+                 "enabled" => true,
+                 "state" => "",
+                 "interval_ms" => 0,
+                 "retry_ttl_ms" => -1,
+                 "limit" => 501
+               }
              })
 
     assert message =~ "github_intake"
     assert message =~ "state"
     assert message =~ "interval_ms"
+    assert message =~ "retry_ttl_ms"
     assert message =~ "limit"
 
     assert {:error, {:invalid_workflow_config, message}} =
@@ -172,6 +189,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert message =~ "github_intake"
     assert message =~ "state"
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{"github_intake" => %{"interval_ms" => 120_000, "retry_ttl_ms" => 60_000}})
+
+    assert message =~ "github_intake.retry_ttl_ms must be greater than or equal to interval_ms"
   end
 
   test "repository resolver rejects conflicting explicit repo and GitHub source URL" do

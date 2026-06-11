@@ -113,6 +113,7 @@ defmodule SymphonyElixir.TestSupport do
           github_intake_enabled: false,
           github_intake_state: "Backlog",
           github_intake_interval_ms: 300_000,
+          github_intake_retry_ttl_ms: 3_600_000,
           github_intake_limit: 100,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           dirty_workspace_retention_days: 7,
@@ -175,6 +176,7 @@ defmodule SymphonyElixir.TestSupport do
     github_intake_enabled = Keyword.get(config, :github_intake_enabled)
     github_intake_state = Keyword.get(config, :github_intake_state)
     github_intake_interval_ms = Keyword.get(config, :github_intake_interval_ms)
+    github_intake_retry_ttl_ms = Keyword.get(config, :github_intake_retry_ttl_ms)
     github_intake_limit = Keyword.get(config, :github_intake_limit)
     tracker_review_state = Keyword.get(config, :tracker_review_state)
     workspace_root = Keyword.get(config, :workspace_root)
@@ -238,7 +240,13 @@ defmodule SymphonyElixir.TestSupport do
         "  review_state: #{yaml_value(tracker_review_state)}",
         "polling:",
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
-        github_intake_yaml(github_intake_enabled, github_intake_state, github_intake_interval_ms, github_intake_limit),
+        github_intake_yaml(
+          github_intake_enabled,
+          github_intake_state,
+          github_intake_interval_ms,
+          github_intake_retry_ttl_ms,
+          github_intake_limit
+        ),
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
         "  dirty_workspace_retention_days: #{yaml_value(dirty_workspace_retention_days)}",
@@ -301,14 +309,15 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
-  defp github_intake_yaml(false, "Backlog", 300_000, 100), do: nil
+  defp github_intake_yaml(false, "Backlog", 300_000, 3_600_000, 100), do: nil
 
-  defp github_intake_yaml(enabled, state, interval_ms, limit) do
+  defp github_intake_yaml(enabled, state, interval_ms, retry_ttl_ms, limit) do
     [
       "github_intake:",
       "  enabled: #{yaml_value(enabled)}",
       "  state: #{yaml_value(state)}",
       "  interval_ms: #{yaml_value(interval_ms)}",
+      "  retry_ttl_ms: #{yaml_value(retry_ttl_ms)}",
       "  limit: #{yaml_value(limit)}"
     ]
     |> Enum.join("\n")

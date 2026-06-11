@@ -14,22 +14,43 @@ defmodule SymphonyElixir.GitHubIssue do
         }
 
   @type sync_result :: %{created: non_neg_integer(), skipped: non_neg_integer(), errors: non_neg_integer()}
+  @type intake_attempt :: %{reason: term(), attempts: pos_integer(), last_attempt_ms: integer()}
+  @type intake_attempts :: %{optional(String.t()) => intake_attempt()}
 
   @spec sync_open_issues_to_linear(Config.Schema.t(), module()) :: {:ok, sync_result()} | {:error, term()}
-  def sync_open_issues_to_linear(settings, linear_adapter),
-    do: sync_open_issues_to_linear(settings, linear_adapter, runtime_deps())
+  def sync_open_issues_to_linear(settings, linear_adapter) do
+    case sync_open_issues_to_linear(settings, linear_adapter, %{}, runtime_deps()) do
+      {:ok, result, _attempts} -> {:ok, result}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   @spec sync_open_issues_to_linear(Config.Schema.t(), module(), deps()) :: {:ok, sync_result()} | {:error, term()}
-  def sync_open_issues_to_linear(settings, linear_adapter, deps) when is_atom(linear_adapter) and is_map(deps) do
+  def sync_open_issues_to_linear(settings, linear_adapter, %{run_command: _} = deps) do
+    case sync_open_issues_to_linear(settings, linear_adapter, %{}, deps) do
+      {:ok, result, _attempts} -> {:ok, result}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec sync_open_issues_to_linear(Config.Schema.t(), module(), intake_attempts()) ::
+          {:ok, sync_result(), intake_attempts()} | {:error, term()}
+  def sync_open_issues_to_linear(settings, linear_adapter, attempts) when is_map(attempts),
+    do: sync_open_issues_to_linear(settings, linear_adapter, attempts, runtime_deps())
+
+  @spec sync_open_issues_to_linear(Config.Schema.t(), module(), intake_attempts(), deps()) ::
+          {:ok, sync_result(), intake_attempts()} | {:error, term()}
+  def sync_open_issues_to_linear(settings, linear_adapter, attempts, deps)
+      when is_atom(linear_adapter) and is_map(attempts) and is_map(deps) do
     cond do
       not github_intake_enabled?(settings) ->
-        {:ok, %{created: 0, skipped: 0, errors: 0}}
+        {:ok, %{created: 0, skipped: 0, errors: 0}, attempts}
 
       not linear_adapter_supports_intake?(linear_adapter) ->
         {:error, {:linear_adapter_missing_github_intake, linear_adapter}}
 
       true ->
-        do_sync_open_issues_to_linear(settings, linear_adapter, deps)
+        do_sync_open_issues_to_linear(settings, linear_adapter, attempts, deps)
     end
   end
 
@@ -58,67 +79,93 @@ defmodule SymphonyElixir.GitHubIssue do
 
   def close_if_open(_repo, _issue_url, _comment, _deps), do: {:ok, :not_applicable}
 
-  defp do_sync_open_issues_to_linear(settings, linear_adapter, deps) do
+  defp do_sync_open_issues_to_linear(settings, linear_adapter, attempts, deps) do
     with {:ok, gh_bin} <- find_gh_binary(deps) do
       settings
       |> configured_repository_slugs()
-      |> Enum.reduce({:ok, empty_sync_result()}, &sync_repo_open_issues_result(&1, &2, settings, linear_adapter, gh_bin, deps))
+      |> Enum.reduce(
+        {:ok, empty_sync_result(), attempts},
+        &sync_repo_open_issues_result(&1, &2, settings, linear_adapter, gh_bin, deps)
+      )
     end
   end
 
-  defp sync_repo_open_issues_result(repo, {:ok, acc}, settings, linear_adapter, gh_bin, deps) do
-    case sync_repo_open_issues(repo, settings, linear_adapter, gh_bin, deps) do
-      {:ok, repo_result} ->
-        {:ok, merge_sync_results(acc, repo_result)}
+  defp sync_repo_open_issues_result(repo, {:ok, acc, attempts}, settings, linear_adapter, gh_bin, deps) do
+    case sync_repo_open_issues(repo, settings, linear_adapter, attempts, gh_bin, deps) do
+      {:ok, repo_result, attempts} ->
+        {:ok, merge_sync_results(acc, repo_result), attempts}
 
       {:error, reason} ->
         Logger.warning("Skipping GitHub issue intake for repo=#{repo}; failed to sync: #{inspect(reason)}")
-        {:ok, increment_sync_errors(acc)}
+        {:ok, increment_sync_errors(acc), attempts}
     end
   end
 
-  defp sync_repo_open_issues(repo, settings, linear_adapter, gh_bin, deps) do
+  defp sync_repo_open_issues(repo, settings, linear_adapter, attempts, gh_bin, deps) do
     with {:ok, issues} <- list_open_issues(gh_bin, repo, settings.github_intake.limit, deps),
          :ok <- warn_when_issue_limit_reached(repo, issues, settings.github_intake.limit) do
-      sync_listed_repo_issues(repo, issues, settings, linear_adapter)
+      attempts = prune_disappeared_attempts(attempts, repo, issues)
+      sync_listed_repo_issues(repo, issues, settings, linear_adapter, attempts, deps)
     end
   end
 
-  defp sync_listed_repo_issues(_repo, [], _settings, _linear_adapter), do: {:ok, empty_sync_result()}
+  defp sync_listed_repo_issues(_repo, [], _settings, _linear_adapter, attempts, _deps),
+    do: {:ok, empty_sync_result(), attempts}
 
-  defp sync_listed_repo_issues(repo, issues, settings, linear_adapter) do
-    case linear_adapter.resolve_github_intake_target(
-           settings.tracker.team_key,
-           settings.github_intake.state,
-           project_aliases(settings, repo)
-         ) do
-      {:ok, target} ->
-        Enum.reduce(issues, {:ok, empty_sync_result()}, &sync_single_open_issue_result(&1, &2, repo, target, linear_adapter))
+  defp sync_listed_repo_issues(repo, issues, settings, linear_adapter, attempts, deps) do
+    now_ms = current_time_ms(deps)
 
-      {:error, :no_project_match} ->
-        Logger.debug("Skipping GitHub issue intake; no matching Linear project for repo=#{repo}")
-        {:ok, %{empty_sync_result() | skipped: length(issues)}}
+    {retryable_issues, cached_skips} =
+      split_retryable_issues(issues, attempts, settings.github_intake.retry_ttl_ms, now_ms)
 
-      {:error, {:ambiguous_project_match, projects}} ->
-        Logger.warning(
-          "Skipping GitHub issue intake; multiple matching Linear projects for repo=#{repo} " <>
-            "projects=#{inspect(projects)}"
-        )
+    if retryable_issues == [] do
+      {:ok, %{empty_sync_result() | skipped: cached_skips}, attempts}
+    else
+      case linear_adapter.resolve_github_intake_target(
+             settings.tracker.team_key,
+             settings.github_intake.state,
+             project_aliases(settings, repo)
+           ) do
+        {:ok, target} ->
+          retryable_issues
+          |> Enum.reduce(
+            {:ok, %{empty_sync_result() | skipped: cached_skips}, attempts},
+            &sync_single_open_issue_result(&1, &2, repo, target, linear_adapter, now_ms)
+          )
 
-        {:ok, %{empty_sync_result() | skipped: length(issues)}}
+        {:error, :no_project_match} ->
+          Logger.debug("Skipping GitHub issue intake; no matching Linear project for repo=#{repo}")
 
-      {:error, reason} ->
-        {:error, reason}
+          result = %{empty_sync_result() | skipped: cached_skips + length(retryable_issues)}
+          updated_attempts = record_failed_attempts(attempts, retryable_issues, :no_project_match, now_ms)
+          {:ok, result, updated_attempts}
+
+        {:error, {:ambiguous_project_match, projects}} ->
+          Logger.warning(
+            "Skipping GitHub issue intake; multiple matching Linear projects for repo=#{repo} " <>
+              "projects=#{inspect(projects)}"
+          )
+
+          result = %{empty_sync_result() | skipped: cached_skips + length(retryable_issues)}
+          reason = {:ambiguous_project_match, projects}
+          updated_attempts = record_failed_attempts(attempts, retryable_issues, reason, now_ms)
+          {:ok, result, updated_attempts}
+
+        {:error, reason} ->
+          result = %{empty_sync_result() | skipped: cached_skips, errors: length(retryable_issues)}
+          updated_attempts = record_failed_attempts(attempts, retryable_issues, reason, now_ms)
+          {:ok, result, updated_attempts}
+      end
     end
   end
 
-  defp sync_single_open_issue_result(issue, {:ok, acc}, repo, target, linear_adapter) do
+  defp sync_single_open_issue_result(issue, {:ok, acc, attempts}, repo, target, linear_adapter, now_ms) do
     case sync_single_open_issue(repo, issue, target, linear_adapter) do
       {:ok, :created} ->
-        {:ok, %{acc | created: acc.created + 1}}
+        {:ok, %{acc | created: acc.created + 1}, clear_attempt(attempts, issue)}
 
       {:ok, :skipped} ->
-        {:ok, %{acc | skipped: acc.skipped + 1}}
+        {:ok, %{acc | skipped: acc.skipped + 1}, clear_attempt(attempts, issue)}
 
       {:error, reason} ->
         Logger.warning(
@@ -126,9 +173,54 @@ defmodule SymphonyElixir.GitHubIssue do
             "failed to create Linear issue: #{inspect(reason)}"
         )
 
-        {:ok, increment_sync_errors(acc)}
+        {:ok, increment_sync_errors(acc), record_failed_attempt(attempts, issue, reason, now_ms)}
     end
   end
+
+  defp prune_disappeared_attempts(attempts, repo, issues) do
+    listed_urls = issues |> Enum.map(&Map.get(&1, :url)) |> MapSet.new()
+
+    Map.reject(attempts, fn {url, _attempt} ->
+      issue_url_repo(url) == repo and not MapSet.member?(listed_urls, url)
+    end)
+  end
+
+  defp split_retryable_issues(issues, attempts, retry_ttl_ms, now_ms) do
+    Enum.reduce(issues, {[], 0}, fn %{url: url} = issue, {retryable, skipped} ->
+      case Map.get(attempts, url) do
+        %{last_attempt_ms: last_attempt_ms}
+        when is_integer(last_attempt_ms) and now_ms - last_attempt_ms < retry_ttl_ms ->
+          {retryable, skipped + 1}
+
+        _attempt ->
+          {[issue | retryable], skipped}
+      end
+    end)
+    |> then(fn {retryable, skipped} -> {Enum.reverse(retryable), skipped} end)
+  end
+
+  defp record_failed_attempts(attempts, issues, reason, now_ms) do
+    Enum.reduce(issues, attempts, &record_failed_attempt(&2, &1, reason, now_ms))
+  end
+
+  defp record_failed_attempt(attempts, %{url: url}, reason, now_ms) when is_binary(url) do
+    prior_attempts =
+      attempts
+      |> Map.get(url, %{})
+      |> Map.get(:attempts, 0)
+
+    Map.put(attempts, url, %{reason: reason, attempts: prior_attempts + 1, last_attempt_ms: now_ms})
+  end
+
+  defp record_failed_attempt(attempts, _issue, _reason, _now_ms), do: attempts
+
+  defp clear_attempt(attempts, %{url: url}) when is_binary(url), do: Map.delete(attempts, url)
+  defp clear_attempt(attempts, _issue), do: attempts
+
+  defp current_time_ms(%{monotonic_time_ms: monotonic_time_ms}) when is_function(monotonic_time_ms, 0),
+    do: monotonic_time_ms.()
+
+  defp current_time_ms(_deps), do: System.monotonic_time(:millisecond)
 
   defp sync_single_open_issue(repo, %{url: url} = issue, target, linear_adapter) when is_binary(url) do
     with {:ok, false} <- linear_adapter.github_issue_synced?(url),
@@ -388,6 +480,15 @@ defmodule SymphonyElixir.GitHubIssue do
       _other -> :not_applicable
     end
   end
+
+  defp issue_url_repo(issue_url) when is_binary(issue_url) do
+    case Regex.run(~r{^https://github\.com/([^/]+/[^/]+)/issues/\d+(?:[/?#].*)?$}i, String.trim(issue_url)) do
+      [_, repo] -> repo
+      _other -> nil
+    end
+  end
+
+  defp issue_url_repo(_issue_url), do: nil
 
   defp view_issue_state(gh_bin, repo, number, deps) do
     args = ["issue", "view", Integer.to_string(number), "--repo", repo, "--json", "state"]
