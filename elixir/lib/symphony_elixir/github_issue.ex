@@ -79,6 +79,22 @@ defmodule SymphonyElixir.GitHubIssue do
 
   def close_if_open(_repo, _issue_url, _comment, _deps), do: {:ok, :not_applicable}
 
+  @spec closed_at(String.t(), String.t() | nil) :: {:ok, String.t() | nil} | {:error, term()}
+  def closed_at(repo, issue_url), do: closed_at(repo, issue_url, runtime_deps())
+
+  @spec closed_at(String.t(), String.t() | nil, deps()) :: {:ok, String.t() | nil} | {:error, term()}
+  def closed_at(repo, issue_url, deps) when is_binary(repo) and is_binary(issue_url) do
+    with {:ok, number} <- issue_number_for_repo(repo, issue_url),
+         {:ok, gh_bin} <- find_gh_binary(deps) do
+      view_issue_closed_at(gh_bin, repo, number, deps)
+    else
+      :not_applicable -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def closed_at(_repo, _issue_url, _deps), do: {:ok, nil}
+
   defp do_sync_open_issues_to_linear(settings, linear_adapter, attempts, deps) do
     with {:ok, gh_bin} <- find_gh_binary(deps) do
       settings
@@ -555,6 +571,25 @@ defmodule SymphonyElixir.GitHubIssue do
       {:ok, {output, 0}} -> parse_issue_state(output)
       {:ok, {output, status}} -> {:error, {:gh_issue_view_failed, status, output}}
       {:error, reason} -> {:error, {:gh_issue_view_failed, reason}}
+    end
+  end
+
+  defp view_issue_closed_at(gh_bin, repo, number, deps) do
+    args = ["issue", "view", Integer.to_string(number), "--repo", repo, "--json", "state,closedAt"]
+
+    case normalize_command_result(deps.run_command.(gh_bin, args, stderr_to_stdout: true)) do
+      {:ok, {output, 0}} -> parse_issue_closed_at(output)
+      {:ok, {output, status}} -> {:error, {:gh_issue_view_failed, status, output}}
+      {:error, reason} -> {:error, {:gh_issue_view_failed, reason}}
+    end
+  end
+
+  defp parse_issue_closed_at(output) do
+    case Jason.decode(output) do
+      {:ok, %{"closedAt" => closed_at}} when is_binary(closed_at) -> {:ok, closed_at}
+      {:ok, %{"state" => state}} when is_binary(state) -> {:ok, nil}
+      {:ok, other} -> {:error, {:invalid_issue_payload, other}}
+      {:error, reason} -> {:error, {:gh_json_error, reason}}
     end
   end
 

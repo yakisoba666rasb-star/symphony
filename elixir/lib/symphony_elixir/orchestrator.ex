@@ -16,7 +16,8 @@ defmodule SymphonyElixir.Orchestrator do
     ReviewRunner,
     StatusDashboard,
     Tracker,
-    Workspace
+    Workspace,
+    ZeroTouchEvidence
   }
 
   alias SymphonyElixir.Linear.Issue
@@ -541,6 +542,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp github_issue_module do
     Application.get_env(:symphony_elixir, :github_issue, GitHubIssue)
+  end
+
+  defp zero_touch_evidence_module do
+    Application.get_env(:symphony_elixir, :zero_touch_evidence, ZeroTouchEvidence)
   end
 
   defp module_exports?(module, function_name, arity)
@@ -1313,6 +1318,7 @@ defmodule SymphonyElixir.Orchestrator do
         )
 
         close_source_github_issue_after_done(issue, repo, pr)
+        post_zero_touch_evidence_after_done(issue, repo, pr)
 
         state
         |> terminate_running_issue(issue.id, true)
@@ -1653,6 +1659,23 @@ defmodule SymphonyElixir.Orchestrator do
         "Skipping source GitHub issue close for #{issue_context(issue)}; " <>
           "#{inspect(module)} does not export close_if_open/3"
       )
+    end
+  end
+
+  defp post_zero_touch_evidence_after_done(%Issue{} = issue, repo, pr) do
+    module = zero_touch_evidence_module()
+
+    if module_exports?(module, :maybe_post_after_done, 5) do
+      case module.maybe_post_after_done(issue, repo, pr, tracker_module(), github_issue_module()) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Zero-touch loop evidence comment skipped for #{issue_context(issue)}: #{inspect(reason)}")
+
+        other ->
+          Logger.warning("Zero-touch loop evidence comment returned unexpected result for #{issue_context(issue)}: #{inspect(other)}")
+      end
     end
   end
 

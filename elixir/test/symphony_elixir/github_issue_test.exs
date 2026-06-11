@@ -941,6 +941,73 @@ defmodule SymphonyElixir.GitHubIssueTest do
              )
   end
 
+  test "reads source GitHub issue closed timestamp" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", ["issue", "view", "67", "--repo", "octo/repo", "--json", "state,closedAt"], _opts ->
+        {:ok, {Jason.encode!(%{"state" => "CLOSED", "closedAt" => "2026-06-11T00:46:00Z"}), 0}}
+      end
+    }
+
+    assert {:ok, "2026-06-11T00:46:00Z"} =
+             GitHubIssue.closed_at("octo/repo", "https://github.com/octo/repo/issues/67", deps)
+  end
+
+  test "closed timestamp lookup returns nil for open or non-applicable source issues" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", ["issue", "view", "67", "--repo", "octo/repo", "--json", "state,closedAt"], _opts ->
+        {:ok, {Jason.encode!(%{"state" => "OPEN"}), 0}}
+      end
+    }
+
+    assert {:ok, nil} = GitHubIssue.closed_at("octo/repo", "https://github.com/octo/repo/issues/67", deps)
+    assert {:ok, nil} = GitHubIssue.closed_at("octo/repo", "https://github.com/other/repo/issues/67", deps)
+    assert {:ok, nil} = GitHubIssue.closed_at("octo/repo", nil, deps)
+  end
+
+  test "closed timestamp lookup returns GitHub command and payload errors" do
+    command_failure_deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", ["issue", "view", "67", "--repo", "octo/repo", "--json", "state,closedAt"], _opts ->
+        {:ok, {"not found", 1}}
+      end
+    }
+
+    runtime_failure_deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", ["issue", "view", "67", "--repo", "octo/repo", "--json", "state,closedAt"], _opts ->
+        {:error, :eacces}
+      end
+    }
+
+    invalid_payload_deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", ["issue", "view", "67", "--repo", "octo/repo", "--json", "state,closedAt"], _opts ->
+        {:ok, {Jason.encode!(%{"number" => 67}), 0}}
+      end
+    }
+
+    invalid_json_deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", ["issue", "view", "67", "--repo", "octo/repo", "--json", "state,closedAt"], _opts ->
+        {:ok, {"{", 0}}
+      end
+    }
+
+    assert {:error, {:gh_issue_view_failed, 1, "not found"}} =
+             GitHubIssue.closed_at("octo/repo", "https://github.com/octo/repo/issues/67", command_failure_deps)
+
+    assert {:error, {:gh_issue_view_failed, :eacces}} =
+             GitHubIssue.closed_at("octo/repo", "https://github.com/octo/repo/issues/67", runtime_failure_deps)
+
+    assert {:error, {:invalid_issue_payload, %{"number" => 67}}} =
+             GitHubIssue.closed_at("octo/repo", "https://github.com/octo/repo/issues/67", invalid_payload_deps)
+
+    assert {:error, {:gh_json_error, _reason}} =
+             GitHubIssue.closed_at("octo/repo", "https://github.com/octo/repo/issues/67", invalid_json_deps)
+  end
+
   defp single_issue_list_deps(now_ms \\ nil) do
     %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,

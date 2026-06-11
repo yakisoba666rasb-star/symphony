@@ -766,7 +766,7 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
 
         case args do
           ["pr", "view", "79", "--repo", "octo/repo", "--json", fields] ->
-            assert fields == "number,url,headRefName,isDraft,mergeStateStatus,state,mergedAt"
+            assert fields == "number,url,headRefName,isDraft,mergeStateStatus,state,createdAt,mergedAt"
 
             {:ok,
              {Jason.encode!(%{
@@ -776,6 +776,7 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
                 "isDraft" => false,
                 "mergeStateStatus" => "UNKNOWN",
                 "state" => "MERGED",
+                "createdAt" => "2026-06-09T01:06:42Z",
                 "mergedAt" => "2026-06-09T02:06:42Z"
               }), 0}}
         end
@@ -883,7 +884,7 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
                  "--search",
                  "lab-382-async-review-handoff",
                  "--json",
-                 "number,url,headRefName,isDraft,mergeStateStatus,state,mergedAt,title,body"
+                 "number,url,headRefName,isDraft,mergeStateStatus,state,createdAt,mergedAt,title,body"
                ]
 
         {:ok,
@@ -895,6 +896,7 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
               "isDraft" => false,
               "mergeStateStatus" => "UNKNOWN",
               "state" => "MERGED",
+              "createdAt" => "2026-06-09T14:00:00Z",
               "mergedAt" => "2026-06-09T14:19:59Z",
               "title" => "LAB-382 keep review handoff async",
               "body" => "Refs LAB-382\nLinear: https://linear.app/example/issue/LAB-382/example"

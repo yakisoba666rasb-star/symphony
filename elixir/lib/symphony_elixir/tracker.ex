@@ -11,6 +11,7 @@ defmodule SymphonyElixir.Tracker do
   @callback fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
+  @callback fetch_zero_touch_evidence(String.t()) :: {:ok, map()} | {:error, term()}
   @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
 
@@ -32,6 +33,11 @@ defmodule SymphonyElixir.Tracker do
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) do
     adapter().create_comment(issue_id, body)
+  end
+
+  @spec fetch_zero_touch_evidence(String.t()) :: {:ok, map()} | {:error, term()}
+  def fetch_zero_touch_evidence(issue_id) do
+    adapter().fetch_zero_touch_evidence(issue_id)
   end
 
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}

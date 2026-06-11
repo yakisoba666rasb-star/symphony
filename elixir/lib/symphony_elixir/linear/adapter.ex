@@ -137,6 +137,48 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @zero_touch_evidence_query """
+  query SymphonyZeroTouchEvidence($issueId: String!, $first: Int!) {
+    issue(id: $issueId) {
+      id
+      identifier
+      createdAt
+      updatedAt
+      attachments(first: $first) {
+        nodes {
+          id
+          title
+          url
+          sourceType
+          createdAt
+        }
+      }
+      history(first: $first) {
+        nodes {
+          createdAt
+          actor {
+            id
+            name
+          }
+          fromState {
+            name
+          }
+          toState {
+            name
+          }
+        }
+      }
+      comments(first: $first) {
+        nodes {
+          id
+          body
+          createdAt
+        }
+      }
+    }
+  }
+  """
+
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues, do: client_module().fetch_candidate_issues()
 
@@ -155,6 +197,23 @@ defmodule SymphonyElixir.Linear.Adapter do
       false -> {:error, :comment_create_failed}
       {:error, reason} -> {:error, reason}
       _ -> {:error, :comment_create_failed}
+    end
+  end
+
+  @spec fetch_zero_touch_evidence(String.t()) :: {:ok, map()} | {:error, term()}
+  def fetch_zero_touch_evidence(issue_id) when is_binary(issue_id) do
+    with {:ok, response} <- client_module().graphql(@zero_touch_evidence_query, %{issueId: issue_id, first: 100}),
+         %{} = issue <- get_in(response, ["data", "issue"]) do
+      {:ok,
+       %{
+         issue: issue,
+         attachments: get_in(issue, ["attachments", "nodes"]) || [],
+         history: get_in(issue, ["history", "nodes"]) || [],
+         comments: get_in(issue, ["comments", "nodes"]) || []
+       }}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :zero_touch_evidence_issue_not_found}
     end
   end
 
