@@ -146,6 +146,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                "github_intake" => %{
                  "enabled" => true,
                  "state" => "Backlog",
+                 "todo_labels" => ["symphony-auto"],
                  "interval_ms" => 120_000,
                  "retry_ttl_ms" => 240_000,
                  "limit" => 25
@@ -158,11 +159,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert settings.github_intake.enabled == true
     assert settings.github_intake.state == "Backlog"
+    assert settings.github_intake.todo_labels == ["symphony-auto"]
     assert settings.github_intake.interval_ms == 120_000
     assert settings.github_intake.retry_ttl_ms == 240_000
     assert settings.github_intake.limit == 25
 
     assert {:ok, settings} = Schema.parse(%{"github_intake" => %{"enabled" => true, "interval_ms" => 300_000}})
+    assert settings.github_intake.todo_labels == []
     assert settings.github_intake.retry_ttl_ms == 3_600_000
   end
 
@@ -194,6 +197,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              Schema.parse(%{"github_intake" => %{"interval_ms" => 120_000, "retry_ttl_ms" => 60_000}})
 
     assert message =~ "github_intake.retry_ttl_ms must be greater than or equal to interval_ms"
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{"github_intake" => %{"todo_labels" => ["symphony-auto", " "]}})
+
+    assert message =~ "github_intake"
+    assert message =~ "todo_labels"
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{"github_intake" => %{"todo_labels" => "symphony-auto"}})
+
+    assert message =~ "github_intake"
+    assert message =~ "todo_labels"
   end
 
   test "workflow config supports Done sync interval gating" do

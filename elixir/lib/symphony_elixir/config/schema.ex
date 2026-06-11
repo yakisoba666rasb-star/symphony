@@ -106,6 +106,7 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:enabled, :boolean, default: false)
       field(:state, :string, default: "Backlog")
+      field(:todo_labels, {:array, :string}, default: [])
       field(:interval_ms, :integer, default: 300_000)
       field(:retry_ttl_ms, :integer, default: 3_600_000)
       field(:limit, :integer, default: 100)
@@ -114,12 +115,13 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:enabled, :state, :interval_ms, :retry_ttl_ms, :limit], empty_values: [])
+      |> cast(attrs, [:enabled, :state, :todo_labels, :interval_ms, :retry_ttl_ms, :limit], empty_values: [])
       |> validate_required([:state])
       |> validate_number(:interval_ms, greater_than: 0)
       |> validate_number(:retry_ttl_ms, greater_than: 0)
       |> validate_number(:limit, greater_than: 0, less_than_or_equal_to: 500)
       |> validate_change(:state, &validate_non_blank/2)
+      |> validate_change(:todo_labels, &validate_label_names/2)
       |> validate_retry_ttl_ms()
     end
 
@@ -128,6 +130,14 @@ defmodule SymphonyElixir.Config.Schema do
     end
 
     defp validate_non_blank(field, _value), do: [{field, "must not be blank"}]
+
+    defp validate_label_names(field, labels) when is_list(labels) do
+      if Enum.all?(labels, &(is_binary(&1) and String.trim(&1) != "")) do
+        []
+      else
+        [{field, "must contain only non-blank strings"}]
+      end
+    end
 
     defp validate_retry_ttl_ms(changeset) do
       interval_ms = get_field(changeset, :interval_ms)

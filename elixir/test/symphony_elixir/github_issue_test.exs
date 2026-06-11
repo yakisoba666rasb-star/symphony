@@ -20,7 +20,13 @@ defmodule SymphonyElixir.GitHubIssueTest do
 
       case Application.get_env(:symphony_elixir, :github_intake_target_result, :ok) do
         :ok ->
-          {:ok, %{team_id: "team-1", state_id: "state-backlog", project_id: "project-1", project_source: "Symphony"}}
+          state_id =
+            case state_name do
+              "Todo" -> "state-todo"
+              _ -> "state-backlog"
+            end
+
+          {:ok, %{team_id: "team-1", state_id: state_id, project_id: "project-1", project_source: "Symphony"}}
 
         result ->
           result
@@ -89,7 +95,7 @@ defmodule SymphonyElixir.GitHubIssueTest do
             "--limit",
             "25",
             "--json",
-            "number,title,body,url"
+            "number,title,body,url,labels"
           ] ->
             {:ok,
              {Jason.encode!([
@@ -118,7 +124,7 @@ defmodule SymphonyElixir.GitHubIssueTest do
                        "--limit",
                        "25",
                        "--json",
-                       "number,title,body,url"
+                       "number,title,body,url,labels"
                      ]}
 
     assert_received {:github_issue_synced?, "https://github.com/octo/repo/issues/67"}
@@ -135,6 +141,112 @@ defmodule SymphonyElixir.GitHubIssueTest do
                      }}
 
     assert_received {:create_issue_attachment, "linear-1", "GitHub issue #67: Fix source sync", "https://github.com/octo/repo/issues/67"}
+  end
+
+  test "sync imports configured label matches into the first active tracker state" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 67,
+              "title" => "Promote me",
+              "body" => "",
+              "url" => "https://github.com/octo/repo/issues/67",
+              "labels" => [%{"name" => "Symphony-Auto"}]
+            }
+          ]), 0}}
+      end
+    }
+
+    settings =
+      intake_settings(%{
+        "github_intake" => %{"enabled" => true, "state" => "Backlog", "limit" => 25, "todo_labels" => ["symphony-auto"]}
+      })
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(settings, FakeLinearIntakeAdapter, deps)
+
+    assert_received {:resolve_github_intake_target, "LAB", "Todo", ["Symphony", "repo"]}
+    refute_received {:resolve_github_intake_target, "LAB", "Backlog", ["Symphony", "repo"]}
+    assert_received {:create_github_backlog_issue, %{state_id: "state-todo", title: "Promote me"}}
+  end
+
+  test "sync keeps unlabeled issues in the configured intake state when todo labels are configured" do
+    settings =
+      intake_settings(%{
+        "github_intake" => %{"enabled" => true, "state" => "Backlog", "limit" => 25, "todo_labels" => ["symphony-auto"]}
+      })
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(settings, FakeLinearIntakeAdapter, single_issue_list_deps())
+
+    assert_received {:resolve_github_intake_target, "LAB", "Backlog", ["Symphony", "repo"]}
+    refute_received {:resolve_github_intake_target, "LAB", "Todo", ["Symphony", "repo"]}
+    assert_received {:create_github_backlog_issue, %{state_id: "state-backlog"}}
+  end
+
+  test "sync matches todo labels exactly without substring matches" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 67,
+              "title" => "Not promoted",
+              "body" => "",
+              "url" => "https://github.com/octo/repo/issues/67",
+              "labels" => [%{"name" => "symphony-auto-now"}]
+            }
+          ]), 0}}
+      end
+    }
+
+    settings =
+      intake_settings(%{
+        "github_intake" => %{"enabled" => true, "state" => "Backlog", "limit" => 25, "todo_labels" => ["symphony-auto"]}
+      })
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(settings, FakeLinearIntakeAdapter, deps)
+
+    assert_received {:resolve_github_intake_target, "LAB", "Backlog", ["Symphony", "repo"]}
+    refute_received {:resolve_github_intake_target, "LAB", "Todo", ["Symphony", "repo"]}
+    assert_received {:create_github_backlog_issue, %{state_id: "state-backlog", title: "Not promoted"}}
+  end
+
+  test "sync can import labeled and unlabeled issues into separate states in one repo" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts ->
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 67,
+              "title" => "Promoted",
+              "body" => "",
+              "url" => "https://github.com/octo/repo/issues/67",
+              "labels" => [%{"name" => "symphony-auto"}]
+            },
+            %{"number" => 68, "title" => "Backlog", "body" => "", "url" => "https://github.com/octo/repo/issues/68"}
+          ]), 0}}
+      end
+    }
+
+    settings =
+      intake_settings(%{
+        "github_intake" => %{"enabled" => true, "state" => "Backlog", "limit" => 25, "todo_labels" => ["symphony-auto"]}
+      })
+
+    assert {:ok, %{created: 2, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(settings, FakeLinearIntakeAdapter, deps)
+
+    assert_received {:resolve_github_intake_target, "LAB", "Todo", ["Symphony", "repo"]}
+    assert_received {:resolve_github_intake_target, "LAB", "Backlog", ["Symphony", "repo"]}
+    assert_received {:create_github_backlog_issue, %{state_id: "state-todo", title: "Promoted"}}
+    assert_received {:create_github_backlog_issue, %{state_id: "state-backlog", title: "Backlog"}}
   end
 
   test "sync skips GitHub issues that already have Linear attachments" do

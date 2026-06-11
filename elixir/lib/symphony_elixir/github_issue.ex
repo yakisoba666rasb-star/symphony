@@ -121,41 +121,53 @@ defmodule SymphonyElixir.GitHubIssue do
     if retryable_issues == [] do
       {:ok, %{empty_sync_result() | skipped: cached_skips}, attempts}
     else
-      case linear_adapter.resolve_github_intake_target(
-             settings.tracker.team_key,
-             settings.github_intake.state,
-             project_aliases(settings, repo)
-           ) do
-        {:ok, target} ->
-          retryable_issues
-          |> Enum.reduce(
-            {:ok, %{empty_sync_result() | skipped: cached_skips}, attempts},
-            &sync_single_open_issue_result(&1, &2, repo, target, linear_adapter, now_ms)
-          )
+      retryable_issues
+      |> Enum.group_by(&github_intake_target_state(settings, &1))
+      |> Enum.reduce(
+        {:ok, %{empty_sync_result() | skipped: cached_skips}, attempts},
+        &sync_issue_group_result(&1, &2, repo, settings, linear_adapter, now_ms)
+      )
+    end
+  end
 
-        {:error, :no_project_match} ->
-          Logger.debug("Skipping GitHub issue intake; no matching Linear project for repo=#{repo}")
+  defp sync_issue_group_result({_state, _issues}, {:error, _reason} = error, _repo, _settings, _linear_adapter, _now_ms),
+    do: error
 
-          result = %{empty_sync_result() | skipped: cached_skips + length(retryable_issues)}
-          updated_attempts = record_failed_attempts(attempts, retryable_issues, :no_project_match, now_ms)
-          {:ok, result, updated_attempts}
+  defp sync_issue_group_result({state, issues}, {:ok, acc, attempts}, repo, settings, linear_adapter, now_ms) do
+    case linear_adapter.resolve_github_intake_target(
+           settings.tracker.team_key,
+           state,
+           project_aliases(settings, repo)
+         ) do
+      {:ok, target} ->
+        issues
+        |> Enum.reduce(
+          {:ok, acc, attempts},
+          &sync_single_open_issue_result(&1, &2, repo, target, linear_adapter, now_ms)
+        )
 
-        {:error, {:ambiguous_project_match, projects}} ->
-          Logger.warning(
-            "Skipping GitHub issue intake; multiple matching Linear projects for repo=#{repo} " <>
-              "projects=#{inspect(projects)}"
-          )
+      {:error, :no_project_match} ->
+        Logger.debug("Skipping GitHub issue intake; no matching Linear project for repo=#{repo}")
 
-          result = %{empty_sync_result() | skipped: cached_skips + length(retryable_issues)}
-          reason = {:ambiguous_project_match, projects}
-          updated_attempts = record_failed_attempts(attempts, retryable_issues, reason, now_ms)
-          {:ok, result, updated_attempts}
+        result = %{acc | skipped: acc.skipped + length(issues)}
+        updated_attempts = record_failed_attempts(attempts, issues, :no_project_match, now_ms)
+        {:ok, result, updated_attempts}
 
-        {:error, reason} ->
-          result = %{empty_sync_result() | skipped: cached_skips, errors: length(retryable_issues)}
-          updated_attempts = record_failed_attempts(attempts, retryable_issues, reason, now_ms)
-          {:ok, result, updated_attempts}
-      end
+      {:error, {:ambiguous_project_match, projects}} ->
+        Logger.warning(
+          "Skipping GitHub issue intake; multiple matching Linear projects for repo=#{repo} " <>
+            "projects=#{inspect(projects)}"
+        )
+
+        reason = {:ambiguous_project_match, projects}
+        result = %{acc | skipped: acc.skipped + length(issues)}
+        updated_attempts = record_failed_attempts(attempts, issues, reason, now_ms)
+        {:ok, result, updated_attempts}
+
+      {:error, reason} ->
+        result = %{acc | errors: acc.errors + length(issues)}
+        updated_attempts = record_failed_attempts(attempts, issues, reason, now_ms)
+        {:ok, result, updated_attempts}
     end
   end
 
@@ -300,7 +312,7 @@ defmodule SymphonyElixir.GitHubIssue do
       "--limit",
       Integer.to_string(limit),
       "--json",
-      "number,title,body,url"
+      "number,title,body,url,labels"
     ]
 
     case normalize_command_result(deps.run_command.(gh_bin, args, stderr_to_stdout: true)) do
@@ -328,11 +340,57 @@ defmodule SymphonyElixir.GitHubIssue do
       number: issue["number"],
       title: issue["title"],
       body: issue["body"],
-      url: url
+      url: url,
+      labels: github_issue_label_names(issue["labels"])
     }
   end
 
   defp normalize_open_issue(_issue), do: nil
+
+  defp github_issue_label_names(labels) when is_list(labels) do
+    labels
+    |> Enum.flat_map(fn
+      %{"name" => name} when is_binary(name) -> [name]
+      _ -> []
+    end)
+  end
+
+  defp github_issue_label_names(_labels), do: []
+
+  defp github_intake_target_state(settings, issue) do
+    todo_state = first_active_state(settings)
+
+    if is_binary(todo_state) and github_issue_matches_todo_label?(issue, settings.github_intake.todo_labels) do
+      todo_state
+    else
+      settings.github_intake.state
+    end
+  end
+
+  defp first_active_state(%{tracker: %{active_states: [state | _]}}) when is_binary(state), do: state
+  defp first_active_state(_settings), do: nil
+
+  defp github_issue_matches_todo_label?(_issue, []), do: false
+
+  defp github_issue_matches_todo_label?(issue, todo_labels) when is_list(todo_labels) do
+    configured_labels =
+      todo_labels
+      |> Enum.map(&normalized_label_name/1)
+      |> MapSet.new()
+
+    issue
+    |> Map.get(:labels, [])
+    |> Enum.map(&normalized_label_name/1)
+    |> Enum.any?(&MapSet.member?(configured_labels, &1))
+  end
+
+  defp github_issue_matches_todo_label?(_issue, _todo_labels), do: false
+
+  defp normalized_label_name(label) when is_binary(label) do
+    label
+    |> String.trim()
+    |> String.downcase()
+  end
 
   defp configured_repository_slugs(settings) do
     project_route_repos =
