@@ -115,8 +115,6 @@ defmodule SymphonyElixir.GitHubReviewStatus do
     end
   end
 
-  defp relation_nodes(_map, _key), do: []
-
   defp review_state(review) when is_map(review) do
     review
     |> Map.get("state", Map.get(review, :state))

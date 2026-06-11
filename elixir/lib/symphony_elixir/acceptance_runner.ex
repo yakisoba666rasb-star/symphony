@@ -160,7 +160,7 @@ defmodule SymphonyElixir.AcceptanceRunner do
   defp target_legs("in_review"), do: target_legs(:in_review)
   defp target_legs(_up_to), do: [:linear_created, :todo, :in_progress, :pr_exists, :in_review, :done]
 
-  defp maybe_restart_during_review(:in_review, true, command, deps) do
+  defp maybe_restart_during_review(:pr_exists, true, command, deps) do
     [cmd | args] = String.split(command, " ", trim: true)
 
     case normalize_command_result(deps.run_command.(cmd, args, stderr_to_stdout: true)) do

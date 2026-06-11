@@ -2576,8 +2576,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   test "Done sync failures use retry policy cap and reset when PR evidence changes" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
-      poll_interval_ms: 50,
-      done_sync_interval_ms: 50,
+      poll_interval_ms: 60_000,
+      done_sync_interval_ms: 60_000,
       retry_max_done_sync_attempts: 2
     )
 
@@ -2639,8 +2639,6 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     issue_id = "issue-done-sync-update-error"
 
-    send(pid, :run_poll_cycle)
-
     state =
       wait_for_orchestrator_state(pid, fn state ->
         get_in(state.retry_attempts, [issue_id, :attempt]) == 1
@@ -2654,6 +2652,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       "https://github.com/octo/repo/pull/201"
     )
 
+    :sys.replace_state(pid, fn state -> %{state | last_done_sync_ms: nil} end)
     send(pid, :run_poll_cycle)
 
     state =
@@ -2664,6 +2663,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert %{policy_context: :done_sync, attempt: 1, error: error} = state.retry_attempts[issue_id]
     assert error =~ "failed to move Linear issue to Done"
 
+    :sys.replace_state(pid, fn state -> %{state | last_done_sync_ms: nil} end)
     send(pid, :run_poll_cycle)
 
     state =
@@ -2673,6 +2673,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert %{policy_context: :done_sync, attempt: 2} = state.retry_attempts[issue_id]
 
+    :sys.replace_state(pid, fn state -> %{state | last_done_sync_ms: nil} end)
     send(pid, :run_poll_cycle)
 
     state =
