@@ -110,29 +110,11 @@ defmodule SymphonyElixir.Linear.Adapter do
             slugId
             description
             url
-            links(first: 20) {
+            externalLinks(first: 20) {
               nodes {
                 url
               }
             }
-          }
-        }
-      }
-    }
-  }
-  """
-
-  @team_projects_description_query """
-  query SymphonyTeamProjects($teamKey: String!, $first: Int!) {
-    teams(filter: {key: {eq: $teamKey}}, first: 1) {
-      nodes {
-        projects(first: $first) {
-          nodes {
-            id
-            name
-            slugId
-            description
-            url
           }
         }
       }
@@ -287,10 +269,7 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @spec fetch_team_projects(String.t()) :: {:ok, [map()]} | {:error, term()}
   def fetch_team_projects(team_key) when is_binary(team_key) do
-    case fetch_team_projects_with_query(@team_projects_query, team_key) do
-      {:ok, projects} -> {:ok, projects}
-      {:error, _reason} -> fetch_team_projects_with_query(@team_projects_description_query, team_key)
-    end
+    fetch_team_projects_with_query(@team_projects_query, team_key)
   end
 
   @spec update_issue_project(String.t(), String.t()) :: :ok | {:error, term()}

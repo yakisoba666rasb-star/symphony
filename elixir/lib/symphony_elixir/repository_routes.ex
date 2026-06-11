@@ -104,20 +104,27 @@ defmodule SymphonyElixir.RepositoryRoutes do
     now_ms = System.monotonic_time(:millisecond)
     cache = cached_value()
 
-    if cache_valid?(cache, settings, now_ms) do
-      {:ok, cache.routes}
-    else
-      refresh_dynamic_project_routes(settings, owners, now_ms, cache)
+    cond do
+      cache_valid?(cache, settings, now_ms) ->
+        {:ok, cache.routes}
+
+      failure_cache_valid?(cache, settings, now_ms) ->
+        {:error, cache.failure_reason}
+
+      true ->
+        refresh_dynamic_project_routes(settings, owners, now_ms, cache)
     end
   end
 
   defp refresh_dynamic_project_routes(settings, owners, now_ms, cache) do
     with {:ok, projects} <- Adapter.fetch_team_projects(settings.tracker.team_key),
-         {routes, _rejections} <- discover_project_routes(owners, projects) do
+         {routes, rejections} <- discover_project_routes(owners, projects) do
       maybe_log_route_change(routes, cache)
+      maybe_log_rejection_change(rejections, cache)
 
       :persistent_term.put(@cache_key, %{
         routes: routes,
+        rejections: normalize_rejections(rejections),
         settings_key: settings_key(settings),
         expires_at_ms: now_ms + settings.github_intake.interval_ms
       })
@@ -126,6 +133,17 @@ defmodule SymphonyElixir.RepositoryRoutes do
     else
       {:error, reason} ->
         Logger.warning("Failed to discover Linear project repository routes: #{inspect(reason)}")
+        failure_ttl_ms = min(settings.github_intake.interval_ms, 60_000)
+
+        :persistent_term.put(@cache_key, %{
+          routes: cached_routes(cache),
+          rejections: cached_rejections(cache),
+          settings_key: settings_key(settings),
+          expires_at_ms: now_ms,
+          failure_reason: reason,
+          failure_expires_at_ms: now_ms + failure_ttl_ms
+        })
+
         {:error, reason}
     end
   end
@@ -139,7 +157,6 @@ defmodule SymphonyElixir.RepositoryRoutes do
   defp record_project_route(project, {routes, rejections}, owners) when is_map(project) do
     case project_repo_slugs(project) do
       [] ->
-        log_rejection(project, :no_repository_url)
         {routes, [{project_label(project), :no_repository_url} | rejections]}
 
       [slug] ->
@@ -147,12 +164,10 @@ defmodule SymphonyElixir.RepositoryRoutes do
           route = %{project: project_name(project), source: :linear_project_metadata}
           {Map.update(routes, slug, [route], &[route | &1]), rejections}
         else
-          log_rejection(project, {:owner_not_allowed, repo_owner(slug)})
           {routes, [{project_label(project), {:owner_not_allowed, repo_owner(slug)}} | rejections]}
         end
 
       slugs ->
-        log_rejection(project, {:multiple_repository_urls, slugs})
         {routes, [{project_label(project), {:multiple_repository_urls, slugs}} | rejections]}
     end
   end
@@ -167,7 +182,6 @@ defmodule SymphonyElixir.RepositoryRoutes do
 
         claims ->
           projects = Enum.map(claims, & &1.project)
-          Logger.warning("Ignoring ambiguous Linear project repository route repo=#{slug} projects=#{inspect(projects)}")
           {accepted, [{slug, {:duplicate_repository_route, projects}} | rejected]}
       end
     end)
@@ -188,7 +202,7 @@ defmodule SymphonyElixir.RepositoryRoutes do
   end
 
   defp project_link_urls(project) do
-    links = project_value(project, "links") || %{}
+    links = project_value(project, "externalLinks") || project_value(project, "links") || %{}
     nodes = project_value(links, "nodes") || []
 
     Enum.flat_map(nodes, fn
@@ -257,9 +271,26 @@ defmodule SymphonyElixir.RepositoryRoutes do
 
   defp cache_valid?(_cache, _settings, _now_ms), do: false
 
+  defp failure_cache_valid?(
+         %{failure_expires_at_ms: failure_expires_at_ms, failure_reason: _reason, settings_key: key},
+         settings,
+         now_ms
+       )
+       when is_integer(failure_expires_at_ms) do
+    key == settings_key(settings) and now_ms < failure_expires_at_ms
+  end
+
+  defp failure_cache_valid?(_cache, _settings, _now_ms), do: false
+
   defp cached_value do
     :persistent_term.get(@cache_key, nil)
   end
+
+  defp cached_routes(%{routes: routes}) when is_map(routes), do: routes
+  defp cached_routes(_cache), do: %{}
+
+  defp cached_rejections(%{rejections: rejections}) when is_list(rejections), do: rejections
+  defp cached_rejections(_cache), do: []
 
   defp settings_key(settings) do
     %{
@@ -280,8 +311,46 @@ defmodule SymphonyElixir.RepositoryRoutes do
     Logger.info("Discovered Linear project repository routes routes=#{inspect(route_set)}")
   end
 
-  defp log_rejection(project, reason) do
-    Logger.warning("Ignoring Linear project repository route project=#{inspect(project_label(project))} reason=#{inspect(reason)}")
+  defp maybe_log_rejection_change(rejections, %{rejections: cached_rejections}) do
+    rejections = normalize_rejections(rejections)
+
+    if rejections == cached_rejections do
+      :ok
+    else
+      log_rejections(rejections)
+    end
+  end
+
+  defp maybe_log_rejection_change(rejections, _cache) do
+    rejections
+    |> normalize_rejections()
+    |> log_rejections()
+  end
+
+  defp normalize_rejections(rejections) do
+    rejections
+    |> Enum.map(fn {project, reason} -> {project, normalize_rejection_reason(reason)} end)
+    |> Enum.sort_by(fn {project, reason} -> inspect({project, reason}) end)
+  end
+
+  defp normalize_rejection_reason({:multiple_repository_urls, slugs}) when is_list(slugs) do
+    {:multiple_repository_urls, Enum.sort(slugs)}
+  end
+
+  defp normalize_rejection_reason({:duplicate_repository_route, projects}) when is_list(projects) do
+    {:duplicate_repository_route, Enum.sort(projects)}
+  end
+
+  defp normalize_rejection_reason(reason), do: reason
+
+  defp log_rejections(rejections) do
+    Enum.each(rejections, fn
+      {project, :no_repository_url} ->
+        Logger.debug("Ignoring Linear project repository route project=#{inspect(project)} reason=#{inspect(:no_repository_url)}")
+
+      {project, reason} ->
+        Logger.warning("Ignoring Linear project repository route project=#{inspect(project)} reason=#{inspect(reason)}")
+    end)
   end
 
   defp project_name(project), do: project_value(project, "name") || project_value(project, "slugId") || project_label(project)
