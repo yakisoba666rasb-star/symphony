@@ -785,7 +785,7 @@ defmodule SymphonyElixir.GitHubPrLookup do
       "--search",
       search_term,
       "--json",
-      "number,url,headRefName,isDraft,mergeStateStatus,state,mergedAt,title,body"
+      "number,url,headRefName,isDraft,mergeStateStatus,state,createdAt,mergedAt,title,body"
     ]
   end
 
@@ -826,7 +826,7 @@ defmodule SymphonyElixir.GitHubPrLookup do
       "--repo",
       repo,
       "--json",
-      "number,url,headRefName,isDraft,mergeStateStatus,state,mergedAt"
+      "number,url,headRefName,isDraft,mergeStateStatus,state,createdAt,mergedAt"
     ]
   end
 end

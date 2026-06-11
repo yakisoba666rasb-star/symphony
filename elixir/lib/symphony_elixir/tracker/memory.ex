@@ -41,6 +41,11 @@ defmodule SymphonyElixir.Tracker.Memory do
     :ok
   end
 
+  @spec fetch_zero_touch_evidence(String.t()) :: {:ok, map()} | {:error, term()}
+  def fetch_zero_touch_evidence(_issue_id) do
+    {:error, {:unsupported_tracker_adapter, __MODULE__}}
+  end
+
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name) do
     send_event({:memory_tracker_state_update, issue_id, state_name})
