@@ -1,7 +1,8 @@
 # Symphony Automation Stabilization Plan
 
-Status: Phases 1-2.5 implemented; Phase 3 retry policy implemented;
-intake sync merged and runtime-enabled (#90, #94)
+Status: Phases 1-3 implemented; zero-touch loop W0-W6 implemented
+(see [zero_touch_loop.md](zero_touch_loop.md)); next:
+[observability_hardening_plan.md](observability_hardening_plan.md)
 Last updated: 2026-06-11
 
 ## Goal
@@ -42,12 +43,16 @@ Already implemented:
 | Full loop verified end-to-end: dispatch -> implement -> self-review -> rework -> approve -> merge -> Done | Verified 2026-06-10 (LAB-391) |
 | GitHub issue -> Linear Backlog intake sync (two-stage dedupe, boundary matching) | Done (#90, #94); engine rebuilt/restarted from `origin/main` on 2026-06-11 |
 
-Remaining gaps: see [Zero-Touch GitHub Issue Loop](zero_touch_loop.md) for
-the consolidated design (W1-W6): intake failure
-fingerprint cache, async intake, Done sync interval gating, stall detection,
-label-gated zero-touch promotion, and E2E measurement. Known maintainability
-issues remain in Backlog: LAB-389 (Orchestrator god module), LAB-388
-(coverage gate excludes core modules).
+The zero-touch loop hardening (W1-W6: intake failure fingerprint cache,
+async intake, Done sync interval gating, stall detection, label-gated
+promotion, E2E evidence) is implemented; see
+[Zero-Touch GitHub Issue Loop](zero_touch_loop.md) for the issue/PR map.
+Remaining gaps are consolidated in
+[Observability and Review-Loop Hardening](observability_hardening_plan.md)
+(H1-H6): review-handoff stall detection, service-mode log path repair,
+acceptance runner, and the changes-requested rework leg. Known
+maintainability issues remain in Backlog: LAB-389 (Orchestrator god
+module), LAB-388 (coverage gate excludes core modules).
 
 ## Implementation Plan
 
@@ -125,6 +130,9 @@ Implemented (#88).
 ## Recommended Order
 
 Phase 1 (done) -> Phase 2 (done) -> LAB-396 (done) -> LAB-391 retry policy
-(done) -> GitHub intake (done: #90, #94; W0 enabled) -> zero-touch loop W1-W6 (see
-[zero_touch_loop.md](zero_touch_loop.md)) -> LAB-389. New issues should be
-filed in Linear so Symphony itself can implement them.
+(done) -> GitHub intake (done: #90, #94) -> zero-touch loop W1-W6 (done:
+#96-#101; see [zero_touch_loop.md](zero_touch_loop.md)) -> observability
+hardening H1-H6 (see
+[observability_hardening_plan.md](observability_hardening_plan.md)) ->
+LAB-389. New issues should be filed in Linear so Symphony itself can
+implement them.

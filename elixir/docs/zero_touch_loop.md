@@ -1,6 +1,7 @@
 # Zero-Touch GitHub Issue Loop
 
-Status: design (legs 1-7 code complete; W0 enabled; W1-W6 pending)
+Status: implemented (legs 1-7 and W0-W6 complete; follow-up hardening in
+[observability_hardening_plan.md](observability_hardening_plan.md))
 Last updated: 2026-06-11
 
 ## Goal
@@ -49,10 +50,23 @@ Ownership model:
 | Duplicate Linear issue creation | Same two-stage dedupe; substring prefix collisions (`issues/9` vs `issues/90`) rejected by boundary regex. |
 | Silent stalls / unbounded retries | Unified retry policy (#83): bounded attempts, exponential backoff, reasoned Linear block comment. Stall detection (W4) closes the remaining gap. |
 
-## Remaining Work
+## Hardening Work (W0-W6)
 
-Each open item below should be filed as its own Linear issue so Symphony
-implements it. Recommended order: W1 -> W3 -> W2 -> W4 -> W5 -> W6.
+All items below are implemented. They were filed as Linear issues and
+implemented by Symphony itself:
+
+| Item | Linear | PR | Status |
+|---|---|---|---|
+| W0 operator enablement | - | - | Done 2026-06-11 |
+| W1 intake failure fingerprint cache | LAB-398 | #96 | Done |
+| W2 asynchronous intake | LAB-400 | #98 | Done |
+| W3 Done sync interval gating | LAB-399 | #97 | Done |
+| W4 stall detection | LAB-401 | #99 | Done |
+| W5 label-gated zero-touch promotion | LAB-402 | #100 | Done |
+| W6 zero-touch E2E evidence | LAB-403 | #101 | Done |
+
+The design notes below are kept as the reference for how each shipped
+feature is intended to behave.
 
 ### W0: Enable intake in the running engine
 
