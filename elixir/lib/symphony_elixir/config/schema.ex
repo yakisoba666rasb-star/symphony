@@ -141,6 +141,24 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule DoneSync do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:interval_ms, :integer, default: 120_000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:interval_ms], empty_values: [])
+      |> validate_number(:interval_ms, greater_than: 0)
+    end
+  end
+
   defmodule Workspace do
     @moduledoc false
     use Ecto.Schema
@@ -555,6 +573,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:github_intake, GitHubIntake, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:done_sync, DoneSync, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:repository, Repository, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
@@ -659,6 +678,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:github_intake, with: &GitHubIntake.changeset/2)
+    |> cast_embed(:done_sync, with: &DoneSync.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:repository, with: &Repository.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
@@ -669,6 +689,22 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
+    |> validate_done_sync_interval()
+  end
+
+  defp validate_done_sync_interval(changeset) do
+    polling = get_field(changeset, :polling)
+    done_sync = get_field(changeset, :done_sync)
+
+    polling_interval_ms = if polling, do: polling.interval_ms
+    done_sync_interval_ms = if done_sync, do: done_sync.interval_ms
+
+    if is_integer(polling_interval_ms) and is_integer(done_sync_interval_ms) and
+         done_sync_interval_ms < polling_interval_ms do
+      add_error(changeset, :done_sync, "interval_ms must be greater than or equal to polling.interval_ms")
+    else
+      changeset
+    end
   end
 
   defp finalize_settings(settings) do

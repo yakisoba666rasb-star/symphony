@@ -796,6 +796,65 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, ^expected_attempts}
   end
 
+  test "Done sync runs immediately and respects interval throttle" do
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_github_issue = Application.get_env(:symphony_elixir, :github_issue)
+    previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_state_recipient = Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
+    previous_comment_recipient = Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup),
+        do: Application.delete_env(:symphony_elixir, :github_pr_lookup),
+        else: Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+
+      if is_nil(previous_github_issue),
+        do: Application.delete_env(:symphony_elixir, :github_issue),
+        else: Application.put_env(:symphony_elixir, :github_issue, previous_github_issue)
+
+      if is_nil(previous_tracker),
+        do: Application.delete_env(:symphony_elixir, :tracker_module),
+        else: Application.put_env(:symphony_elixir, :tracker_module, previous_tracker)
+
+      if is_nil(previous_state_recipient),
+        do: Application.delete_env(:symphony_elixir, :tracker_state_update_recipient),
+        else: Application.put_env(:symphony_elixir, :tracker_state_update_recipient, previous_state_recipient)
+
+      if is_nil(previous_comment_recipient),
+        do: Application.delete_env(:symphony_elixir, :tracker_comment_recipient),
+        else: Application.put_env(:symphony_elixir, :tracker_comment_recipient, previous_comment_recipient)
+    end)
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_team_key: "LAB",
+      tracker_all_projects: true,
+      repository_default: "octo/repo",
+      repository_project_routes: %{"octo/repo" => ["Symphony"]},
+      poll_interval_ms: 50,
+      done_sync_interval_ms: 1_000
+    )
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupMismatchedMergedLinkedPr)
+    Application.put_env(:symphony_elixir, :github_issue, FakeGitHubIssueCloser)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerDoneSyncImplementationIssue)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(%Orchestrator.State{})
+    assert is_integer(state.last_done_sync_ms)
+    assert_receive {:post_merge_fetch_states, state_names}, 200
+    assert "In Progress" in state_names
+
+    _state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(state)
+    refute_receive {:post_merge_fetch_states, _state_names}, 100
+
+    due_state = %{state | last_done_sync_ms: System.monotonic_time(:millisecond) - 1_001}
+    _state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(due_state)
+    assert_receive {:post_merge_fetch_states, _state_names}, 200
+  end
+
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()
@@ -2378,6 +2437,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
       poll_interval_ms: 50,
+      done_sync_interval_ms: 50,
       retry_max_done_sync_attempts: 2
     )
 

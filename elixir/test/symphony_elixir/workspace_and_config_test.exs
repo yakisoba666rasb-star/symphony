@@ -196,6 +196,30 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert message =~ "github_intake.retry_ttl_ms must be greater than or equal to interval_ms"
   end
 
+  test "workflow config supports Done sync interval gating" do
+    assert {:ok, settings} = Schema.parse(%{})
+    assert settings.done_sync.interval_ms == 120_000
+
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "polling" => %{"interval_ms" => 30_000},
+               "done_sync" => %{"interval_ms" => 180_000}
+             })
+
+    assert settings.done_sync.interval_ms == 180_000
+  end
+
+  test "workflow config rejects Done sync interval below polling interval" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "polling" => %{"interval_ms" => 30_000},
+               "done_sync" => %{"interval_ms" => 29_999}
+             })
+
+    assert message =~ "done_sync"
+    assert message =~ "interval_ms must be greater than or equal to polling.interval_ms"
+  end
+
   test "repository resolver rejects conflicting explicit repo and GitHub source URL" do
     assert {:ok, settings} =
              Schema.parse(%{
