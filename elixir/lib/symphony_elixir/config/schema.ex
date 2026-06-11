@@ -107,17 +107,20 @@ defmodule SymphonyElixir.Config.Schema do
       field(:enabled, :boolean, default: false)
       field(:state, :string, default: "Backlog")
       field(:interval_ms, :integer, default: 300_000)
+      field(:retry_ttl_ms, :integer, default: 3_600_000)
       field(:limit, :integer, default: 100)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:enabled, :state, :interval_ms, :limit], empty_values: [])
+      |> cast(attrs, [:enabled, :state, :interval_ms, :retry_ttl_ms, :limit], empty_values: [])
       |> validate_required([:state])
       |> validate_number(:interval_ms, greater_than: 0)
+      |> validate_number(:retry_ttl_ms, greater_than: 0)
       |> validate_number(:limit, greater_than: 0, less_than_or_equal_to: 500)
       |> validate_change(:state, &validate_non_blank/2)
+      |> validate_retry_ttl_ms()
     end
 
     defp validate_non_blank(field, value) when is_binary(value) do
@@ -125,6 +128,17 @@ defmodule SymphonyElixir.Config.Schema do
     end
 
     defp validate_non_blank(field, _value), do: [{field, "must not be blank"}]
+
+    defp validate_retry_ttl_ms(changeset) do
+      interval_ms = get_field(changeset, :interval_ms)
+      retry_ttl_ms = get_field(changeset, :retry_ttl_ms)
+
+      if is_integer(interval_ms) and is_integer(retry_ttl_ms) and retry_ttl_ms < interval_ms do
+        add_error(changeset, :retry_ttl_ms, "must be greater than or equal to interval_ms")
+      else
+        changeset
+      end
+    end
   end
 
   defmodule Workspace do

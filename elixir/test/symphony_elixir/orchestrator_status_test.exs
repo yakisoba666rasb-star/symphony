@@ -6,16 +6,16 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   defmodule FakeGitHubIssueIntake do
-    def sync_open_issues_to_linear(settings, adapter) do
+    def sync_open_issues_to_linear(settings, adapter, attempts) do
       case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
         recipient when is_pid(recipient) ->
-          send(recipient, {:github_issue_intake_sync, settings.github_intake.state, adapter})
+          send(recipient, {:github_issue_intake_sync, settings.github_intake.state, adapter, attempts})
 
         _ ->
           :ok
       end
 
-      {:ok, %{created: 1, skipped: 2, errors: 0}}
+      {:ok, %{created: 1, skipped: 2, errors: 0}, Map.put(attempts, "https://github.com/octo/repo/issues/1", %{reason: :down, attempts: 1, last_attempt_ms: 1})}
     end
   end
 
@@ -780,14 +780,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     state = Orchestrator.sync_github_issue_intake_for_test(%Orchestrator.State{})
     assert is_integer(state.last_github_intake_sync_ms)
-    assert_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker}
+
+    assert state.github_intake_attempts == %{
+             "https://github.com/octo/repo/issues/1" => %{reason: :down, attempts: 1, last_attempt_ms: 1}
+           }
+
+    assert_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, %{}}
 
     _state = Orchestrator.sync_github_issue_intake_for_test(state)
-    refute_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker}
+    refute_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, _attempts}
 
     due_state = %{state | last_github_intake_sync_ms: System.monotonic_time(:millisecond) - 1_001}
+    expected_attempts = state.github_intake_attempts
     _state = Orchestrator.sync_github_issue_intake_for_test(due_state)
-    assert_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker}
+    assert_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, ^expected_attempts}
   end
 
   test "snapshot returns :timeout when snapshot server is unresponsive" do

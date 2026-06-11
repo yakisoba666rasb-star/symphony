@@ -252,6 +252,121 @@ defmodule SymphonyElixir.GitHubIssueTest do
     assert_received {:create_issue_attachment, "linear-1", "GitHub issue #67: Fix source sync", "https://github.com/octo/repo/issues/67"}
   end
 
+  test "sync caches intake failures and skips retry while within ttl" do
+    Application.put_env(:symphony_elixir, :github_intake_target_result, {:error, :no_project_match})
+
+    assert {:ok, %{created: 0, skipped: 1, errors: 0}, attempts} =
+             GitHubIssue.sync_open_issues_to_linear(
+               intake_settings(%{"github_intake" => %{"enabled" => true, "interval_ms" => 1_000, "retry_ttl_ms" => 10_000}}),
+               FakeLinearIntakeAdapter,
+               %{},
+               single_issue_list_deps(1_000)
+             )
+
+    assert attempts["https://github.com/octo/repo/issues/67"] == %{
+             reason: :no_project_match,
+             attempts: 1,
+             last_attempt_ms: 1_000
+           }
+
+    assert_received {:resolve_github_intake_target, "LAB", "Backlog", ["Symphony", "repo"]}
+
+    assert {:ok, %{created: 0, skipped: 1, errors: 0}, ^attempts} =
+             GitHubIssue.sync_open_issues_to_linear(
+               intake_settings(%{"github_intake" => %{"enabled" => true, "interval_ms" => 1_000, "retry_ttl_ms" => 10_000}}),
+               FakeLinearIntakeAdapter,
+               attempts,
+               single_issue_list_deps(5_000)
+             )
+
+    refute_received {:resolve_github_intake_target, _team, _state, _aliases}
+    refute_received {:create_github_backlog_issue, _attrs}
+  end
+
+  test "sync records retryable target errors in the intake failure cache" do
+    Application.put_env(:symphony_elixir, :github_intake_target_result, {:error, :linear_down})
+
+    attempts = %{
+      "https://github.com/octo/repo/issues/67" => %{reason: :previous, attempts: 1, last_attempt_ms: 1_000}
+    }
+
+    assert {:ok, %{created: 0, skipped: 0, errors: 1}, updated_attempts} =
+             GitHubIssue.sync_open_issues_to_linear(
+               intake_settings(%{"github_intake" => %{"enabled" => true, "interval_ms" => 1_000, "retry_ttl_ms" => 10_000}}),
+               FakeLinearIntakeAdapter,
+               attempts,
+               single_issue_list_deps(11_000)
+             )
+
+    assert updated_attempts["https://github.com/octo/repo/issues/67"] == %{
+             reason: :linear_down,
+             attempts: 2,
+             last_attempt_ms: 11_000
+           }
+  end
+
+  test "sync retries failed intake after ttl elapses and clears cache on create success" do
+    attempts = %{
+      "https://github.com/octo/repo/issues/67" => %{reason: :no_project_match, attempts: 1, last_attempt_ms: 1_000}
+    }
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}, %{}} =
+             GitHubIssue.sync_open_issues_to_linear(
+               intake_settings(%{"github_intake" => %{"enabled" => true, "interval_ms" => 1_000, "retry_ttl_ms" => 10_000}}),
+               FakeLinearIntakeAdapter,
+               attempts,
+               single_issue_list_deps(11_000)
+             )
+
+    assert_received {:resolve_github_intake_target, "LAB", "Backlog", ["Symphony", "repo"]}
+    assert_received {:create_github_backlog_issue, _attrs}
+  end
+
+  test "sync clears cache on attachment repair success" do
+    Application.put_env(
+      :symphony_elixir,
+      :github_intake_description_issue,
+      {:ok, %{"id" => "linear-existing", "identifier" => "LAB-901", "url" => "https://linear.app/example/LAB-901"}}
+    )
+
+    attempts = %{
+      "https://github.com/octo/repo/issues/67" => %{
+        reason: {:github_intake_attachment_repair_failed, :attachment_down},
+        attempts: 2,
+        last_attempt_ms: 1_000
+      }
+    }
+
+    assert {:ok, %{created: 0, skipped: 1, errors: 0}, %{}} =
+             GitHubIssue.sync_open_issues_to_linear(
+               intake_settings(%{"github_intake" => %{"enabled" => true, "interval_ms" => 1_000, "retry_ttl_ms" => 10_000}}),
+               FakeLinearIntakeAdapter,
+               attempts,
+               single_issue_list_deps(11_000)
+             )
+
+    assert_received {:create_issue_attachment, "linear-existing", "GitHub issue #67: Fix source sync", "https://github.com/octo/repo/issues/67"}
+  end
+
+  test "sync prunes cached failures when a GitHub issue disappears from the open list" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", _args, _opts -> {:ok, {Jason.encode!([]), 0}} end,
+      monotonic_time_ms: fn -> 5_000 end
+    }
+
+    attempts = %{
+      "https://github.com/octo/repo/issues/67" => %{reason: :no_project_match, attempts: 1, last_attempt_ms: 1_000},
+      "https://github.com/other/repo/issues/1" => %{reason: :no_project_match, attempts: 1, last_attempt_ms: 1_000}
+    }
+
+    assert {:ok, %{created: 0, skipped: 0, errors: 0}, updated_attempts} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeAdapter, attempts, deps)
+
+    refute Map.has_key?(updated_attempts, "https://github.com/octo/repo/issues/67")
+    assert Map.has_key?(updated_attempts, "https://github.com/other/repo/issues/1")
+  end
+
   test "sync skips GitHub issues when no unique Linear project matches" do
     Application.put_env(:symphony_elixir, :github_intake_target_result, {:error, :no_project_match})
 
@@ -280,6 +395,13 @@ defmodule SymphonyElixir.GitHubIssueTest do
 
     assert {:ok, %{created: 0, skipped: 0, errors: 0}} =
              GitHubIssue.sync_open_issues_to_linear(settings, FakeLinearIntakeAdapter)
+
+    attempts = %{
+      "https://github.com/octo/repo/issues/67" => %{reason: :no_project_match, attempts: 1, last_attempt_ms: 1_000}
+    }
+
+    assert {:ok, %{created: 0, skipped: 0, errors: 0}, ^attempts} =
+             GitHubIssue.sync_open_issues_to_linear(settings, FakeLinearIntakeAdapter, attempts)
   end
 
   test "sync returns an adapter capability error before shelling out" do
@@ -707,7 +829,7 @@ defmodule SymphonyElixir.GitHubIssueTest do
              )
   end
 
-  defp single_issue_list_deps do
+  defp single_issue_list_deps(now_ms \\ nil) do
     %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,
       run_command: fn "/tmp/fake-gh", _args, _opts ->
@@ -715,7 +837,8 @@ defmodule SymphonyElixir.GitHubIssueTest do
          {Jason.encode!([
             %{"number" => 67, "title" => "Fix source sync", "body" => "", "url" => "https://github.com/octo/repo/issues/67"}
           ]), 0}}
-      end
+      end,
+      monotonic_time_ms: fn -> now_ms || System.monotonic_time(:millisecond) end
     }
   end
 
