@@ -8,7 +8,7 @@ defmodule SymphonyElixir.RepositoryResolver do
   WORKFLOW.md provides a safe default.
   """
 
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, RepositoryRoutes}
   alias SymphonyElixir.Linear.Issue
 
   @slug_regex ~r/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
@@ -155,7 +155,7 @@ defmodule SymphonyElixir.RepositoryResolver do
     issue_tokens = issue_project_route_tokens(issue_or_identifier)
 
     settings
-    |> get_in([Access.key(:repository), Access.key(:project_routes)])
+    |> RepositoryRoutes.effective_project_routes()
     |> repository_project_route_entries()
     |> Enum.filter(fn {_repo_slug, route_tokens} ->
       Enum.any?(issue_tokens, fn issue_token ->
@@ -178,8 +178,6 @@ defmodule SymphonyElixir.RepositoryResolver do
       repo_slug == "" or route_tokens == []
     end)
   end
-
-  defp repository_project_route_entries(_project_routes), do: []
 
   defp issue_project_route_tokens(%Issue{} = issue) do
     [issue.project_name, issue.project_slug]

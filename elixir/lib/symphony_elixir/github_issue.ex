@@ -3,7 +3,7 @@ defmodule SymphonyElixir.GitHubIssue do
 
   require Logger
 
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, RepositoryRoutes}
 
   @type command_result ::
           {String.t(), integer()} | {:ok, {String.t(), integer()}} | {:error, term()}
@@ -98,7 +98,7 @@ defmodule SymphonyElixir.GitHubIssue do
   defp do_sync_open_issues_to_linear(settings, linear_adapter, attempts, deps) do
     with {:ok, gh_bin} <- find_gh_binary(deps) do
       settings
-      |> configured_repository_slugs()
+      |> RepositoryRoutes.configured_repository_slugs()
       |> Enum.reduce(
         {:ok, empty_sync_result(), attempts},
         &sync_repo_open_issues_result(&1, &2, settings, linear_adapter, gh_bin, deps)
@@ -153,7 +153,7 @@ defmodule SymphonyElixir.GitHubIssue do
     case linear_adapter.resolve_github_intake_target(
            settings.tracker.team_key,
            state,
-           project_aliases(settings, repo)
+           RepositoryRoutes.project_aliases(settings, repo)
          ) do
       {:ok, target} ->
         issues
@@ -408,47 +408,6 @@ defmodule SymphonyElixir.GitHubIssue do
     |> String.downcase()
   end
 
-  defp configured_repository_slugs(settings) do
-    project_route_repos =
-      settings.repository.project_routes
-      |> case do
-        routes when is_map(routes) -> Map.keys(routes)
-        _ -> []
-      end
-
-    [settings.repository.default | project_route_repos]
-    |> Enum.map(&canonical_repo_slug/1)
-    |> Enum.filter(&valid_repo_slug?/1)
-    |> Enum.uniq()
-  end
-
-  defp project_aliases(settings, repo) do
-    route_aliases =
-      settings.repository.project_routes
-      |> case do
-        routes when is_map(routes) ->
-          Map.get(routes, repo) || []
-
-        _ ->
-          []
-      end
-      |> List.wrap()
-
-    (route_aliases ++ [repo_name(repo)])
-    |> Enum.map(&to_string/1)
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.uniq()
-  end
-
-  defp repo_name(repo) when is_binary(repo) do
-    repo
-    |> String.split("/", parts: 2)
-    |> List.last()
-  end
-
-  defp repo_name(_repo), do: nil
-
   defp github_issue_title(%{title: title}) when is_binary(title) do
     case String.trim(title) do
       "" -> "GitHub issue"
@@ -501,22 +460,6 @@ defmodule SymphonyElixir.GitHubIssue do
       function_exported?(linear_adapter, :create_github_backlog_issue, 1) and
       function_exported?(linear_adapter, :create_issue_attachment, 3)
   end
-
-  defp canonical_repo_slug(value) when is_binary(value) do
-    value
-    |> String.trim()
-    |> String.trim_leading("https://github.com/")
-    |> String.trim_trailing(".git")
-  end
-
-  defp canonical_repo_slug(value) when is_atom(value), do: value |> Atom.to_string() |> canonical_repo_slug()
-  defp canonical_repo_slug(_value), do: ""
-
-  defp valid_repo_slug?(value) when is_binary(value) do
-    Regex.match?(~r/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, value)
-  end
-
-  defp valid_repo_slug?(_value), do: false
 
   defp merge_sync_results(left, right) do
     %{

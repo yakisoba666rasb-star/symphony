@@ -10,12 +10,15 @@ It uses the runtime engine repository itself as the deployment source of truth.
 - Runtime workspace root: `/home/ryo/workspaces/symphony`
 - Runtime Linear project: `Symphony`
 - Runtime repository route: `yakisoba666rasb-star/symphony` -> `Symphony`
+- Dynamic repository owners: `yakisoba666rasb-star`, `ryo1111-qqq`
 
-`repository.project_routes` keeps repository/project ownership explicit:
+`repository.allowed_owners` permits Linear Project metadata to register repositories for trusted
+GitHub owners. `repository.project_routes` remains the explicit override map:
 
 - `yakisoba666rasb-star/symphony` must be in Linear project `Symphony`.
-- Repositories whose Linear project does not match the repository name must
-  provide their own explicit route before dispatch.
+- Repositories whose Linear project description or links contain an allowlisted GitHub URL are
+  discovered without restarting the engine.
+- Static project routes win when a repository also appears in Linear Project metadata.
 
 ## Install
 

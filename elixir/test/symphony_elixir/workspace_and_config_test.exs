@@ -1026,6 +1026,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }).valid?
   end
 
+  test "repository schema validates dynamic route allowed owners" do
+    schema = %Schema.Repository{}
+
+    assert Schema.Repository.changeset(schema, %{allowed_owners: []}).valid?
+    assert Schema.Repository.changeset(schema, %{allowed_owners: ["yakisoba666rasb-star", "ryo1111-qqq"]}).valid?
+
+    refute Schema.Repository.changeset(schema, %{allowed_owners: "yakisoba666rasb-star"}).valid?
+    refute Schema.Repository.changeset(schema, %{allowed_owners: [""]}).valid?
+    refute Schema.Repository.changeset(schema, %{allowed_owners: ["bad owner"]}).valid?
+  end
+
   test "workspace path is deterministic per issue identifier" do
     workspace_root =
       Path.join(

@@ -28,6 +28,9 @@ workspace:
 repository:
   default: yakisoba666rasb-star/symphony
   clone_protocol: https
+  allowed_owners:
+    - yakisoba666rasb-star
+    - ryo1111-qqq
   project_routes:
     yakisoba666rasb-star/symphony:
       - Symphony

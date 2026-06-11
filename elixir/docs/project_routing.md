@@ -1,7 +1,7 @@
 # Repository and Linear Project Routing
 
-Status: implemented (LAB-396, PR #88)
-Last updated: 2026-06-10
+Status: implemented (LAB-396, PR #88; LAB-408)
+Last updated: 2026-06-11
 
 ## Goal
 
@@ -27,15 +27,25 @@ project assignment paths:
 2. GitHub issue or PR URL attached to the Linear issue.
 3. GitHub repository URL in the issue title, description, comments, or branch
    evidence.
-4. A unique `repository.project_routes` match from the Linear Project name or
-   slug.
+4. A unique effective project route match from the Linear Project name or slug.
+   Effective routes are `repository.project_routes` plus dynamically discovered
+   Linear Project metadata routes.
 5. `repository.default` only when no stronger evidence exists.
 
-Project-route keys must use canonical GitHub slug form:
+Dynamic discovery is disabled by default. Set `repository.allowed_owners` to
+trusted GitHub owners, then add a GitHub repository URL to a Linear Project
+description or project link. Static `repository.project_routes` entries win over
+dynamic routes for the same repository. A project with multiple repository URLs,
+a repository claimed by multiple projects, or a repository outside the allowlist
+is ignored and logged.
+
+Static project-route keys must use canonical GitHub slug form:
 
 ```yaml
 repository:
   default: yakisoba666rasb-star/symphony
+  allowed_owners:
+    - yakisoba666rasb-star
   project_routes:
     yakisoba666rasb-star/symphony:
       - Symphony
@@ -48,7 +58,7 @@ repository:
 If a candidate issue has repository evidence but no Linear Project:
 
 - Resolve the repository with the same resolver used by dispatch.
-- Build project aliases from `repository.project_routes[repo_slug]`.
+- Build project aliases from the effective route map for `repo_slug`.
 - Fall back to the repository name (`owner/repo` -> `repo`) when no route is
   configured.
 - Query the issue team's Linear Projects and match by normalized project name
@@ -67,6 +77,8 @@ the repository is discoverable and the team has a unique matching project.
 
 - Do not dispatch a no-project issue under `all_projects: true` merely because
   the default repository exists.
+- Do not discover dynamic routes unless the repository owner is explicitly
+  allowlisted.
 - Do not use stale or legacy Lab repositories as fallback routes.
 - Do not assign a project when the repository is ambiguous.
 - Do not assign a project when the matching Linear Project is not registered on

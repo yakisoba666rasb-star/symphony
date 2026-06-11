@@ -13,6 +13,7 @@ defmodule SymphonyElixir.Orchestrator do
     GitHubReviewStatus,
     HermesDelegation,
     RepositoryResolver,
+    RepositoryRoutes,
     RetryPolicy,
     ReviewRunner,
     StatusDashboard,
@@ -3574,35 +3575,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp repository_project_route_tokens(settings, repo_slug) when is_binary(repo_slug) do
     settings
-    |> get_in([Access.key(:repository), Access.key(:project_routes)])
-    |> project_route_aliases(repo_slug)
+    |> RepositoryRoutes.effective_project_routes()
+    |> RepositoryRoutes.project_route_aliases(repo_slug)
     |> Enum.map(&route_token/1)
     |> Enum.reject(&(&1 == ""))
     |> Enum.uniq()
   end
-
-  defp project_route_aliases(project_routes, repo_slug) when is_map(project_routes) do
-    canonical_repo_token = canonical_route_repo_token(repo_slug)
-
-    project_routes
-    |> Enum.find_value([], fn {raw_repo, aliases} ->
-      if canonical_route_repo_token(raw_repo) == canonical_repo_token do
-        List.wrap(aliases)
-      end
-    end)
-  end
-
-  defp project_route_aliases(_project_routes, _repo_slug), do: []
-
-  defp canonical_route_repo_token(value) when is_binary(value) do
-    value
-    |> String.trim()
-    |> String.trim_leading("https://github.com/")
-    |> String.trim_trailing(".git")
-    |> String.downcase()
-  end
-
-  defp canonical_route_repo_token(value), do: value |> to_string() |> canonical_route_repo_token()
 
   defp issue_project_route_tokens(%Issue{} = issue) do
     [issue.project_name, issue.project_slug]
