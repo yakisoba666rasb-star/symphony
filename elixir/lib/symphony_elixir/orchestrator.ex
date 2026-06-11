@@ -555,6 +555,16 @@ defmodule SymphonyElixir.Orchestrator do
     Application.get_env(:symphony_elixir, :github_issue, GitHubIssue)
   end
 
+  defp github_issue_intake_adapter do
+    tracker = tracker_module()
+
+    if module_exports?(tracker, :adapter, 0) do
+      tracker.adapter()
+    else
+      tracker
+    end
+  end
+
   defp zero_touch_evidence_module do
     Application.get_env(:symphony_elixir, :zero_touch_evidence, ZeroTouchEvidence)
   end
@@ -1158,7 +1168,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp run_github_issue_intake_sync(settings, attempts) do
     module = github_issue_module()
-    adapter = tracker_module()
+    adapter = github_issue_intake_adapter()
 
     if module_exports?(module, :sync_open_issues_to_linear, 3) do
       case module.sync_open_issues_to_linear(settings, adapter, attempts) do
