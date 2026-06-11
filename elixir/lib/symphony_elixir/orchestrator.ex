@@ -10,6 +10,7 @@ defmodule SymphonyElixir.Orchestrator do
     AgentRunner,
     Config,
     GitHubIssue,
+    GitHubReviewStatus,
     HermesDelegation,
     RepositoryResolver,
     RetryPolicy,
@@ -52,6 +53,7 @@ defmodule SymphonyElixir.Orchestrator do
       blocked: %{},
       retry_attempts: %{},
       pending_review_handoffs: %{},
+      review_rework_rounds: %{},
       github_intake_attempts: %{},
       github_intake_task: nil,
       last_github_intake_sync_ms: nil,
@@ -498,6 +500,14 @@ defmodule SymphonyElixir.Orchestrator do
     Application.get_env(:symphony_elixir, :tracker_module, Tracker)
   end
 
+  defp github_review_status_module do
+    Application.get_env(:symphony_elixir, :github_review_status, GitHubReviewStatus)
+  end
+
+  defp agent_runner_module do
+    Application.get_env(:symphony_elixir, :agent_runner, AgentRunner)
+  end
+
   defp branch_name_and_workspace(%{branch_name: branch_name, workspace_path: workspace_path})
        when is_binary(branch_name) and is_binary(workspace_path),
        do: {:ok, branch_name, workspace_path}
@@ -621,8 +631,11 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when mode in [:normal, :premature] do
     if pending_review_handoff_for_issue?(state, issue_id) do
+      issue_identifier = review_handoff_identifier(running_entry, issue) || issue_id
+
       Logger.info(
-        "Skipping duplicate review handoff start for issue_id=#{issue_id} mode=#{mode}; " <>
+        "Skipping duplicate review handoff start for issue_id=#{issue_id} issue_identifier=#{issue_identifier} " <>
+          "mode=#{mode} pr=#{pr_url(pr)}; " <>
           "a review handoff is already pending"
       )
 
@@ -655,7 +668,12 @@ defmodule SymphonyElixir.Orchestrator do
       started_at: DateTime.utc_now()
     }
 
-    Logger.info("Started async review handoff for issue_id=#{issue_id} session_id=#{session_id} review_pid=#{inspect(task.pid)}")
+    issue_identifier = review_handoff_identifier(running_entry, issue) || issue_id
+
+    Logger.info(
+      "Started async review handoff for issue_id=#{issue_id} issue_identifier=#{issue_identifier} " <>
+        "session_id=#{session_id} pr=#{pr_url(pr)} review_pid=#{inspect(task.pid)}"
+    )
 
     %{
       state
@@ -698,7 +716,12 @@ defmodule SymphonyElixir.Orchestrator do
     case result do
       {:ok, verdict} ->
         warn_on_approved_review_handoff_comment(issue_id, running_entry, pr, verdict, tracker)
-        Logger.info("Review loop approved-equivalent for issue_id=#{issue_id} session_id=#{session_id} verdict=#{inspect(verdict)}")
+
+        Logger.info(
+          "Review loop approved-equivalent for issue_id=#{issue_id} " <>
+            "issue_identifier=#{Map.get(running_entry, :identifier, issue_id)} session_id=#{session_id} " <>
+            "pr=#{pr_url(pr)} verdict=#{inspect(verdict)}"
+        )
 
         state
         |> move_issue_to_review_after_approval(issue_id, running_entry, session_id, tracker)
@@ -724,7 +747,13 @@ defmodule SymphonyElixir.Orchestrator do
     case result do
       {:ok, verdict} ->
         warn_on_approved_review_handoff_comment(issue.id, running_entry, pr, verdict, tracker)
-        Logger.info("Review loop approved-equivalent for premature review handoff issue_id=#{issue.id} session_id=#{session_id} verdict=#{inspect(verdict)}")
+
+        Logger.info(
+          "Review loop approved-equivalent for premature review handoff issue_id=#{issue.id} " <>
+            "issue_identifier=#{issue.identifier} session_id=#{session_id} pr=#{pr_url(pr)} " <>
+            "verdict=#{inspect(verdict)}"
+        )
+
         move_issue_to_review_after_approval(state, issue.id, running_entry, session_id, tracker)
 
       {:error, reason} ->
@@ -1026,6 +1055,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> reconcile_running_issues()
       |> reconcile_blocked_issues()
       |> reconcile_active_open_pr_handoffs()
+      |> reconcile_review_rework_requests()
       |> maybe_sync_merged_linked_pull_requests_to_done()
 
     with :ok <- Config.validate!(),
@@ -1770,6 +1800,215 @@ defmodule SymphonyElixir.Orchestrator do
     |> Enum.uniq()
   end
 
+  defp reconcile_review_rework_requests(%State{} = state) do
+    settings = Config.settings!()
+    states = review_rework_states(settings)
+    module = tracker_module()
+
+    cond do
+      not settings.review_rework.enabled ->
+        state
+
+      states == [] ->
+        state
+
+      !module_exports?(module, :fetch_issues_by_states, 1) ->
+        state
+
+      true ->
+        do_reconcile_review_rework_requests(state, module, states, settings.review_rework)
+    end
+  end
+
+  defp do_reconcile_review_rework_requests(%State{} = state, module, states, review_rework) do
+    case module.fetch_issues_by_states(states) do
+      {:ok, issues} when is_list(issues) ->
+        Enum.reduce(issues, state, &maybe_reconcile_review_rework_request(&1, &2, review_rework))
+
+      {:error, reason} ->
+        Logger.debug("Failed to fetch In Review issues for review rework reconcile: #{inspect(reason)}")
+        state
+
+      other ->
+        Logger.debug("Unexpected In Review issue fetch result for review rework reconcile: #{inspect(other)}")
+        state
+    end
+  end
+
+  defp review_rework_states(settings) do
+    [settings.review.handoff_state, settings.tracker.review_state]
+    |> Enum.map(&to_string/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == "" or &1 == "nil"))
+    |> Enum.uniq()
+  end
+
+  defp maybe_reconcile_review_rework_request(%Issue{} = issue, %State{} = state, review_rework) do
+    if review_rework_candidate?(issue, state) do
+      reconcile_review_rework_request(issue, state, review_rework)
+    else
+      state
+    end
+  end
+
+  defp maybe_reconcile_review_rework_request(_issue, %State{} = state, _review_rework), do: state
+
+  defp review_rework_candidate?(%Issue{id: issue_id} = issue, %State{} = state) when is_binary(issue_id) do
+    !Map.has_key?(state.running, issue_id) and
+      !Map.has_key?(state.blocked, issue_id) and
+      !pending_review_handoff_for_issue?(state, issue_id) and
+      !MapSet.member?(state.completed, issue_id) and
+      is_binary(review_rework_pr_url(issue))
+  end
+
+  defp review_rework_candidate?(_issue, _state), do: false
+
+  defp reconcile_review_rework_request(%Issue{} = issue, %State{} = state, review_rework) do
+    pr_url = review_rework_pr_url(issue)
+    review_status_module = github_review_status_module()
+
+    case review_status_module.view(pr_url) do
+      {:ok, status} ->
+        maybe_start_review_rework(issue, state, review_rework, pr_url, status)
+
+      {:error, reason} ->
+        Logger.debug("Failed to inspect PR review state for #{issue_context(issue)} pr=#{pr_url}: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp maybe_start_review_rework(%Issue{} = issue, %State{} = state, review_rework, pr_url, status) do
+    cond do
+      not GitHubReviewStatus.open?(status) ->
+        state
+
+      GitHubReviewStatus.changes_requested?(status) ->
+        start_review_rework(issue, state, review_rework, pr_url, status)
+
+      true ->
+        state
+    end
+  end
+
+  defp start_review_rework(%Issue{} = issue, %State{} = state, review_rework, pr_url, status) do
+    review_id = review_rework_review_id(status, pr_url)
+    round_state = Map.get(state.review_rework_rounds, issue.id, %{rounds: 0})
+
+    cond do
+      Map.get(round_state, :last_review_id) == review_id ->
+        state
+
+      Map.get(round_state, :rounds, 0) >= review_rework.max_rounds ->
+        block_issue_before_dispatch(
+          state,
+          issue,
+          "review rework round limit reached (#{review_rework.max_rounds}) for pr=#{pr_url} review=#{review_id}"
+        )
+
+      true ->
+        do_start_review_rework(issue, state, pr_url, status, review_id, round_state)
+    end
+  end
+
+  defp do_start_review_rework(%Issue{} = issue, %State{} = state, pr_url, status, review_id, round_state) do
+    target_state = review_handoff_block_state()
+    next_round = Map.get(round_state, :rounds, 0) + 1
+
+    case Tracker.update_issue_state(issue.id, target_state) do
+      :ok ->
+        Tracker.create_comment(issue.id, review_rework_comment(issue, pr_url, status, review_id, next_round))
+
+        Logger.info(
+          "Dispatching review rework for #{issue_context(issue)} pr=#{pr_url} " <>
+            "review=#{review_id} round=#{next_round}"
+        )
+
+        state =
+          %{
+            state
+            | review_rework_rounds:
+                Map.put(state.review_rework_rounds, issue.id, %{
+                  rounds: next_round,
+                  last_review_id: review_id,
+                  pr_url: pr_url
+                })
+          }
+
+        rework_issue = %{issue | state: target_state}
+
+        rework_opts = [
+          extra_prompt: review_rework_prompt(issue, pr_url, status, next_round),
+          allow_dirty_existing_workspace: true
+        ]
+
+        do_dispatch_issue(state, rework_issue, nil, nil, rework_opts)
+
+      {:error, reason} ->
+        Logger.warning(
+          "Failed to move review rework issue back to #{target_state}: #{issue_context(issue)} " <>
+            "pr=#{pr_url} review=#{review_id} reason=#{inspect(reason)}"
+        )
+
+        state
+    end
+  end
+
+  defp review_rework_pr_url(%Issue{} = issue) do
+    issue
+    |> issue_attachment_urls()
+    |> Enum.find(&github_pull_request_url?/1)
+  end
+
+  defp review_rework_review_id(status, pr_url) when is_map(status) do
+    Map.get(status, :latest_changes_requested_review_id) ||
+      Map.get(status, "latest_changes_requested_review_id") ||
+      "#{pr_url}:changes_requested"
+  end
+
+  defp review_rework_comment(%Issue{} = issue, pr_url, status, review_id, round) do
+    """
+    Symphony detected GitHub changes requested for #{issue.identifier}.
+
+    PR: #{pr_url}
+    Review: #{review_id}
+    Rework round: #{round}
+
+    The runtime moved this issue back to #{review_handoff_block_state()} and dispatched a rework agent with the review feedback.
+    Review feedback:
+    #{blank_to_none(review_rework_feedback(status))}
+    """
+    |> String.trim()
+  end
+
+  defp review_rework_prompt(%Issue{} = issue, pr_url, status, round) do
+    """
+    GitHub review rework request:
+
+    The human reviewer requested changes on the existing PR.
+
+    Linear issue:
+    - Identifier: #{issue.identifier}
+    - Title: #{issue.title || "Automated changes"}
+
+    PR: #{pr_url}
+    Rework round: #{round}
+
+    Review feedback:
+    #{blank_to_none(review_rework_feedback(status))}
+
+    Rules:
+    - Address the requested changes in the existing workspace and branch.
+    - Push branch updates to the existing PR.
+    - Do not merge.
+    - Do not approve on GitHub.
+    """
+    |> String.trim()
+  end
+
+  defp review_rework_feedback(status) when is_map(status) do
+    Map.get(status, :changes_requested_body) || Map.get(status, "changes_requested_body") || ""
+  end
+
   defp maybe_reconcile_active_open_pr_handoff(%Issue{} = issue, %State{} = state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
@@ -1859,7 +2098,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_running_issues(%State{} = state) do
-    state = reconcile_stalled_running_issues(state)
+    state =
+      state
+      |> reconcile_stalled_running_issues()
+      |> reconcile_stalled_review_handoffs()
+
     running_ids = Map.keys(state.running)
 
     if running_ids == [] do
@@ -1971,6 +2214,12 @@ defmodule SymphonyElixir.Orchestrator do
   @spec sync_merged_linked_pull_requests_to_done_for_test(State.t()) :: State.t()
   def sync_merged_linked_pull_requests_to_done_for_test(%State{} = state) do
     maybe_sync_merged_linked_pull_requests_to_done(state)
+  end
+
+  @doc false
+  @spec reconcile_review_rework_requests_for_test(State.t()) :: State.t()
+  def reconcile_review_rework_requests_for_test(%State{} = state) do
+    reconcile_review_rework_requests(state)
   end
 
   @doc false
@@ -2605,6 +2854,149 @@ defmodule SymphonyElixir.Orchestrator do
         Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
           maybe_handle_stalled_issue(state_acc, issue_id, running_entry, now_ms, stall.threshold_ms)
         end)
+    end
+  end
+
+  defp reconcile_stalled_review_handoffs(%State{} = state) do
+    stall = Config.settings!().stall
+
+    cond do
+      not stall.enabled ->
+        state
+
+      stall.review_threshold_ms <= 0 ->
+        state
+
+      map_size(state.pending_review_handoffs) == 0 ->
+        state
+
+      true ->
+        now = DateTime.utc_now()
+
+        Enum.reduce(state.pending_review_handoffs, state, fn {ref, metadata}, state_acc ->
+          maybe_handle_stalled_review_handoff(state_acc, ref, metadata, now, stall.review_threshold_ms)
+        end)
+    end
+  end
+
+  defp maybe_handle_stalled_review_handoff(state, ref, metadata, now, threshold_ms)
+       when is_reference(ref) and is_map(metadata) do
+    if Map.has_key?(state.pending_review_handoffs, ref) do
+      handle_stalled_review_handoff(state, ref, metadata, now, threshold_ms)
+    else
+      state
+    end
+  end
+
+  defp maybe_handle_stalled_review_handoff(state, _ref, _metadata, _now, _threshold_ms), do: state
+
+  defp handle_stalled_review_handoff(state, ref, metadata, now, threshold_ms) do
+    elapsed_ms = review_handoff_elapsed_ms(metadata, now)
+
+    cond do
+      not is_integer(elapsed_ms) or elapsed_ms < threshold_ms ->
+        state
+
+      elapsed_ms >= threshold_ms * 2 ->
+        metadata = maybe_comment_on_review_handoff_stall_episode(ref, metadata, elapsed_ms, threshold_ms)
+        recycle_stalled_review_handoff(state, ref, metadata, elapsed_ms)
+
+      true ->
+        metadata = maybe_comment_on_review_handoff_stall_episode(ref, metadata, elapsed_ms, threshold_ms)
+        %{state | pending_review_handoffs: Map.put(state.pending_review_handoffs, ref, metadata)}
+    end
+  end
+
+  defp recycle_stalled_review_handoff(state, ref, metadata, elapsed_ms) do
+    issue_id = Map.get(metadata, :issue_id, "unknown")
+    running_entry = Map.get(metadata, :running_entry, %{})
+    issue = Map.get(metadata, :issue)
+    issue_identifier = review_handoff_identifier(running_entry, issue) || issue_id
+    session_id = Map.get(metadata, :session_id)
+    pr = pr_url(Map.get(metadata, :pr))
+
+    Logger.warning(
+      "Review handoff stalled: issue_id=#{issue_id} issue_identifier=#{issue_identifier} " <>
+        "session_id=#{session_id} pr=#{pr} elapsed_ms=#{elapsed_ms}; recycling through terminal review handoff path"
+    )
+
+    terminate_task(Map.get(metadata, :pid))
+    Process.demonitor(ref, [:flush])
+
+    state
+    |> Map.put(:pending_review_handoffs, Map.delete(state.pending_review_handoffs, ref))
+    |> finish_pending_review_handoff(metadata, {:error, {:review_handoff_stalled, elapsed_ms}})
+  end
+
+  defp maybe_comment_on_review_handoff_stall_episode(ref, metadata, elapsed_ms, threshold_ms) do
+    if Map.get(metadata, :review_stall_comment_posted?, false) do
+      metadata
+    else
+      comment_on_stalled_review_handoff(ref, metadata, elapsed_ms, threshold_ms)
+      Map.put(metadata, :review_stall_comment_posted?, true)
+    end
+  end
+
+  defp comment_on_stalled_review_handoff(ref, metadata, elapsed_ms, threshold_ms) do
+    issue_id = Map.get(metadata, :issue_id)
+    running_entry = Map.get(metadata, :running_entry, %{})
+    issue = Map.get(metadata, :issue)
+    identifier = review_handoff_identifier(running_entry, issue) || issue_id || "unknown"
+    session_id = Map.get(metadata, :session_id)
+    pr = pr_url(Map.get(metadata, :pr))
+    body = stalled_review_handoff_comment(identifier, session_id, pr, elapsed_ms, threshold_ms)
+
+    case tracker_for_review_handoff(metadata).create_comment(issue_id, body) do
+      :ok ->
+        :ok
+
+      {:ok, _comment} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.debug(
+          "Failed to create stalled review-handoff comment for issue_id=#{issue_id} " <>
+            "review_ref=#{inspect(ref)}: #{inspect(reason)}"
+        )
+    end
+  rescue
+    exception ->
+      Logger.debug(
+        "Failed to create stalled review-handoff comment for issue_id=#{Map.get(metadata, :issue_id)} " <>
+          "review_ref=#{inspect(ref)}: #{Exception.message(exception)}"
+      )
+  end
+
+  defp tracker_for_review_handoff(metadata) when is_map(metadata) do
+    Map.get(metadata, :tracker, tracker_module())
+  end
+
+  defp stalled_review_handoff_comment(identifier, session_id, pr, elapsed_ms, threshold_ms) do
+    elapsed_minutes = max(1, div(elapsed_ms + 59_999, 60_000))
+    recycle_minutes = max(1, div(threshold_ms * 2 + 59_999, 60_000))
+
+    """
+    Symphony detected a stalled review handoff for #{identifier}.
+
+    Reason: review handoff running for #{elapsed_minutes}m, session=#{session_id}, pr=#{pr}.
+    Next action: will recycle the review handoff at #{recycle_minutes}m so the bounded review handoff policy can continue.
+    """
+    |> String.trim()
+  end
+
+  defp review_handoff_elapsed_ms(metadata, now) when is_map(metadata) do
+    case Map.get(metadata, :started_at) do
+      %DateTime{} = started_at ->
+        max(0, DateTime.diff(now, started_at, :millisecond))
+
+      started_at when is_binary(started_at) ->
+        case DateTime.from_iso8601(started_at) do
+          {:ok, timestamp, _offset} -> max(0, DateTime.diff(now, timestamp, :millisecond))
+          _ -> nil
+        end
+
+      _ ->
+        nil
     end
   end
 
@@ -3485,7 +3877,7 @@ defmodule SymphonyElixir.Orchestrator do
          agent_opts
        ) do
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(
+           agent_runner_module().run(
              issue,
              recipient,
              [attempt: attempt, worker_host: worker_host] ++ agent_opts

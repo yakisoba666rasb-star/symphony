@@ -6,6 +6,7 @@ defmodule SymphonyElixir.LogFile do
   require Logger
 
   @handler_id :symphony_disk_log
+  @stderr_handler_id :symphony_stderr_log
   @default_log_relative_path "log/symphony.log"
   @default_max_bytes 10 * 1024 * 1024
   @default_max_files 5
@@ -27,6 +28,7 @@ defmodule SymphonyElixir.LogFile do
     max_files = Application.get_env(:symphony_elixir, :log_file_max_files, @default_max_files)
 
     setup_disk_handler(log_file, max_bytes, max_files)
+    setup_stderr_handler()
   end
 
   defp setup_disk_handler(log_file, max_bytes, max_files) do
@@ -65,6 +67,27 @@ defmodule SymphonyElixir.LogFile do
     end
   end
 
+  defp setup_stderr_handler do
+    :ok = remove_stderr_handler()
+
+    case :logger.add_handler(@stderr_handler_id, :logger_std_h, stderr_handler_config()) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to configure stderr log mirror: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp remove_stderr_handler do
+    case :logger.remove_handler(@stderr_handler_id) do
+      :ok -> :ok
+      {:error, {:not_found, @stderr_handler_id}} -> :ok
+      {:error, _reason} -> :ok
+    end
+  end
+
   defp disk_log_handler_config(path, max_bytes, max_files) do
     %{
       level: :all,
@@ -75,6 +98,14 @@ defmodule SymphonyElixir.LogFile do
         max_no_bytes: max_bytes,
         max_no_files: max_files
       }
+    }
+  end
+
+  defp stderr_handler_config do
+    %{
+      level: :warning,
+      formatter: {:logger_formatter, %{single_line: true}},
+      config: %{type: :standard_error}
     }
   end
 end

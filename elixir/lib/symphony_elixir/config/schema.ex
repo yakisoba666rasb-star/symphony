@@ -178,13 +178,15 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:enabled, :boolean, default: true)
       field(:threshold_ms, :integer, default: 900_000)
+      field(:review_threshold_ms, :integer, default: 900_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:enabled, :threshold_ms], empty_values: [])
+      |> cast(attrs, [:enabled, :threshold_ms, :review_threshold_ms], empty_values: [])
       |> validate_number(:threshold_ms, greater_than: 0)
+      |> validate_number(:review_threshold_ms, greater_than: 0)
     end
   end
 
@@ -485,6 +487,25 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule ReviewRework do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:max_rounds, :integer, default: 2)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :max_rounds], empty_values: [])
+      |> validate_number(:max_rounds, greater_than_or_equal_to: 0)
+    end
+  end
+
   defmodule Codex do
     @moduledoc false
     use Ecto.Schema
@@ -610,6 +631,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:retry, Retry, on_replace: :update, defaults_to_struct: true)
     embeds_one(:review, Review, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:review_rework, ReviewRework, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
@@ -716,11 +738,13 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:retry, with: &Retry.changeset/2)
     |> cast_embed(:review, with: &Review.changeset/2)
+    |> cast_embed(:review_rework, with: &ReviewRework.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> validate_done_sync_interval()
+    |> validate_stall_review_threshold()
   end
 
   defp validate_done_sync_interval(changeset) do
@@ -733,6 +757,21 @@ defmodule SymphonyElixir.Config.Schema do
     if is_integer(polling_interval_ms) and is_integer(done_sync_interval_ms) and
          done_sync_interval_ms < polling_interval_ms do
       add_error(changeset, :done_sync, "interval_ms must be greater than or equal to polling.interval_ms")
+    else
+      changeset
+    end
+  end
+
+  defp validate_stall_review_threshold(changeset) do
+    polling = get_field(changeset, :polling)
+    stall = get_field(changeset, :stall)
+
+    polling_interval_ms = if polling, do: polling.interval_ms
+    review_threshold_ms = if stall, do: stall.review_threshold_ms
+
+    if is_integer(polling_interval_ms) and is_integer(review_threshold_ms) and
+         review_threshold_ms <= polling_interval_ms do
+      add_error(changeset, :stall, "review_threshold_ms must be greater than polling.interval_ms")
     else
       changeset
     end

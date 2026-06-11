@@ -1,0 +1,8 @@
+/var/log/symphony-ryo/*.log {
+  size 50M
+  rotate 5
+  compress
+  missingok
+  notifempty
+  copytruncate
+}
