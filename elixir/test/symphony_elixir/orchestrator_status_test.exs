@@ -6931,6 +6931,16 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   test "status dashboard is disabled without a terminal unless explicitly enabled" do
     refute StatusDashboard.dashboard_enabled_for_test()
 
+    refute StatusDashboard.dashboard_enabled_for_test(
+             tty_check: fn -> false end,
+             mix_env_check: fn -> true end
+           )
+
+    assert StatusDashboard.dashboard_enabled_for_test(
+             tty_check: fn -> true end,
+             mix_env_check: fn -> true end
+           )
+
     dashboard_name = Module.concat(__MODULE__, :NoTtyDashboard)
     parent = self()
 
