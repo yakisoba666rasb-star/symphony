@@ -115,6 +115,7 @@ defmodule SymphonyElixir.TestSupport do
           github_intake_interval_ms: 300_000,
           github_intake_retry_ttl_ms: 3_600_000,
           github_intake_limit: 100,
+          done_sync_interval_ms: 120_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           dirty_workspace_retention_days: 7,
           repository_default: nil,
@@ -178,6 +179,7 @@ defmodule SymphonyElixir.TestSupport do
     github_intake_interval_ms = Keyword.get(config, :github_intake_interval_ms)
     github_intake_retry_ttl_ms = Keyword.get(config, :github_intake_retry_ttl_ms)
     github_intake_limit = Keyword.get(config, :github_intake_limit)
+    done_sync_interval_ms = Keyword.get(config, :done_sync_interval_ms)
     tracker_review_state = Keyword.get(config, :tracker_review_state)
     workspace_root = Keyword.get(config, :workspace_root)
     dirty_workspace_retention_days = Keyword.get(config, :dirty_workspace_retention_days)
@@ -247,6 +249,7 @@ defmodule SymphonyElixir.TestSupport do
           github_intake_retry_ttl_ms,
           github_intake_limit
         ),
+        done_sync_yaml(done_sync_interval_ms),
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
         "  dirty_workspace_retention_days: #{yaml_value(dirty_workspace_retention_days)}",
@@ -319,6 +322,16 @@ defmodule SymphonyElixir.TestSupport do
       "  interval_ms: #{yaml_value(interval_ms)}",
       "  retry_ttl_ms: #{yaml_value(retry_ttl_ms)}",
       "  limit: #{yaml_value(limit)}"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp done_sync_yaml(120_000), do: nil
+
+  defp done_sync_yaml(interval_ms) do
+    [
+      "done_sync:",
+      "  interval_ms: #{yaml_value(interval_ms)}"
     ]
     |> Enum.join("\n")
   end

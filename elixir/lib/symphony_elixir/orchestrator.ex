@@ -53,6 +53,7 @@ defmodule SymphonyElixir.Orchestrator do
       pending_review_handoffs: %{},
       github_intake_attempts: %{},
       last_github_intake_sync_ms: nil,
+      last_done_sync_ms: nil,
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -993,7 +994,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> reconcile_running_issues()
       |> reconcile_blocked_issues()
       |> reconcile_active_open_pr_handoffs()
-      |> sync_merged_linked_pull_requests_to_done()
+      |> maybe_sync_merged_linked_pull_requests_to_done()
 
     with :ok <- Config.validate!(),
          state <- maybe_sync_github_issue_intake(state),
@@ -1116,6 +1117,25 @@ defmodule SymphonyElixir.Orchestrator do
   defp github_issue_intake_due?(%State{last_github_intake_sync_ms: last_sync_ms}, settings)
        when is_integer(last_sync_ms) do
     System.monotonic_time(:millisecond) - last_sync_ms >= settings.github_intake.interval_ms
+  end
+
+  defp maybe_sync_merged_linked_pull_requests_to_done(%State{} = state) do
+    settings = Config.settings!()
+
+    if done_sync_due?(state, settings) do
+      state
+      |> sync_merged_linked_pull_requests_to_done()
+      |> Map.put(:last_done_sync_ms, System.monotonic_time(:millisecond))
+    else
+      state
+    end
+  end
+
+  defp done_sync_due?(%State{last_done_sync_ms: nil}, _settings), do: true
+
+  defp done_sync_due?(%State{last_done_sync_ms: last_sync_ms}, settings)
+       when is_integer(last_sync_ms) do
+    System.monotonic_time(:millisecond) - last_sync_ms >= settings.done_sync.interval_ms
   end
 
   defp sync_merged_linked_pull_requests_to_done(%State{} = state) do
@@ -1867,6 +1887,12 @@ defmodule SymphonyElixir.Orchestrator do
   @spec sync_github_issue_intake_for_test(State.t()) :: State.t()
   def sync_github_issue_intake_for_test(%State{} = state) do
     maybe_sync_github_issue_intake(state)
+  end
+
+  @doc false
+  @spec sync_merged_linked_pull_requests_to_done_for_test(State.t()) :: State.t()
+  def sync_merged_linked_pull_requests_to_done_for_test(%State{} = state) do
+    maybe_sync_merged_linked_pull_requests_to_done(state)
   end
 
   @doc false
