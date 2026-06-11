@@ -1,6 +1,6 @@
 # Zero-Touch GitHub Issue Loop
 
-Status: design (legs 1-7 code complete; W0 enablement and W1-W6 pending)
+Status: design (legs 1-7 code complete; W0 enabled; W1-W6 pending)
 Last updated: 2026-06-11
 
 ## Goal
@@ -31,7 +31,7 @@ Ownership model:
 
 | # | Leg | Status |
 |---|---|---|
-| 1 | GitHub issue -> Linear Backlog intake | Done (#90; hardened in #94 with two-stage dedupe and token-boundary matching). Not yet enabled in the running engine: W0 |
+| 1 | GitHub issue -> Linear Backlog intake | Done (#90; hardened in #94 with two-stage dedupe and token-boundary matching). Enabled in the running engine on 2026-06-11. |
 | 2 | Missing Linear Project auto-assignment | Done (#88, LAB-396) |
 | 3 | Project-route dispatch to non-default repos | Done (#86) |
 | 4 | Implement + self-review / rework loop, bounded retries | Done (#83, LAB-391; verified end-to-end 2026-06-10) |
@@ -51,16 +51,18 @@ Ownership model:
 
 ## Remaining Work
 
-Each item below should be filed as its own Linear issue so Symphony
-implements it. Recommended order: W0 -> W1 -> W3 -> W2 -> W4 -> W5 -> W6.
+Each open item below should be filed as its own Linear issue so Symphony
+implements it. Recommended order: W1 -> W3 -> W2 -> W4 -> W5 -> W6.
 
 ### W0: Enable intake in the running engine
 
 Intake code is fully merged (#90, #94, including the boundary-match fix).
-The running engine predates those merges, so this is an operator step,
-not a code change:
+The running engine was rebuilt and restarted from `origin/main` on
+2026-06-11. This operator step is complete:
 
-- Rebuild (`mix build`), restart `symphony-engine.service`.
+- Rebuilt with `mix build`.
+- Restarted `symphony-engine.service`.
+- Verified `/api/v1/state` was idle after restart.
 - First sync imports up to `limit` open issues per configured repo into
   Backlog; review the imported set once before promoting anything to Todo.
 
