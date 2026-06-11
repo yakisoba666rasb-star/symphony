@@ -1951,6 +1951,19 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec running_entry_for_test(Issue.t(), keyword()) :: map()
+  def running_entry_for_test(%Issue{} = issue, opts \\ []) do
+    new_running_entry(
+      issue,
+      Keyword.get(opts, :pid),
+      Keyword.get(opts, :ref),
+      Keyword.get(opts, :worker_host),
+      Keyword.get(opts, :attempt),
+      Keyword.get(opts, :agent_opts, [])
+    )
+  end
+
+  @doc false
   @spec select_worker_host_for_test(term(), String.t() | nil) :: String.t() | nil | :no_worker_capacity
   def select_worker_host_for_test(%State{} = state, preferred_worker_host) do
     select_worker_host(state, preferred_worker_host)
@@ -2551,65 +2564,127 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
-    timeout_ms = Config.settings!().codex.stall_timeout_ms
+    stall = Config.settings!().stall
 
     cond do
-      timeout_ms <= 0 ->
+      not stall.enabled ->
+        state
+
+      stall.threshold_ms <= 0 ->
         state
 
       map_size(state.running) == 0 ->
         state
 
       true ->
-        now = DateTime.utc_now()
+        now_ms = System.monotonic_time(:millisecond)
 
         Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
-          maybe_restart_stalled_issue(state_acc, issue_id, running_entry, now, timeout_ms)
+          maybe_handle_stalled_issue(state_acc, issue_id, running_entry, now_ms, stall.threshold_ms)
         end)
     end
   end
 
-  defp maybe_restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
+  defp maybe_handle_stalled_issue(state, issue_id, running_entry, now_ms, threshold_ms) do
     if Map.has_key?(state.blocked, issue_id) do
       state
     else
-      restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms)
+      handle_stalled_issue(state, issue_id, running_entry, now_ms, threshold_ms)
     end
   end
 
-  defp restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
-    elapsed_ms = stall_elapsed_ms(running_entry, now)
+  defp handle_stalled_issue(state, issue_id, running_entry, now_ms, threshold_ms) do
+    elapsed_ms = stall_elapsed_ms(running_entry, now_ms)
 
-    if is_integer(elapsed_ms) and elapsed_ms > timeout_ms do
-      identifier = Map.get(running_entry, :identifier, issue_id)
-      session_id = running_entry_session_id(running_entry)
-
-      if input_required_blocker?(running_entry) do
-        error = blocker_error(running_entry, "stalled for #{elapsed_ms}ms after Codex requested operator input")
-
-        Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; #{error}")
-
+    cond do
+      not is_integer(elapsed_ms) or elapsed_ms < threshold_ms ->
         state
-        |> record_session_completion_totals(running_entry)
-        |> stop_and_block_issue(issue_id, running_entry, error)
-      else
-        Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
 
-        next_attempt = next_retry_attempt_from_running(running_entry)
+      elapsed_ms >= threshold_ms * 2 ->
+        running_entry = maybe_comment_on_stall_episode(issue_id, running_entry, elapsed_ms, threshold_ms)
+        recycle_stalled_issue(state, issue_id, running_entry, elapsed_ms)
 
-        state
-        |> terminate_running_issue(issue_id, false)
-        |> schedule_issue_retry(issue_id, next_attempt, %{
-          identifier: identifier,
-          error: "stalled for #{elapsed_ms}ms without codex activity"
-        })
-      end
+      true ->
+        running_entry = maybe_comment_on_stall_episode(issue_id, running_entry, elapsed_ms, threshold_ms)
+        %{state | running: Map.put(state.running, issue_id, running_entry)}
+    end
+  end
+
+  defp recycle_stalled_issue(state, issue_id, running_entry, elapsed_ms) do
+    identifier = Map.get(running_entry, :identifier, issue_id)
+    session_id = running_entry_session_id(running_entry)
+
+    Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; recycling with retry backoff")
+
+    next_attempt = next_retry_attempt_from_running(running_entry)
+
+    state
+    |> terminate_running_issue(issue_id, false)
+    |> schedule_issue_retry(issue_id, next_attempt, %{
+      identifier: identifier,
+      error: "stalled for #{elapsed_ms}ms without codex progress",
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    })
+  end
+
+  defp maybe_comment_on_stall_episode(issue_id, running_entry, elapsed_ms, threshold_ms) do
+    if Map.get(running_entry, :stall_comment_posted?, false) do
+      running_entry
     else
-      state
+      comment_on_stalled_issue(issue_id, running_entry, elapsed_ms, threshold_ms)
+      Map.put(running_entry, :stall_comment_posted?, true)
     end
   end
 
-  defp stall_elapsed_ms(running_entry, now) do
+  defp comment_on_stalled_issue(issue_id, running_entry, elapsed_ms, threshold_ms) when is_binary(issue_id) do
+    identifier = Map.get(running_entry, :identifier, issue_id)
+    session_id = running_entry_session_id(running_entry)
+    attempt = next_retry_attempt_from_running(running_entry) || 1
+    body = stalled_issue_comment(identifier, session_id, attempt, elapsed_ms, threshold_ms)
+
+    case tracker_module().create_comment(issue_id, body) do
+      :ok ->
+        :ok
+
+      {:ok, _comment} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.debug("Failed to create stalled-issue comment for issue_id=#{issue_id}: #{inspect(reason)}")
+    end
+  rescue
+    exception ->
+      Logger.debug("Failed to create stalled-issue comment for issue_id=#{issue_id}: #{Exception.message(exception)}")
+  end
+
+  defp comment_on_stalled_issue(_issue_id, _running_entry, _elapsed_ms, _threshold_ms), do: :ok
+
+  defp stalled_issue_comment(identifier, session_id, attempt, elapsed_ms, threshold_ms) do
+    elapsed_minutes = max(1, div(elapsed_ms + 59_999, 60_000))
+    recycle_minutes = max(1, div(threshold_ms * 2 + 59_999, 60_000))
+
+    """
+    Symphony detected a stalled running agent for #{identifier}.
+
+    Reason: no progress for #{elapsed_minutes}m, session=#{session_id}.
+    Attempt count: #{attempt}.
+    Next action: will recycle the agent at #{recycle_minutes}m without progress so the bounded retry policy can continue.
+    """
+    |> String.trim()
+  end
+
+  defp stall_elapsed_ms(running_entry, now_ms) when is_integer(now_ms) do
+    case Map.get(running_entry, :last_progress_ms) do
+      last_progress_ms when is_integer(last_progress_ms) ->
+        max(0, now_ms - last_progress_ms)
+
+      _ ->
+        stall_elapsed_ms_from_datetime(running_entry, DateTime.utc_now())
+    end
+  end
+
+  defp stall_elapsed_ms_from_datetime(running_entry, now) do
     running_entry
     |> last_activity_timestamp()
     |> case do
@@ -2624,8 +2699,6 @@ defmodule SymphonyElixir.Orchestrator do
   defp last_activity_timestamp(running_entry) when is_map(running_entry) do
     Map.get(running_entry, :last_codex_timestamp) || Map.get(running_entry, :started_at)
   end
-
-  defp last_activity_timestamp(_running_entry), do: nil
 
   defp input_required_blocker?(running_entry) when is_map(running_entry) do
     Map.get(running_entry, :last_codex_event) in [:turn_input_required, :approval_required] or
@@ -3296,6 +3369,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_open_pr_running_entry(%Issue{} = issue, workspace_path, pr, session_id) do
+    now_ms = System.monotonic_time(:millisecond)
+
     %{
       pid: nil,
       ref: nil,
@@ -3308,7 +3383,9 @@ defmodule SymphonyElixir.Orchestrator do
       last_codex_message: nil,
       last_codex_event: nil,
       last_codex_timestamp: nil,
-      started_at: DateTime.utc_now()
+      started_at: DateTime.utc_now(),
+      last_progress_ms: now_ms,
+      stall_comment_posted?: false
     }
   end
 
@@ -3328,6 +3405,34 @@ defmodule SymphonyElixir.Orchestrator do
     else
       {:ok, issue}
     end
+  end
+
+  defp new_running_entry(%Issue{} = issue, pid, ref, worker_host, attempt, agent_opts, now_ms \\ System.monotonic_time(:millisecond)) do
+    %{
+      pid: pid,
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      worker_host: worker_host,
+      workspace_path: nil,
+      session_id: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_app_server_pid: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      turn_count: 0,
+      retry_attempt: normalize_retry_attempt(attempt),
+      continuation_count: normalize_continuation_count(Keyword.get(agent_opts, :continuation_count)),
+      started_at: DateTime.utc_now(),
+      last_progress_ms: now_ms,
+      stall_comment_posted?: false
+    }
   end
 
   defp block_issue_before_dispatch(%State{} = state, %Issue{} = issue, error) do
@@ -3365,33 +3470,16 @@ defmodule SymphonyElixir.Orchestrator do
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
+        now_ms = System.monotonic_time(:millisecond)
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
 
         running =
-          Map.put(state.running, issue.id, %{
-            pid: pid,
-            ref: ref,
-            identifier: issue.identifier,
-            issue: issue,
-            worker_host: worker_host,
-            workspace_path: nil,
-            session_id: nil,
-            last_codex_message: nil,
-            last_codex_timestamp: nil,
-            last_codex_event: nil,
-            codex_app_server_pid: nil,
-            codex_input_tokens: 0,
-            codex_output_tokens: 0,
-            codex_total_tokens: 0,
-            codex_last_reported_input_tokens: 0,
-            codex_last_reported_output_tokens: 0,
-            codex_last_reported_total_tokens: 0,
-            turn_count: 0,
-            retry_attempt: normalize_retry_attempt(attempt),
-            continuation_count: normalize_continuation_count(Keyword.get(agent_opts, :continuation_count)),
-            started_at: DateTime.utc_now()
-          })
+          Map.put(
+            state.running,
+            issue.id,
+            new_running_entry(issue, pid, ref, worker_host, attempt, agent_opts, now_ms)
+          )
 
         %{
           state
@@ -4022,7 +4110,9 @@ defmodule SymphonyElixir.Orchestrator do
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
-        turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
+        turn_count: turn_count_for_update(turn_count, running_entry.session_id, update),
+        last_progress_ms: System.monotonic_time(:millisecond),
+        stall_comment_posted?: false
       })
       |> record_codex_fingerprint(update)
 

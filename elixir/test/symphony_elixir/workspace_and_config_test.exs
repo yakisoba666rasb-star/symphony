@@ -220,6 +220,28 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert message =~ "interval_ms must be greater than or equal to polling.interval_ms"
   end
 
+  test "workflow config supports stall detection settings" do
+    assert {:ok, settings} = Schema.parse(%{})
+    assert settings.stall.enabled == true
+    assert settings.stall.threshold_ms == 900_000
+
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "stall" => %{"enabled" => false, "threshold_ms" => 120_000}
+             })
+
+    assert settings.stall.enabled == false
+    assert settings.stall.threshold_ms == 120_000
+  end
+
+  test "workflow config rejects invalid stall detection settings" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{"stall" => %{"threshold_ms" => 0}})
+
+    assert message =~ "stall"
+    assert message =~ "threshold_ms"
+  end
+
   test "repository resolver rejects conflicting explicit repo and GitHub source URL" do
     assert {:ok, settings} =
              Schema.parse(%{

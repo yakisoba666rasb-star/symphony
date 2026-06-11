@@ -2652,11 +2652,18 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator restarts stalled workers with retry backoff" do
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
       tracker_api_token: nil,
-      codex_stall_timeout_ms: 1_000
+      stall_threshold_ms: 1_000
     )
 
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
     issue_id = "issue-stall"
+    issue = %Issue{id: issue_id, identifier: "MT-STALL", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
     orchestrator_name = Module.concat(__MODULE__, :StallOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -2674,18 +2681,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end)
 
     stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
+    stale_progress_ms = System.monotonic_time(:millisecond) - 2_500
     initial_state = :sys.get_state(pid, 15_000)
 
     running_entry = %{
       pid: worker_pid,
       ref: make_ref(),
       identifier: "MT-STALL",
-      issue: %Issue{id: issue_id, identifier: "MT-STALL", state: "In Progress"},
+      issue: issue,
       session_id: "thread-stall-turn-stall",
       last_codex_message: nil,
       last_codex_timestamp: stale_activity_at,
       last_codex_event: :notification,
-      started_at: stale_activity_at
+      started_at: stale_activity_at,
+      last_progress_ms: stale_progress_ms,
+      stall_comment_posted?: false
     }
 
     :sys.replace_state(pid, fn _ ->
@@ -2702,6 +2712,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute Process.alive?(worker_pid)
     refute Map.has_key?(state.running, issue_id)
 
+    assert_receive {:tracker_comment_called, ^issue_id, comment}, 500
+    assert comment =~ "Reason: no progress for"
+    assert comment =~ "session=thread-stall-turn-stall"
+    assert comment =~ "Attempt count: 1"
+    assert comment =~ "Next action: will recycle"
+
     assert %{
              attempt: 1,
              due_at_ms: due_at_ms,
@@ -2715,13 +2731,248 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert retry_delay_ms <= 10_500
   end
 
-  test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do
+  test "running entries are stamped with progress at agent start" do
+    issue = %Issue{id: "issue-start-stamp", identifier: "MT-START", state: "In Progress"}
+    before_start_ms = System.monotonic_time(:millisecond)
+    entry = Orchestrator.running_entry_for_test(issue, attempt: 2, agent_opts: [continuation_count: 1])
+    after_start_ms = System.monotonic_time(:millisecond)
+
+    assert entry.last_progress_ms >= before_start_ms
+    assert entry.last_progress_ms <= after_start_ms
+    assert entry.stall_comment_posted? == false
+    assert entry.retry_attempt == 2
+    assert entry.continuation_count == 1
+  end
+
+  test "orchestrator comments once per stall episode before recycle threshold" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
       tracker_api_token: nil,
-      codex_stall_timeout_ms: 1_000
+      stall_threshold_ms: 1_000
     )
 
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-stall-comment"
+    issue = %Issue{id: issue_id, identifier: "MT-STALL-COMMENT", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :StallCommentOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    stale_progress_ms = System.monotonic_time(:millisecond) - 1_200
+    initial_state = :sys.get_state(pid, 15_000)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: "MT-STALL-COMMENT",
+      issue: issue,
+      session_id: "thread-stall-comment",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: :notification,
+      started_at: DateTime.utc_now(),
+      last_progress_ms: stale_progress_ms,
+      stall_comment_posted?: false
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, :tick)
+    Process.sleep(100)
+    state = :sys.get_state(pid, 15_000)
+
+    assert Process.alive?(worker_pid)
+    assert %{stall_comment_posted?: true} = state.running[issue_id]
+    assert_receive {:tracker_comment_called, ^issue_id, comment}, 500
+    assert comment =~ "MT-STALL-COMMENT"
+    refute Map.has_key?(state.retry_attempts, issue_id)
+
+    send(pid, :tick)
+    Process.sleep(100)
+    _state = :sys.get_state(pid, 15_000)
+
+    refute_receive {:tracker_comment_called, ^issue_id, _comment}, 200
+    assert Process.alive?(worker_pid)
+
+    send(worker_pid, :done)
+  end
+
+  test "codex progress resets stall episode and updates last progress stamp" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      stall_threshold_ms: 1_000
+    )
+
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-stall-reset"
+    issue = %Issue{id: issue_id, identifier: "MT-STALL-RESET", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :StallResetOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    old_progress_ms = System.monotonic_time(:millisecond) - 1_200
+    initial_state = :sys.get_state(pid, 15_000)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: "MT-STALL-RESET",
+      issue: issue,
+      session_id: "thread-stall-reset",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: :notification,
+      started_at: DateTime.utc_now(),
+      last_progress_ms: old_progress_ms,
+      stall_comment_posted?: false
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, :tick)
+    Process.sleep(100)
+    assert_receive {:tracker_comment_called, ^issue_id, _comment}, 500
+
+    before_update_ms = System.monotonic_time(:millisecond)
+
+    update = %{
+      event: :notification,
+      timestamp: DateTime.utc_now(),
+      message: %{"msg" => "progress"}
+    }
+
+    send(pid, {:codex_worker_update, issue_id, update})
+
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        match?(%{stall_comment_posted?: false}, state.running[issue_id])
+      end)
+
+    assert state.running[issue_id].last_progress_ms >= before_update_ms
+    assert state.running[issue_id].stall_comment_posted? == false
+
+    send(pid, :tick)
+    Process.sleep(100)
+    refute_receive {:tracker_comment_called, ^issue_id, _comment}, 200
+    assert Process.alive?(worker_pid)
+
+    send(worker_pid, :done)
+  end
+
+  test "stall detection disabled leaves stale running workers alone" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      stall_enabled: false,
+      stall_threshold_ms: 1_000
+    )
+
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-stall-disabled"
+    issue = %Issue{id: issue_id, identifier: "MT-STALL-DISABLED", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :StallDisabledOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    initial_state = :sys.get_state(pid, 15_000)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: "MT-STALL-DISABLED",
+      issue: issue,
+      session_id: "thread-stall-disabled",
+      last_codex_message: nil,
+      last_codex_timestamp: DateTime.add(DateTime.utc_now(), -5, :second),
+      last_codex_event: :notification,
+      started_at: DateTime.add(DateTime.utc_now(), -5, :second),
+      last_progress_ms: System.monotonic_time(:millisecond) - 5_000,
+      stall_comment_posted?: false
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, :tick)
+    Process.sleep(100)
+    state = :sys.get_state(pid, 15_000)
+
+    assert Process.alive?(worker_pid)
+    assert Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    refute_receive {:tracker_comment_called, ^issue_id, _comment}, 200
+
+    send(worker_pid, :done)
+  end
+
+  test "orchestrator recycles stalled workers that are waiting on MCP elicitation" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      stall_threshold_ms: 1_000
+    )
+
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
     issue_id = "issue-mcp-elicitation-stall"
@@ -2744,6 +2995,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end)
 
     stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
+    stale_progress_ms = System.monotonic_time(:millisecond) - 2_500
     initial_state = :sys.get_state(pid, 15_000)
 
     running_entry = %{
@@ -2761,7 +3013,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       },
       last_codex_timestamp: stale_activity_at,
       last_codex_event: :notification,
-      started_at: stale_activity_at
+      started_at: stale_activity_at,
+      last_progress_ms: stale_progress_ms,
+      stall_comment_posted?: false
     }
 
     :sys.replace_state(pid, fn _ ->
@@ -2776,17 +3030,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     refute Process.alive?(worker_pid)
     refute Map.has_key?(state.running, issue_id)
-    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert Map.has_key?(state.retry_attempts, issue_id)
+    assert_receive {:tracker_comment_called, ^issue_id, comment}, 500
+    assert comment =~ "MT-MCP"
 
-    assert %{
-             identifier: "MT-MCP",
-             error: "codex MCP elicitation requires operator input",
-             worker_host: "dm-dev2",
-             workspace_path: "/workspaces/MT-MCP"
-           } = state.blocked[issue_id]
-
-    assert %{blocked: [%{identifier: "MT-MCP", error: "codex MCP elicitation requires operator input"}]} =
-             Orchestrator.snapshot(orchestrator_name, 5_000)
+    refute Map.has_key?(state.blocked, issue_id)
   end
 
   test "orchestrator blocks repeated identical test failure fingerprints" do

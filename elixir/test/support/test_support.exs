@@ -44,6 +44,8 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+          Application.delete_env(:symphony_elixir, :tracker_module)
+          Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
           File.rm_rf(workflow_root)
         end)
 
@@ -116,6 +118,8 @@ defmodule SymphonyElixir.TestSupport do
           github_intake_retry_ttl_ms: 3_600_000,
           github_intake_limit: 100,
           done_sync_interval_ms: 120_000,
+          stall_enabled: true,
+          stall_threshold_ms: 900_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           dirty_workspace_retention_days: 7,
           repository_default: nil,
@@ -180,6 +184,8 @@ defmodule SymphonyElixir.TestSupport do
     github_intake_retry_ttl_ms = Keyword.get(config, :github_intake_retry_ttl_ms)
     github_intake_limit = Keyword.get(config, :github_intake_limit)
     done_sync_interval_ms = Keyword.get(config, :done_sync_interval_ms)
+    stall_enabled = Keyword.get(config, :stall_enabled)
+    stall_threshold_ms = Keyword.get(config, :stall_threshold_ms)
     tracker_review_state = Keyword.get(config, :tracker_review_state)
     workspace_root = Keyword.get(config, :workspace_root)
     dirty_workspace_retention_days = Keyword.get(config, :dirty_workspace_retention_days)
@@ -250,6 +256,7 @@ defmodule SymphonyElixir.TestSupport do
           github_intake_limit
         ),
         done_sync_yaml(done_sync_interval_ms),
+        stall_yaml(stall_enabled, stall_threshold_ms),
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
         "  dirty_workspace_retention_days: #{yaml_value(dirty_workspace_retention_days)}",
@@ -332,6 +339,17 @@ defmodule SymphonyElixir.TestSupport do
     [
       "done_sync:",
       "  interval_ms: #{yaml_value(interval_ms)}"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp stall_yaml(true, 900_000), do: nil
+
+  defp stall_yaml(enabled, threshold_ms) do
+    [
+      "stall:",
+      "  enabled: #{yaml_value(enabled)}",
+      "  threshold_ms: #{yaml_value(threshold_ms)}"
     ]
     |> Enum.join("\n")
   end
