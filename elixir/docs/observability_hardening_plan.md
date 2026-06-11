@@ -19,10 +19,12 @@ otherwise:
 - `/api/v1/state` reported `running=0, blocked=0, retrying=0` while the
   async review handoff was in flight (fixed by LAB-404 / #102: the
   `reviewing` section now exposes `pending_review_handoffs`).
-- `journalctl` and `/var/log/symphony-ryo/engine.log` contained only TUI
-  dashboard frames; all Logger output goes to the disk_log at
-  `elixir/log/symphony.log.*`, and `engine.log` had grown to 1.2 GB of
-  repaint frames.
+- `/var/log/symphony-ryo/engine.log` contained only TUI dashboard frames;
+  warning-and-above runtime events are written to
+  `/var/log/symphony-ryo/engine-error.log` by the shipped systemd unit, and
+  all structured Logger output goes to the disk_log at
+  `elixir/log/symphony.log.*`. Operators checking `journalctl` missed the
+  active streams because stdout/stderr are redirected by the unit.
 - Several handoff log lines carry only the issue UUID, so grepping the
   ticket key (`LAB-403`) missed them.
 
@@ -82,6 +84,19 @@ stdout is the TUI status dashboard repaint loop. Result: a 1.2 GB
 `engine.log` with zero diagnostic value, an `engine-error.log` stale for
 days, and `journalctl` useless during incident response.
 
+Shipped log map:
+
+- TUI frames and any stdout lines from `symphony-engine.service` append to
+  `/var/log/symphony-ryo/engine.log` via `StandardOutput=append:...`.
+- Warning-and-above runtime logs mirrored to stderr append to
+  `/var/log/symphony-ryo/engine-error.log` via `StandardError=append:...`.
+- Structured application logs use OTP `disk_log` wrap files at
+  `<cwd>/log/symphony.log*` (`LogFile`, 10 MB x 5 files by default).
+- Operator rotation for service stdout/stderr logs is
+  `ops/ryo/logrotate/symphony-ryo`, covering `/var/log/symphony-ryo/*.log`.
+- `journalctl -u symphony-engine.service` is useful only for deployments
+  where the unit does not redirect stdout/stderr to files.
+
 Design (three independent fixes plus one operator step):
 
 1. **Suppress TUI rendering when stdout is not a TTY.**
@@ -93,9 +108,10 @@ Design (three independent fixes plus one operator step):
 2. **Mirror warnings and errors to stderr.** `LogFile.configure/0`
    removes the default console handler entirely. Instead, keep (or
    re-add) a `:logger_std_h` handler on `standard_error` with
-   `level: :warning`, so journald / `engine-error.log` always capture
-   actionable problems even when the disk_log is unavailable or unknown
-   to the operator.
+   `level: :warning`, so the shipped unit's `engine-error.log` always
+   captures actionable problems even when the disk_log is unavailable or
+   unknown to the operator. Journald captures these warnings only when
+   stdout/stderr are not redirected by the unit.
 3. **Identifier coverage audit.** [logging.md](logging.md) requires
    `issue_id` and `issue_identifier` together; several review-handoff and
    Done-sync lines log only the UUID. Audit the handoff/Done-sync paths
@@ -108,9 +124,10 @@ Design (three independent fixes plus one operator step):
 Acceptance:
 
 - A service restart writes nothing but real log lines to `engine.log`.
-- `journalctl -u symphony-engine` shows warnings/errors from a forced
-  failure (e.g. unreachable Linear API).
-- `grep LAB-NNN elixir/log/symphony.log.*` returns dispatch, handoff,
+- `/var/log/symphony-ryo/engine-error.log` shows warnings/errors from a
+  forced failure (e.g. unreachable Linear API) under the shipped systemd
+  unit.
+- `grep LAB-NNN <cwd>/log/symphony.log*` returns dispatch, handoff,
   review verdict, and Done-sync lines for a completed loop.
 
 ## H3: Structured handoff trace summary (conditional)
