@@ -496,13 +496,15 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:enabled, :boolean, default: false)
       field(:max_rounds, :integer, default: 2)
+      field(:interval_ms, :integer, default: 120_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:enabled, :max_rounds], empty_values: [])
+      |> cast(attrs, [:enabled, :max_rounds, :interval_ms], empty_values: [])
       |> validate_number(:max_rounds, greater_than_or_equal_to: 0)
+      |> validate_number(:interval_ms, greater_than: 0)
     end
   end
 
@@ -744,6 +746,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> validate_done_sync_interval()
+    |> validate_review_rework_interval()
     |> validate_stall_review_threshold()
   end
 
@@ -757,6 +760,21 @@ defmodule SymphonyElixir.Config.Schema do
     if is_integer(polling_interval_ms) and is_integer(done_sync_interval_ms) and
          done_sync_interval_ms < polling_interval_ms do
       add_error(changeset, :done_sync, "interval_ms must be greater than or equal to polling.interval_ms")
+    else
+      changeset
+    end
+  end
+
+  defp validate_review_rework_interval(changeset) do
+    polling = get_field(changeset, :polling)
+    review_rework = get_field(changeset, :review_rework)
+
+    polling_interval_ms = if polling, do: polling.interval_ms
+    review_rework_interval_ms = if review_rework, do: review_rework.interval_ms
+
+    if is_integer(polling_interval_ms) and is_integer(review_rework_interval_ms) and
+         review_rework_interval_ms < polling_interval_ms do
+      add_error(changeset, :review_rework, "interval_ms must be greater than or equal to polling.interval_ms")
     else
       changeset
     end

@@ -401,6 +401,26 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule FakeGitHubReviewCountingApproved do
+    def view("https://github.com/acme/repo/pull/77") do
+      case Application.get_env(:symphony_elixir, :github_review_status_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:github_review_status_view, "https://github.com/acme/repo/pull/77"})
+
+        _ ->
+          :ok
+      end
+
+      {:ok,
+       %{
+         decision: "APPROVED",
+         state: "OPEN",
+         latest_changes_requested_review_id: nil,
+         changes_requested_body: ""
+       }}
+    end
+  end
+
   defmodule FakeAgentRunnerRecords do
     def run(issue, _recipient, opts) do
       case Application.get_env(:symphony_elixir, :agent_runner_recipient) do
@@ -4493,6 +4513,45 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute_receive {:agent_runner_called, _issue, _opts}, 200
     assert updated_state.review_rework_rounds == %{}
     assert updated_state.running == %{}
+  end
+
+  test "review rework opt-in checks PR status at most once per interval" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      poll_interval_ms: 50,
+      review_rework_enabled: true,
+      review_rework_interval_ms: 1_000
+    )
+
+    Application.put_env(:symphony_elixir, :github_review_status, FakeGitHubReviewCountingApproved)
+    Application.put_env(:symphony_elixir, :github_review_status_recipient, self())
+
+    issue = %Issue{
+      id: "issue-review-rework-counting",
+      identifier: "MT-REWORK-COUNTING",
+      state: "In Review",
+      attachment_urls: ["https://github.com/acme/repo/pull/77"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    state = %Orchestrator.State{max_concurrent_agents: 10}
+    checked_state = Orchestrator.reconcile_review_rework_requests_for_test(state)
+
+    assert_receive {:github_review_status_view, "https://github.com/acme/repo/pull/77"}, 500
+    assert is_integer(checked_state.last_review_rework_sync_ms)
+
+    skipped_state = Orchestrator.reconcile_review_rework_requests_for_test(checked_state)
+
+    refute_receive {:github_review_status_view, _url}, 200
+    assert skipped_state.last_review_rework_sync_ms == checked_state.last_review_rework_sync_ms
+
+    due_state = %{checked_state | last_review_rework_sync_ms: System.monotonic_time(:millisecond) - 1_001}
+    rechecked_state = Orchestrator.reconcile_review_rework_requests_for_test(due_state)
+
+    assert_receive {:github_review_status_view, "https://github.com/acme/repo/pull/77"}, 500
+    assert rechecked_state.last_review_rework_sync_ms >= due_state.last_review_rework_sync_ms
   end
 
   test "orchestrator does not duplicate blocked review recovery while review is pending" do
