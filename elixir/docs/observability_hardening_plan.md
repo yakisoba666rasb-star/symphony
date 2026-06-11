@@ -1,6 +1,7 @@
 # Observability and Review-Loop Hardening Plan
 
-Status: design (H1-H6 pending; prerequisite LAB-404 merged in #102)
+Status: H1/H2/H4/H5 implemented on PR #103 branch; H3 remains conditional.
+H6 is implemented as an H4 runner flag.
 Last updated: 2026-06-11
 
 ## Goal
@@ -25,11 +26,13 @@ otherwise:
 - Several handoff log lines carry only the issue UUID, so grepping the
   ticket key (`LAB-403`) missed them.
 
-Each item below should be filed as its own Linear issue so Symphony
-implements it. Recommended order: H1 -> H2 -> (H3 only if needed) ->
-H4 -> H5. H6 is a scenario inside H4.
+Implementation note: H1, H2, H4, H5, and the H6 runner scenario are now
+implemented in the PR #103 branch. H3 intentionally remains a decision-gated
+follow-up only if the new surfaces are insufficient.
 
 ## H1: Stall detection for pending review handoffs
+
+Status: implemented.
 
 Problem: LAB-401 (#99) stall detection covers `running` entries via
 `last_progress_ms`, but an issue in `pending_review_handoffs` is outside
@@ -67,6 +70,10 @@ Acceptance:
 - A normal review that finishes under the threshold posts nothing.
 
 ## H2: Log path repair (service mode)
+
+Status: implemented. Repo code suppresses non-TTY dashboard rendering,
+mirrors warnings/errors to stderr, improves review-handoff identifier logs,
+and adds `ops/ryo/logrotate/symphony-ryo` as the operator logrotate backstop.
 
 Problem: under systemd, stdout/stderr go to
 `/var/log/symphony-ryo/engine.log` / `engine-error.log`, but Logger output
@@ -108,6 +115,8 @@ Acceptance:
 
 ## H3: Structured handoff trace summary (conditional)
 
+Status: not implemented by design. Reassess after H1/H2/H4 live evidence.
+
 Problem: diagnosing a handoff today means stitching together 5+ log lines
 (PR discovery, task start, reviewer session, verdict, state update,
 comment result) across reconcile and agent-down paths.
@@ -128,6 +137,8 @@ preemptively.
 
 ## H4: Zero-touch E2E acceptance runner
 
+Status: implemented as `mix symphony.acceptance`.
+
 Problem: W6 (LAB-403, #101) posts per-issue loop evidence, but proving the
 whole pipeline still means a human filing an issue and watching. There is
 no repeatable acceptance check, so regressions surface in production runs.
@@ -146,14 +157,16 @@ Design:
      pass/fail per leg.
   4. `--up-to in_review` mode stops before merge so the run is fully
      unattended for CI; the full mode is for release verification.
-- The runner is read-only against the runtime (GitHub + Linear APIs
-  only); it never touches orchestrator state.
+- The runner observes the runtime through GitHub + Linear APIs and does not
+  mutate orchestrator state.
 - Includes the H6 restart scenario as an optional flag (below).
 
 Acceptance: one command produces a pass/fail report for a labeled issue
 reaching In Review with zero human actions, with per-leg latencies.
 
 ## H5: Changes-requested rework loop
+
+Status: implemented behind `review_rework.enabled: false` by default.
 
 Problem: the zero-touch loop assumes In Review ends in a merge. If the
 human reviewer requests changes on the PR instead, nothing happens: the
@@ -174,9 +187,10 @@ Design:
   - On completion, the normal ready-PR handoff re-runs review and moves
     the issue back to In Review.
 - Guards:
-  - Once per review round: record the acted-on review submission id on
-    the Linear issue (comment or attachment metadata) so one
-    CHANGES_REQUESTED does not redispatch every poll.
+  - Once per review round: record the acted-on review submission id in
+    runtime memory so one CHANGES_REQUESTED does not redispatch every poll
+    during a runtime lifetime. A later persistence mechanism can strengthen
+    this across restarts if live evidence shows a need.
   - Bounded by the unified retry policy: max N rework rounds (config
     `review_rework.max_rounds`, default 2), then block with a reasoned
     comment.
@@ -190,6 +204,8 @@ commit addressing the comments and a return to In Review, at most
 `max_rounds` times, with Linear comments documenting each round.
 
 ## H6: Restart-during-review-handoff recovery (verification)
+
+Status: implemented as `mix symphony.acceptance --restart-during-review`.
 
 Problem: `pending_review_handoffs` is memory-only. A runtime restart while
 a review handoff is in flight kills the reviewer task. The poll-cycle

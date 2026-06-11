@@ -46,6 +46,9 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
           Application.delete_env(:symphony_elixir, :tracker_module)
           Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+          Application.delete_env(:symphony_elixir, :github_review_status)
+          Application.delete_env(:symphony_elixir, :agent_runner)
+          Application.delete_env(:symphony_elixir, :agent_runner_recipient)
           File.rm_rf(workflow_root)
         end)
 
@@ -120,6 +123,7 @@ defmodule SymphonyElixir.TestSupport do
           done_sync_interval_ms: 120_000,
           stall_enabled: true,
           stall_threshold_ms: 900_000,
+          stall_review_threshold_ms: 900_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           dirty_workspace_retention_days: 7,
           repository_default: nil,
@@ -154,6 +158,8 @@ defmodule SymphonyElixir.TestSupport do
           server_port: nil,
           server_host: nil,
           review_blocked_comment_template: nil,
+          review_rework_enabled: false,
+          review_rework_max_rounds: 2,
           retry_max_attempts: nil,
           retry_max_continuations: nil,
           retry_max_handoff_pr_discovery_attempts: nil,
@@ -186,6 +192,7 @@ defmodule SymphonyElixir.TestSupport do
     done_sync_interval_ms = Keyword.get(config, :done_sync_interval_ms)
     stall_enabled = Keyword.get(config, :stall_enabled)
     stall_threshold_ms = Keyword.get(config, :stall_threshold_ms)
+    stall_review_threshold_ms = Keyword.get(config, :stall_review_threshold_ms)
     tracker_review_state = Keyword.get(config, :tracker_review_state)
     workspace_root = Keyword.get(config, :workspace_root)
     dirty_workspace_retention_days = Keyword.get(config, :dirty_workspace_retention_days)
@@ -221,6 +228,8 @@ defmodule SymphonyElixir.TestSupport do
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
     review_blocked_comment_template = Keyword.get(config, :review_blocked_comment_template)
+    review_rework_enabled = Keyword.get(config, :review_rework_enabled)
+    review_rework_max_rounds = Keyword.get(config, :review_rework_max_rounds)
     retry_max_attempts = Keyword.get(config, :retry_max_attempts)
     retry_max_continuations = Keyword.get(config, :retry_max_continuations)
     retry_max_handoff_pr_discovery_attempts = Keyword.get(config, :retry_max_handoff_pr_discovery_attempts)
@@ -256,7 +265,7 @@ defmodule SymphonyElixir.TestSupport do
           github_intake_limit
         ),
         done_sync_yaml(done_sync_interval_ms),
-        stall_yaml(stall_enabled, stall_threshold_ms),
+        stall_yaml(stall_enabled, stall_threshold_ms, stall_review_threshold_ms),
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
         "  dirty_workspace_retention_days: #{yaml_value(dirty_workspace_retention_days)}",
@@ -293,6 +302,7 @@ defmodule SymphonyElixir.TestSupport do
         "  allow_linear_graphql_mutations: #{yaml_value(codex_allow_linear_graphql_mutations)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         review_yaml(review_blocked_comment_template),
+        review_rework_yaml(review_rework_enabled, review_rework_max_rounds),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
         "---",
@@ -343,13 +353,25 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
-  defp stall_yaml(true, 900_000), do: nil
+  defp review_rework_yaml(false, 2), do: nil
 
-  defp stall_yaml(enabled, threshold_ms) do
+  defp review_rework_yaml(enabled, max_rounds) do
+    [
+      "review_rework:",
+      "  enabled: #{yaml_value(enabled)}",
+      "  max_rounds: #{yaml_value(max_rounds)}"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp stall_yaml(true, 900_000, 900_000), do: nil
+
+  defp stall_yaml(enabled, threshold_ms, review_threshold_ms) do
     [
       "stall:",
       "  enabled: #{yaml_value(enabled)}",
-      "  threshold_ms: #{yaml_value(threshold_ms)}"
+      "  threshold_ms: #{yaml_value(threshold_ms)}",
+      "  review_threshold_ms: #{yaml_value(review_threshold_ms)}"
     ]
     |> Enum.join("\n")
   end

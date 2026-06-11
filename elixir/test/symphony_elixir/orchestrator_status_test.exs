@@ -377,6 +377,44 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule FakeGitHubReviewChangesRequested do
+    def view("https://github.com/acme/repo/pull/77") do
+      {:ok,
+       %{
+         decision: "CHANGES_REQUESTED",
+         state: "OPEN",
+         latest_changes_requested_review_id: "review-77",
+         changes_requested_body: "Please fix the failing retry path."
+       }}
+    end
+  end
+
+  defmodule FakeGitHubReviewApproved do
+    def view("https://github.com/acme/repo/pull/77") do
+      {:ok,
+       %{
+         decision: "APPROVED",
+         state: "OPEN",
+         latest_changes_requested_review_id: nil,
+         changes_requested_body: ""
+       }}
+    end
+  end
+
+  defmodule FakeAgentRunnerRecords do
+    def run(issue, _recipient, opts) do
+      case Application.get_env(:symphony_elixir, :agent_runner_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:agent_runner_called, issue, opts})
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
+  end
+
   defmodule FakeTrackerActiveOpenPrReconcile do
     def fetch_issues_by_states(states) do
       case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
@@ -2817,6 +2855,169 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(worker_pid, :done)
   end
 
+  test "orchestrator comments once for stalled review handoff before recycle threshold" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      poll_interval_ms: 100,
+      stall_review_threshold_ms: 1_000
+    )
+
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-review-handoff-stall-comment"
+    issue = %Issue{id: issue_id, identifier: "MT-REVIEW-STALL-COMMENT", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :ReviewHandoffStallCommentOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    review_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    review_ref = make_ref()
+    started_at = DateTime.add(DateTime.utc_now(), -1_200, :millisecond)
+    initial_state = :sys.get_state(pid, 15_000)
+
+    pending_metadata = %{
+      mode: :normal,
+      issue_id: issue_id,
+      running_entry: %{
+        issue_id: issue_id,
+        identifier: issue.identifier,
+        issue: issue,
+        session_id: "thread-review-stall-comment"
+      },
+      session_id: "thread-review-stall-comment",
+      pr: %{"url" => "https://github.com/acme/repo/pull/120"},
+      tracker: FakeTrackerUpdateInReview,
+      pid: review_pid,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:pending_review_handoffs, %{review_ref => pending_metadata})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, :tick)
+    Process.sleep(100)
+    state = :sys.get_state(pid, 15_000)
+
+    assert Process.alive?(review_pid)
+    assert %{review_stall_comment_posted?: true} = state.pending_review_handoffs[review_ref]
+    assert_receive {:tracker_comment_called, ^issue_id, comment}, 500
+    assert comment =~ "stalled review handoff"
+    assert comment =~ "MT-REVIEW-STALL-COMMENT"
+    assert comment =~ "pr=https://github.com/acme/repo/pull/120"
+    refute Map.has_key?(state.blocked, issue_id)
+
+    send(pid, :tick)
+    Process.sleep(100)
+    _state = :sys.get_state(pid, 15_000)
+
+    refute_receive {:tracker_comment_called, ^issue_id, _comment}, 200
+    assert Process.alive?(review_pid)
+
+    send(review_pid, :done)
+  end
+
+  test "orchestrator recycles stalled review handoff through terminal error path" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      poll_interval_ms: 100,
+      stall_review_threshold_ms: 1_000
+    )
+
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-review-handoff-stall-recycle"
+    issue = %Issue{id: issue_id, identifier: "MT-REVIEW-STALL-RECYCLE", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :ReviewHandoffStallRecycleOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    review_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    review_ref = make_ref()
+    started_at = DateTime.add(DateTime.utc_now(), -2_500, :millisecond)
+    initial_state = :sys.get_state(pid, 15_000)
+
+    pending_metadata = %{
+      mode: :normal,
+      issue_id: issue_id,
+      running_entry: %{
+        issue_id: issue_id,
+        identifier: issue.identifier,
+        issue: issue,
+        session_id: "thread-review-stall-recycle",
+        worker_host: "dm-dev2",
+        workspace_path: "/tmp/mt-review-stall-recycle"
+      },
+      session_id: "thread-review-stall-recycle",
+      pr: %{"url" => "https://github.com/acme/repo/pull/121"},
+      tracker: FakeTrackerUpdateInReview,
+      pid: review_pid,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:pending_review_handoffs, %{review_ref => pending_metadata})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    log =
+      capture_log(fn ->
+        send(pid, :tick)
+        Process.sleep(100)
+      end)
+
+    state = :sys.get_state(pid, 15_000)
+
+    refute Process.alive?(review_pid)
+    assert state.pending_review_handoffs == %{}
+    assert %{identifier: "MT-REVIEW-STALL-RECYCLE", error: error} = state.blocked[issue_id]
+    assert error =~ "review loop did not approve PR before In Review handoff"
+    assert error =~ "review_handoff_stalled"
+
+    assert_receive {:tracker_comment_called, ^issue_id, stall_comment}, 500
+    assert stall_comment =~ "stalled review handoff"
+    assert stall_comment =~ "pr=https://github.com/acme/repo/pull/121"
+
+    assert log =~ "Review handoff stalled"
+    assert log =~ "issue_id=#{issue_id}"
+    assert log =~ "issue_identifier=MT-REVIEW-STALL-RECYCLE"
+    assert log =~ "pr=https://github.com/acme/repo/pull/121"
+    assert log =~ "elapsed_ms="
+  end
+
   test "codex progress resets stall episode and updates last progress stamp" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -4218,6 +4419,79 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     state = :sys.get_state(pid, 15_000)
     assert state.pending_review_handoffs == %{}
     assert Map.has_key?(state.blocked, issue_id)
+  end
+
+  test "review rework opt-in dispatches rework agent for changes requested PR" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      review_rework_enabled: true,
+      review_rework_max_rounds: 2
+    )
+
+    Application.put_env(:symphony_elixir, :github_review_status, FakeGitHubReviewChangesRequested)
+    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
+    Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-review-rework"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-REWORK",
+      title: "Rework requested",
+      state: "In Review",
+      attachment_urls: ["https://github.com/acme/repo/pull/77"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    state = %Orchestrator.State{max_concurrent_agents: 10}
+    updated_state = Orchestrator.reconcile_review_rework_requests_for_test(state)
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "In Progress"}, 500
+    assert_receive {:memory_tracker_comment, ^issue_id, comment}, 500
+    assert comment =~ "GitHub changes requested"
+    assert comment =~ "Please fix the failing retry path."
+
+    assert_receive {:agent_runner_called, %{id: ^issue_id, state: "In Progress"}, opts}, 500
+    assert opts[:allow_dirty_existing_workspace] == true
+    assert opts[:extra_prompt] =~ "GitHub review rework request"
+    assert opts[:extra_prompt] =~ "Please fix the failing retry path."
+
+    assert %{^issue_id => %{rounds: 1, last_review_id: "review-77"}} = updated_state.review_rework_rounds
+    assert Map.has_key?(updated_state.running, issue_id)
+  end
+
+  test "review rework opt-in ignores PRs without changes requested decision" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      review_rework_enabled: true
+    )
+
+    Application.put_env(:symphony_elixir, :github_review_status, FakeGitHubReviewApproved)
+    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
+    Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue = %Issue{
+      id: "issue-review-rework-approved",
+      identifier: "MT-REWORK-APPROVED",
+      state: "In Review",
+      attachment_urls: ["https://github.com/acme/repo/pull/77"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    state = %Orchestrator.State{max_concurrent_agents: 10}
+    updated_state = Orchestrator.reconcile_review_rework_requests_for_test(state)
+
+    refute_receive {:memory_tracker_state_update, _issue_id, _state}, 200
+    refute_receive {:memory_tracker_comment, _issue_id, _comment}, 200
+    refute_receive {:agent_runner_called, _issue, _opts}, 200
+    assert updated_state.review_rework_rounds == %{}
+    assert updated_state.running == %{}
   end
 
   test "orchestrator does not duplicate blocked review recovery while review is pending" do
@@ -6583,6 +6857,37 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_list(disk_config.file)
     assert disk_config.max_no_bytes > 0
     assert disk_config.max_no_files > 0
+
+    assert {:ok, stderr_config} = :logger.get_handler_config(:symphony_stderr_log)
+    assert stderr_config.module == :logger_std_h
+    assert stderr_config.level == :warning
+    assert stderr_config.config.type == :standard_error
+  end
+
+  test "status dashboard is disabled without a terminal unless explicitly enabled" do
+    refute StatusDashboard.dashboard_enabled_for_test()
+
+    dashboard_name = Module.concat(__MODULE__, :NoTtyDashboard)
+    parent = self()
+
+    {:ok, pid} =
+      StatusDashboard.start_link(
+        name: dashboard_name,
+        refresh_ms: 60_000,
+        render_interval_ms: 16,
+        render_fun: fn content ->
+          send(parent, {:render, content})
+        end
+      )
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    StatusDashboard.notify_update(dashboard_name)
+    refute_receive {:render, _content}, 100
   end
 
   test "status dashboard renders last codex message in EVENT column" do

@@ -547,6 +547,10 @@ defmodule SymphonyElixir.StatusDashboard do
   def dashboard_url_for_test(host, configured_port, bound_port),
     do: dashboard_url(host, configured_port, bound_port)
 
+  @doc false
+  @spec dashboard_enabled_for_test() :: boolean()
+  def dashboard_enabled_for_test, do: dashboard_enabled?()
+
   defp snapshot_payload do
     if Process.whereis(Orchestrator) do
       case Orchestrator.snapshot() do
@@ -1969,6 +1973,14 @@ defmodule SymphonyElixir.StatusDashboard do
   defp truncate(value, _max), do: value
 
   defp dashboard_enabled? do
+    tty_dashboard_enabled?() and mix_env_allows_dashboard?()
+  end
+
+  defp tty_dashboard_enabled? do
+    IO.ANSI.enabled?()
+  end
+
+  defp mix_env_allows_dashboard? do
     if Code.ensure_loaded?(Mix) and function_exported?(Mix, :env, 0) do
       try do
         Mix.env() != :test

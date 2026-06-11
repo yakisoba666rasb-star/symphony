@@ -47,12 +47,12 @@ The zero-touch loop hardening (W1-W6: intake failure fingerprint cache,
 async intake, Done sync interval gating, stall detection, label-gated
 promotion, E2E evidence) is implemented; see
 [Zero-Touch GitHub Issue Loop](zero_touch_loop.md) for the issue/PR map.
-Remaining gaps are consolidated in
-[Observability and Review-Loop Hardening](observability_hardening_plan.md)
-(H1-H6): review-handoff stall detection, service-mode log path repair,
-acceptance runner, and the changes-requested rework leg. Known
-maintainability issues remain in Backlog: LAB-389 (Orchestrator god
-module), LAB-388 (coverage gate excludes core modules).
+The observability/review-loop hardening work is tracked in
+[Observability and Review-Loop Hardening](observability_hardening_plan.md):
+H1/H2/H4/H5 are implemented on the PR #103 branch, H6 is available as an
+acceptance-runner scenario, and H3 remains conditional. Known maintainability
+issues remain in Backlog: LAB-389 (Orchestrator god module), LAB-388
+(coverage gate excludes core modules).
 
 ## Implementation Plan
 
