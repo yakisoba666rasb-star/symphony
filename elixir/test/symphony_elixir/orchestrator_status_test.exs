@@ -25,7 +25,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule FakeLinearIntakeAdapter do
+  end
+
   defmodule FakeLinearIntakeTracker do
+    def adapter, do: FakeLinearIntakeAdapter
   end
 
   defmodule FakeGitHubPrLookupFound do
@@ -847,10 +851,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert %Task{ref: ref} = state.github_intake_task
     assert state.github_intake_attempts == %{}
 
-    assert_receive {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, %{}}
+    assert_receive {:github_issue_intake_sync, "Backlog", FakeLinearIntakeAdapter, %{}}
 
     _state = Orchestrator.sync_github_issue_intake_for_test(state)
-    refute_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, _attempts}
+    refute_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeAdapter, _attempts}
 
     assert_receive {^ref, {result, attempts}}
     assert {:ok, %{created: 1, skipped: 2, errors: 0}} = result
@@ -866,7 +870,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     due_state = %{state | last_github_intake_sync_ms: System.monotonic_time(:millisecond) - 1_001}
     expected_attempts = state.github_intake_attempts
     _state = Orchestrator.sync_github_issue_intake_for_test(due_state)
-    assert_receive {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, ^expected_attempts}
+    assert_receive {:github_issue_intake_sync, "Backlog", FakeLinearIntakeAdapter, ^expected_attempts}
   end
 
   test "GitHub issue intake warns while single-flight task remains overdue" do
@@ -950,7 +954,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         assert state.last_github_intake_sync_ms == last_sync_ms
 
         _state = Orchestrator.sync_github_issue_intake_for_test(state)
-        refute_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeTracker, _attempts}
+        refute_received {:github_issue_intake_sync, "Backlog", FakeLinearIntakeAdapter, _attempts}
       end)
 
     assert log =~ "GitHub issue intake sync task exited before completion"
