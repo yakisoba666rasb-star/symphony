@@ -145,6 +145,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                "tracker" => %{"kind" => "linear", "team_key" => "LAB", "api_key" => "token", "all_projects" => true},
                "github_intake" => %{
                  "enabled" => true,
+                 "mirror_labels" => false,
                  "state" => "Backlog",
                  "todo_labels" => ["symphony-auto"],
                  "interval_ms" => 120_000,
@@ -158,6 +159,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              })
 
     assert settings.github_intake.enabled == true
+    assert settings.github_intake.mirror_labels == false
     assert settings.github_intake.state == "Backlog"
     assert settings.github_intake.todo_labels == ["symphony-auto"]
     assert settings.github_intake.interval_ms == 120_000
@@ -165,6 +167,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert settings.github_intake.limit == 25
 
     assert {:ok, settings} = Schema.parse(%{"github_intake" => %{"enabled" => true, "interval_ms" => 300_000}})
+    assert settings.github_intake.mirror_labels == true
     assert settings.github_intake.todo_labels == []
     assert settings.github_intake.retry_ttl_ms == 3_600_000
   end

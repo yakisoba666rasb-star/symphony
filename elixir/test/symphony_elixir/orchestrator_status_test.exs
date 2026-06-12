@@ -966,8 +966,16 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
     previous_state_recipient = Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
     previous_comment_recipient = Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+    orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
 
     on_exit(fn ->
+      if is_nil(Process.whereis(SymphonyElixir.Orchestrator)) do
+        case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+        end
+      end
+
       if is_nil(previous_lookup),
         do: Application.delete_env(:symphony_elixir, :github_pr_lookup),
         else: Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
@@ -988,6 +996,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         do: Application.delete_env(:symphony_elixir, :tracker_comment_recipient),
         else: Application.put_env(:symphony_elixir, :tracker_comment_recipient, previous_comment_recipient)
     end)
+
+    if is_pid(orchestrator_pid) do
+      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
+    end
 
     write_workflow_file!(
       Workflow.workflow_file_path(),
