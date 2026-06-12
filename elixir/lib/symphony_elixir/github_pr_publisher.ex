@@ -95,9 +95,18 @@ defmodule SymphonyElixir.GitHubPrPublisher do
 
   defp validate_branch_name_with_git(branch, git_bin, deps) do
     case run_command(git_bin, ["check-ref-format", "--branch", branch], deps, stderr_to_stdout: true) do
-      {:ok, {_output, 0}} -> :ok
-      {:ok, {_output, _status}} -> {:error, {:invalid_branch_name, :git_check_ref_format}}
-      {:error, reason} -> {:error, {:git_command_failed, ["check-ref-format", "--branch", branch], reason}}
+      {:ok, {output, 0}} ->
+        if String.trim(output) == branch do
+          :ok
+        else
+          {:error, {:invalid_branch_name, :git_check_ref_format}}
+        end
+
+      {:ok, {_output, _status}} ->
+        {:error, {:invalid_branch_name, :git_check_ref_format}}
+
+      {:error, reason} ->
+        {:error, {:git_command_failed, ["check-ref-format", "--branch", branch], reason}}
     end
   end
 
