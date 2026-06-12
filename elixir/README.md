@@ -222,10 +222,11 @@ mise exec -- mix run -e 'SymphonyElixir.Workflow.set_workflow_file_path("/path/f
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
-- The JSON API only accepts loopback requests by default. For trusted remote API access, set
-  `SYMPHONY_OBSERVABILITY_TOKEN` and send `Authorization: Bearer <token>`.
+- The dashboard and JSON API only accept loopback requests by default. For trusted remote access,
+  set `SYMPHONY_OBSERVABILITY_TOKEN` and send `Authorization: Bearer <token>`.
 - Binding the observability server to a non-loopback host requires
-  `SYMPHONY_ALLOW_PUBLIC_OBSERVABILITY=true`.
+  `SYMPHONY_ALLOW_PUBLIC_OBSERVABILITY=true`. This only permits the public bind; it does not bypass
+  the loopback-or-bearer-token access gate for `/` or `/api/v1/*`.
 - The `linear_graphql` tool allows read-only GraphQL queries by default. Trusted mutation workflows
   must opt in with `codex.allow_linear_graphql_mutations: true` or
   `SYMPHONY_ALLOW_LINEAR_GRAPHQL_MUTATIONS=true`; even then, mutations are limited to
@@ -239,6 +240,10 @@ The observability UI now runs on a minimal Phoenix stack:
 - JSON API for operational debugging under `/api/v1/*`
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap
+
+Both the dashboard and JSON API use the same access policy: local loopback clients are allowed
+without a token, and non-loopback clients must provide `Authorization: Bearer <token>` matching
+`SYMPHONY_OBSERVABILITY_TOKEN`.
 
 ## Project Layout
 

@@ -8,8 +8,6 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   alias Plug.Conn
   alias SymphonyElixirWeb.{Endpoint, Presenter}
 
-  plug(:require_observability_access)
-
   @spec state(Conn.t(), map()) :: Conn.t()
   def state(conn, _params) do
     json(conn, Presenter.state_payload(orchestrator(), snapshot_timeout_ms()))
@@ -53,52 +51,6 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     conn
     |> put_status(status)
     |> json(%{error: %{code: code, message: message}})
-  end
-
-  defp require_observability_access(conn, _opts) do
-    if local_request?(conn) or bearer_token_valid?(conn) do
-      conn
-    else
-      conn
-      |> put_status(403)
-      |> json(%{error: %{code: "forbidden", message: "Observability API access denied"}})
-      |> halt()
-    end
-  end
-
-  defp local_request?(%Conn{remote_ip: remote_ip}) do
-    remote_ip in [
-      {127, 0, 0, 1},
-      {0, 0, 0, 0, 0, 0, 0, 1}
-    ]
-  end
-
-  defp bearer_token_valid?(conn) do
-    case observability_token() do
-      nil ->
-        false
-
-      token ->
-        conn
-        |> get_req_header("authorization")
-        |> case do
-          ["Bearer " <> provided | _] -> Plug.Crypto.secure_compare(provided, token)
-          _ -> false
-        end
-    end
-  end
-
-  defp observability_token do
-    Endpoint.config(:observability_token) || blank_to_nil(System.get_env("SYMPHONY_OBSERVABILITY_TOKEN"))
-  end
-
-  defp blank_to_nil(nil), do: nil
-
-  defp blank_to_nil(value) when is_binary(value) do
-    case String.trim(value) do
-      "" -> nil
-      trimmed -> trimmed
-    end
   end
 
   defp orchestrator do
