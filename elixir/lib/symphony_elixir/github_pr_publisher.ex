@@ -34,6 +34,7 @@ defmodule SymphonyElixir.GitHubPrPublisher do
       when is_binary(workspace_path) and is_binary(head_branch) do
     with {:ok, git_bin} <- find_binary(deps, :find_git_bin, :git_not_found),
          {:ok, gh_bin} <- find_binary(deps, :find_gh_bin, :gh_not_found),
+         :ok <- validate_branch_name(head_branch, git_bin, deps),
          :ok <- ensure_workspace_has_changes(workspace_path, git_bin, deps),
          {:ok, remote_url} <- git_output(workspace_path, git_bin, ["remote", "get-url", "origin"], deps),
          {:ok, repo} <- parse_remote_url(remote_url),
@@ -69,6 +70,34 @@ defmodule SymphonyElixir.GitHubPrPublisher do
     case deps[key].() do
       nil -> {:error, error}
       path -> {:ok, path}
+    end
+  end
+
+  defp validate_branch_name("", _git_bin, _deps), do: {:error, {:invalid_branch_name, :empty}}
+
+  defp validate_branch_name("-" <> _rest, _git_bin, _deps), do: {:error, {:invalid_branch_name, :leading_dash}}
+
+  defp validate_branch_name(branch, git_bin, deps) when is_binary(branch) do
+    cond do
+      String.match?(branch, ~r/[\x00-\x1F\x7F]/) ->
+        {:error, {:invalid_branch_name, :control_character}}
+
+      String.match?(branch, ~r/\s/) ->
+        {:error, {:invalid_branch_name, :whitespace}}
+
+      String.contains?(branch, "..") ->
+        {:error, {:invalid_branch_name, :dotdot}}
+
+      true ->
+        validate_branch_name_with_git(branch, git_bin, deps)
+    end
+  end
+
+  defp validate_branch_name_with_git(branch, git_bin, deps) do
+    case run_command(git_bin, ["check-ref-format", "--branch", branch], deps, stderr_to_stdout: true) do
+      {:ok, {_output, 0}} -> :ok
+      {:ok, {_output, _status}} -> {:error, {:invalid_branch_name, :git_check_ref_format}}
+      {:error, reason} -> {:error, {:git_command_failed, ["check-ref-format", "--branch", branch], reason}}
     end
   end
 

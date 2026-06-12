@@ -14,6 +14,9 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
         send(parent, {:command, cmd, args, opts})
 
         case {cmd, args} do
+          {"/bin/git", ["check-ref-format", "--branch", _branch]} ->
+            {:ok, {"", 0}}
+
           {"/bin/git", ["-C", "/work/LAB-236", "status", "--porcelain", "--", "." | _pathspecs]} ->
             {:ok, {" M docs/file.md\n?? docs/new.md\n", 0}}
 
@@ -67,6 +70,7 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
     assert {:ok, %{"number" => 236, "url" => "https://github.com/octo/repo/pull/236"}} =
              GitHubPrPublisher.publish_workspace("/work/LAB-236", "aenima611111/lab-236", issue, deps)
 
+    assert_received {:command, "/bin/git", ["check-ref-format", "--branch", "aenima611111/lab-236"], _opts}
     assert_received {:command, "/bin/git", ["-C", "/work/LAB-236", "checkout", "-B", "aenima611111/lab-236"], _opts}
     assert_received {:command, "/bin/git", ["-C", "/work/LAB-236", "add", "-A", "--", ".", ":!.symphony-review-verdict.json", ":!.symphony-review-verdict-*.json"], _opts}
     assert_received {:command, "/bin/git", ["-C", "/work/LAB-236", "push", "--force-with-lease", "-u", "origin", "HEAD:refs/heads/aenima611111/lab-236"], _opts}
@@ -99,6 +103,7 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
       find_git_bin: fn -> "/bin/git" end,
       find_gh_bin: fn -> "/bin/gh" end,
       run_command: fn
+        "/bin/git", ["check-ref-format", "--branch", "feature/clean"], _opts -> {:ok, {"", 0}}
         "/bin/git", ["-C", "/work/clean", "status", "--porcelain", "--", "." | _pathspecs], _opts -> {:ok, {"", 0}}
       end
     }
@@ -138,6 +143,9 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
       find_git_bin: fn -> "/bin/git" end,
       find_gh_bin: fn -> "/bin/gh" end,
       run_command: fn
+        "/bin/git", ["check-ref-format", "--branch", "feature/unsupported"], _opts ->
+          {:ok, {"", 0}}
+
         "/bin/git", ["-C", "/work/unsupported", "status", "--porcelain", "--", "." | _pathspecs], _opts ->
           {:ok, {" M file.txt\n", 0}}
 
@@ -165,6 +173,9 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
         send(parent, {:command, cmd, args, opts})
 
         case {cmd, args} do
+          {"/bin/git", ["check-ref-format", "--branch", _branch]} ->
+            {:ok, {"", 0}}
+
           {"/bin/git", ["-C", "/work/no-identity", "status", "--porcelain", "--", "." | _pathspecs]} ->
             {:ok, {" M README.md\n", 0}}
 
@@ -236,6 +247,9 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
       find_git_bin: fn -> "/bin/git" end,
       find_gh_bin: fn -> "/bin/gh" end,
       run_command: fn
+        "/bin/git", ["check-ref-format", "--branch", "feature/no-staged"], _opts ->
+          {:ok, {"", 0}}
+
         "/bin/git", ["-C", "/work/no-staged", "status", "--porcelain", "--", "." | _pathspecs], _opts ->
           {:ok, {" M file.txt\n", 0}}
 
@@ -270,6 +284,9 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
       find_git_bin: fn -> "/bin/git" end,
       find_gh_bin: fn -> "/bin/gh" end,
       run_command: fn
+        "/bin/git", ["check-ref-format", "--branch", "feature/no-default"], _opts ->
+          {:ok, {"", 0}}
+
         "/bin/git", ["-C", "/work/no-default", "status", "--porcelain", "--", "." | _pathspecs], _opts ->
           {:ok, {" M file.txt\n", 0}}
 
@@ -298,6 +315,9 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
       find_git_bin: fn -> "/bin/git" end,
       find_gh_bin: fn -> "/bin/gh" end,
       run_command: fn
+        "/bin/git", ["check-ref-format", "--branch", "feature/blank-default"], _opts ->
+          {:ok, {"", 0}}
+
         "/bin/git", ["-C", "/work/blank-default", "status", "--porcelain", "--", "." | _pathspecs], _opts ->
           {:ok, {" M file.txt\n", 0}}
 
@@ -326,6 +346,9 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
       find_git_bin: fn -> "/bin/git" end,
       find_gh_bin: fn -> "/bin/gh" end,
       run_command: fn
+        "/bin/git", ["check-ref-format", "--branch", "feature/error-default"], _opts ->
+          {:ok, {"", 0}}
+
         "/bin/git", ["-C", "/work/error-default", "status", "--porcelain", "--", "." | _pathspecs], _opts ->
           {:ok, {" M file.txt\n", 0}}
 
@@ -359,6 +382,9 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
         send(parent, {:command, cmd, args, opts})
 
         case {cmd, args} do
+          {"/bin/git", ["check-ref-format", "--branch", _branch]} ->
+            {:ok, {"", 0}}
+
           {"/bin/git", ["-C", "/work/LAB-238", "status", "--porcelain", "--", "." | _pathspecs]} ->
             {:ok, {" M lib/file.ex\n", 0}}
 
@@ -421,6 +447,9 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
         send(parent, {:command, cmd, args, opts})
 
         case {cmd, args} do
+          {"/bin/git", ["check-ref-format", "--branch", _branch]} ->
+            {:ok, {"", 0}}
+
           {"/bin/git", ["-C", "/work/master-repo", "status", "--porcelain", "--", "." | _pathspecs]} ->
             {:ok, {" M README.md\n", 0}}
 
@@ -476,6 +505,9 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
       find_git_bin: fn -> "/bin/git" end,
       find_gh_bin: fn -> "/bin/gh" end,
       run_command: fn
+        "/bin/git", ["check-ref-format", "--branch", "feature/no-url"], _opts ->
+          {:ok, {"", 0}}
+
         "/bin/git", ["-C", "/work/no-url", "status", "--porcelain", "--", "." | _pathspecs], _opts ->
           {:ok, {" M file.txt\n", 0}}
 
@@ -507,5 +539,40 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
 
     assert {:error, :pr_url_not_found} =
              GitHubPrPublisher.publish_workspace("/work/no-url", "feature/no-url", %Issue{identifier: "LAB-241"}, deps)
+  end
+
+  test "rejects unsafe branch names before running git workspace commands" do
+    invalid_branches = [
+      {"", :empty},
+      {"-foo", :leading_dash},
+      {"feature/has space", :whitespace},
+      {"feature..name", :dotdot},
+      {"feature/\nname", :control_character}
+    ]
+
+    for {branch, reason} <- invalid_branches do
+      deps = %{
+        find_git_bin: fn -> "/bin/git" end,
+        find_gh_bin: fn -> "/bin/gh" end,
+        run_command: fn _cmd, _args, _opts -> flunk("commands should not run for invalid branch #{inspect(branch)}") end
+      }
+
+      assert {:error, {:invalid_branch_name, ^reason}} =
+               GitHubPrPublisher.publish_workspace("/work/unsafe", branch, %Issue{identifier: "LAB-420"}, deps)
+    end
+  end
+
+  test "rejects branch names that git check-ref-format rejects" do
+    deps = %{
+      find_git_bin: fn -> "/bin/git" end,
+      find_gh_bin: fn -> "/bin/gh" end,
+      run_command: fn
+        "/bin/git", ["check-ref-format", "--branch", "feature.lock"], _opts -> {:ok, {"invalid ref\n", 1}}
+        _cmd, _args, _opts -> flunk("workspace commands should not run after git rejects branch")
+      end
+    }
+
+    assert {:error, {:invalid_branch_name, :git_check_ref_format}} =
+             GitHubPrPublisher.publish_workspace("/work/unsafe", "feature.lock", %Issue{identifier: "LAB-420"}, deps)
   end
 end
