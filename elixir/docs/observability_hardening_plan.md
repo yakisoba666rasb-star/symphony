@@ -117,9 +117,15 @@ Design (three independent fixes plus one operator step):
    Done-sync lines log only the UUID. Audit the handoff/Done-sync paths
    and add `issue_identifier` where missing so `grep LAB-NNN` finds the
    full lifecycle.
-4. **Operator step (not repo code): logrotate.** Add a logrotate config
-   for `/var/log/symphony-ryo/*.log` (size-based, e.g. 50 MB x 5). After
-   fix 1, growth should be negligible; rotation is the backstop.
+4. **Operator step: install logrotate.** Run
+   `/home/ryo/src/symphony/ops/ryo/install-logrotate.sh` on the host. The
+   script installs `ops/ryo/logrotate/symphony-ryo` to
+   `/etc/logrotate.d/symphony-ryo` and validates the installed file with
+   `sudo logrotate -d /etc/logrotate.d/symphony-ryo`. After fix 1, growth
+   should be negligible; rotation is the backstop. If this config is not
+   installed, the files written by `StandardOutput=append:` and
+   `StandardError=append:` (`/var/log/symphony-ryo/engine.log` and
+   `/var/log/symphony-ryo/engine-error.log`) can grow without bound.
 
 Acceptance:
 
