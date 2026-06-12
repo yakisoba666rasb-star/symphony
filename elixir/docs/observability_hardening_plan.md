@@ -173,7 +173,9 @@ Design:
      report (markdown to stdout/file): per-leg timestamps, latencies, and
      pass/fail per leg.
   4. `--up-to in_review` mode stops before merge so the run is fully
-     unattended for CI; the full mode is for release verification.
+     unattended for CI; `--up-to done` is the explicit full-mode value, and
+     omitting `--up-to` defaults to `done`. Other `--up-to` values are rejected
+     before the live probe starts.
 - The runner observes the runtime through GitHub + Linear APIs and does not
   mutate orchestrator state.
 - Includes the H6 restart scenario as an optional flag (below).

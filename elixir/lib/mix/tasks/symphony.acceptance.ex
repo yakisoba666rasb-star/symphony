@@ -10,6 +10,8 @@ defmodule Mix.Tasks.Symphony.Acceptance do
       mix symphony.acceptance --repo owner/name --label symphony-auto --up-to in_review
 
   Full mode waits through Done. `--up-to in_review` stops before human merge.
+  Accepted `--up-to` values are `done` and `in_review`; omitting the option
+  defaults to `done`.
   """
 
   @switches [
@@ -27,6 +29,33 @@ defmodule Mix.Tasks.Symphony.Acceptance do
   def run(args) do
     Mix.Task.run("app.start")
 
+    {opts, runner_opts} = parse_args(args)
+
+    case AcceptanceRunner.run(runner_opts) do
+      {:ok, %{report: report, status: status}} ->
+        maybe_write_output(opts[:output], report)
+        Mix.shell().info(report)
+
+        if status == :passed do
+          :ok
+        else
+          Mix.raise("symphony.acceptance failed")
+        end
+
+      {:error, reason} ->
+        Mix.raise("symphony.acceptance failed: #{inspect(reason)}")
+    end
+  end
+
+  @doc false
+  @spec runner_opts_for_args([String.t()]) :: keyword()
+  def runner_opts_for_args(args) do
+    {_opts, runner_opts} = parse_args(args)
+
+    runner_opts
+  end
+
+  defp parse_args(args) do
     {opts, _argv, invalid} = OptionParser.parse(args, strict: @switches)
 
     if invalid != [] do
@@ -45,25 +74,16 @@ defmodule Mix.Tasks.Symphony.Acceptance do
       ]
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
-    case AcceptanceRunner.run(runner_opts) do
-      {:ok, %{report: report, status: status}} ->
-        maybe_write_output(opts[:output], report)
-        Mix.shell().info(report)
-
-        if status == :passed do
-          :ok
-        else
-          Mix.raise("symphony.acceptance failed")
-        end
-
-      {:error, reason} ->
-        Mix.raise("symphony.acceptance failed: #{inspect(reason)}")
-    end
+    {opts, runner_opts}
   end
 
+  defp normalize_up_to("done"), do: :done
   defp normalize_up_to("in_review"), do: :in_review
   defp normalize_up_to(nil), do: :done
-  defp normalize_up_to(_other), do: :done
+
+  defp normalize_up_to(other) do
+    Mix.raise("Invalid --up-to value #{inspect(other)}. Accepted values: done, in_review")
+  end
 
   defp maybe_write_output(nil, _report), do: :ok
 
