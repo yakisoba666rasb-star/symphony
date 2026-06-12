@@ -713,8 +713,6 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   @spec expand_local_workspace_root(Path.t() | nil, Path.t()) :: Path.t()
-  def expand_local_workspace_root(workspace_root, base_dir \\ File.cwd!())
-
   def expand_local_workspace_root(workspace_root, base_dir)
       when is_binary(workspace_root) and workspace_root != "" and is_binary(base_dir) do
     Path.expand(workspace_root, base_dir)
