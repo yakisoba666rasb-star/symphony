@@ -38,6 +38,10 @@ Project description or external link. Static `repository.project_routes` entries
 win over dynamic routes for the same repository. A project with multiple
 repository URLs, a repository claimed by multiple projects, or a repository
 outside the allowlist is ignored and logged only when the rejection set changes.
+Because Linear Project metadata can influence routing, only users trusted to
+route agent execution should be able to edit those projects. See
+[GitHub Intake Prompt-Injection Threat Model](github_intake_threat_model.md) for
+the related trust assumptions.
 
 Keep PR, issue, and cross-repository reference links out of the Project
 description when dynamic discovery is enabled. A description that contains the

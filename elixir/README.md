@@ -159,7 +159,9 @@ Notes:
   overrides when names differ or a static mapping should win. Route keys must use GitHub repository
   slug form (`owner/repo`), not HTTPS or SSH URLs. See
   [Repository and Linear Project Routing](docs/project_routing.md) for the shared dispatch and
-  project-assignment contract:
+  project-assignment contract. See
+  [GitHub Intake Prompt-Injection Threat Model](docs/github_intake_threat_model.md) before enabling
+  GitHub intake promotion shortcuts or dynamic route editing by a broader group:
 
 ```yaml
 tracker:

@@ -28,6 +28,11 @@ Ownership model:
 - Agents may only comment on Linear (`commentCreate`/`commentUpdate`);
   they never move issue states or projects.
 
+Security note: GitHub issue text is externally authored and untrusted until a
+human Backlog -> Todo promotion or the configured label gate promotes it. See
+[GitHub Intake Prompt-Injection Threat Model](github_intake_threat_model.md)
+before changing promotion behavior.
+
 ## Loop Legs and Current Status
 
 | # | Leg | Status |
@@ -166,6 +171,10 @@ Design:
   `agent.max_concurrent_agents`.
 - Default `[]` keeps current behavior; zero-touch is an explicit opt-in
   per label (for example `symphony-auto`).
+- Security boundary: the label gate is only valid when applying the configured
+  labels is limited to trusted repository users with write or triage
+  permission. See
+  [GitHub Intake Prompt-Injection Threat Model](github_intake_threat_model.md).
 
 ### W6: Zero-touch E2E measurement
 
