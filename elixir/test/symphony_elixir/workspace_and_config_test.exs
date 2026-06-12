@@ -238,6 +238,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert message =~ "interval_ms must be greater than or equal to polling.interval_ms"
   end
 
+  test "workflow config defaults Linear terminal states explicitly" do
+    assert {:ok, settings} = Schema.parse(%{})
+
+    assert settings.tracker.terminal_states == [
+             "Closed",
+             "Cancelled",
+             "Canceled",
+             "Duplicate",
+             "Done"
+           ]
+  end
+
   test "workflow config supports review rework interval gating" do
     assert {:ok, settings} = Schema.parse(%{})
     assert settings.review_rework.interval_ms == 120_000
@@ -1732,6 +1744,51 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  for terminal_state <- ["Done", "Closed", "Cancelled", "Canceled", "Duplicate"] do
+    @terminal_state terminal_state
+
+    test "terminal Linear state #{@terminal_state} is not dispatch-eligible" do
+      state = %Orchestrator.State{
+        max_concurrent_agents: 3,
+        running: %{},
+        claimed: MapSet.new(),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      issue = %Issue{
+        id: "terminal-#{@terminal_state}",
+        identifier: "MT-#{String.upcase(@terminal_state)}",
+        title: "Terminal work",
+        state: @terminal_state
+      }
+
+      refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    end
+
+    test "dispatch revalidation skips issue refreshed in terminal Linear state #{@terminal_state}" do
+      stale_issue = %Issue{
+        id: "terminal-revalidation-#{@terminal_state}",
+        identifier: "MT-TERMINAL-#{String.upcase(@terminal_state)}",
+        title: "Stale terminal work",
+        state: "Todo"
+      }
+
+      refreshed_issue = %Issue{
+        stale_issue
+        | state: @terminal_state
+      }
+
+      fetcher = fn [issue_id] ->
+        assert issue_id == stale_issue.id
+        {:ok, [refreshed_issue]}
+      end
+
+      assert {:skip, ^refreshed_issue} =
+               Orchestrator.revalidate_issue_for_dispatch_for_test(stale_issue, fetcher)
+    end
   end
 
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do

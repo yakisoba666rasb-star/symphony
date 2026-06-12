@@ -43,6 +43,7 @@ defmodule SymphonyElixir.Config.Schema do
     import Ecto.Changeset
 
     @primary_key false
+    @linear_terminal_states ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
 
     embedded_schema do
       field(:kind, :string)
@@ -53,7 +54,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:all_projects, :boolean, default: false)
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
-      field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
+      field(:terminal_states, {:array, :string}, default: @linear_terminal_states)
       field(:review_state, :string, default: "In Review")
     end
 
