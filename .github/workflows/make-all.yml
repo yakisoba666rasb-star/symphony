@@ -30,7 +30,7 @@ jobs:
           path: |
             elixir/deps
             elixir/_build
-          key: ${{ runner.os }}-mix-${{ hashFiles('elixir/mix.lock') }}
+          key: ${{ runner.os }}-mix-${{ hashFiles('elixir/mix.lock', 'elixir/mix.exs', 'elixir/mise.toml', '.github/workflows/make-all.yml') }}
           restore-keys: |
             ${{ runner.os }}-mix-
 
