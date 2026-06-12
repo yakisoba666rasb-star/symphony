@@ -102,9 +102,12 @@ defmodule SymphonyElixir.Config.Schema do
     use Ecto.Schema
     import Ecto.Changeset
 
+    @fields [:enabled, :mirror_labels, :state, :todo_labels, :interval_ms, :retry_ttl_ms, :limit]
+
     @primary_key false
     embedded_schema do
       field(:enabled, :boolean, default: false)
+      field(:mirror_labels, :boolean, default: true)
       field(:state, :string, default: "Backlog")
       field(:todo_labels, {:array, :string}, default: [])
       field(:interval_ms, :integer, default: 300_000)
@@ -115,7 +118,7 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:enabled, :state, :todo_labels, :interval_ms, :retry_ttl_ms, :limit], empty_values: [])
+      |> cast(attrs, @fields, empty_values: [])
       |> validate_required([:state])
       |> validate_number(:interval_ms, greater_than: 0)
       |> validate_number(:retry_ttl_ms, greater_than: 0)

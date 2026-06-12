@@ -523,6 +523,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                team_id: "team-1",
                state_id: "state-backlog",
                project_id: "project-1",
+               label_ids: ["label-bug"],
                title: "Fix source sync",
                description: "Repo: octo/repo"
              })
@@ -532,6 +533,95 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert create_issue_input.teamId == "team-1"
     assert create_issue_input.stateId == "state-backlog"
     assert create_issue_input.projectId == "project-1"
+    assert create_issue_input.labelIds == ["label-bug"]
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok,
+         %{
+           "data" => %{
+             "team" => %{
+               "labels" => %{
+                 "nodes" => [
+                   %{"id" => "label-bug", "name" => "bug"}
+                 ]
+               }
+             }
+           }
+         }},
+        {:ok,
+         %{
+           "data" => %{
+             "issueLabelCreate" => %{
+               "success" => true,
+               "issueLabel" => %{"id" => "label-docs", "name" => "Documentation"}
+             }
+           }
+         }}
+      ]
+    )
+
+    assert {:ok, ["label-bug", "label-docs"]} =
+             Adapter.resolve_or_create_github_intake_label_ids("team-1", ["Bug", "Documentation"])
+
+    assert_receive {:graphql_called, team_labels_query, %{teamId: "team-1", first: 250}}
+    assert team_labels_query =~ "labels"
+    assert_receive {:graphql_called, create_label_query, %{input: create_label_input}}
+    assert create_label_query =~ "issueLabelCreate"
+    assert create_label_input.teamId == "team-1"
+    assert create_label_input.name == "Documentation"
+    assert create_label_input.color == "#bec2c8"
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"team" => %{"labels" => %{"nodes" => [%{id: "label-infra", name: "Infra"}]}}}}}
+    )
+
+    assert {:ok, ["label-infra"]} = Adapter.resolve_or_create_github_intake_label_ids("team-1", ["infra"])
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :labels_down})
+
+    assert {:error, :labels_down} = Adapter.resolve_or_create_github_intake_label_ids("team-1", ["bug"])
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{}}})
+
+    assert {:error, :github_intake_team_labels_not_found} =
+             Adapter.resolve_or_create_github_intake_label_ids("team-1", ["bug"])
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok, %{"data" => %{"team" => %{"labels" => %{"nodes" => [%{"id" => "label-nameless"}]}}}}},
+        {:ok, %{"data" => %{"issueLabelCreate" => %{"success" => false}}}}
+      ]
+    )
+
+    assert {:error, :github_intake_label_create_failed} =
+             Adapter.resolve_or_create_github_intake_label_ids("team-1", ["bug"])
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok, %{"data" => %{"team" => %{"labels" => %{"nodes" => []}}}}},
+        {:ok, %{"data" => %{"issueLabelCreate" => %{"success" => true, "issueLabel" => %{}}}}}
+      ]
+    )
+
+    assert {:error, :github_intake_label_create_failed} =
+             Adapter.resolve_or_create_github_intake_label_ids("team-1", ["bug"])
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok, %{"data" => %{"team" => %{"labels" => %{"nodes" => []}}}}},
+        {:error, :label_create_down}
+      ]
+    )
+
+    assert {:error, :label_create_down} = Adapter.resolve_or_create_github_intake_label_ids("team-1", ["bug"])
+
+    flush_graphql_calls()
 
     Process.put(
       {FakeLinearClient, :graphql_result},
@@ -639,6 +729,14 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert {:error, :attachment_create_down} =
              Adapter.create_issue_attachment("issue-1", "GitHub issue #67", "https://github.com/octo/repo/issues/67")
+  end
+
+  defp flush_graphql_calls do
+    receive do
+      {:graphql_called, _query, _variables} -> flush_graphql_calls()
+    after
+      0 -> :ok
+    end
   end
 
   test "phoenix observability api preserves state, issue, and refresh responses" do

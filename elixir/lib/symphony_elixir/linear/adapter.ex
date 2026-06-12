@@ -135,6 +135,31 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @team_labels_query """
+  query SymphonyTeamLabels($teamId: String!, $first: Int!) {
+    team(id: $teamId) {
+      labels(first: $first) {
+        nodes {
+          id
+          name
+        }
+      }
+    }
+  }
+  """
+
+  @create_issue_label_mutation """
+  mutation SymphonyCreateGitHubIntakeLabel($input: IssueLabelCreateInput!) {
+    issueLabelCreate(input: $input) {
+      success
+      issueLabel {
+        id
+        name
+      }
+    }
+  }
+  """
+
   @create_attachment_mutation """
   mutation SymphonyCreateGitHubIssueAttachment($input: AttachmentCreateInput!) {
     attachmentCreate(input: $input) {
@@ -145,6 +170,8 @@ defmodule SymphonyElixir.Linear.Adapter do
     }
   }
   """
+
+  @github_intake_label_color "#bec2c8"
 
   @state_lookup_query """
   query SymphonyResolveStateId($issueId: String!, $stateName: String!) {
@@ -339,6 +366,7 @@ defmodule SymphonyElixir.Linear.Adapter do
         teamId: Map.get(attrs, :team_id),
         stateId: Map.get(attrs, :state_id),
         projectId: Map.get(attrs, :project_id),
+        labelIds: Map.get(attrs, :label_ids),
         title: Map.get(attrs, :title),
         description: Map.get(attrs, :description)
       }
@@ -353,6 +381,17 @@ defmodule SymphonyElixir.Linear.Adapter do
       false -> {:error, :github_backlog_issue_create_failed}
       {:error, reason} -> {:error, reason}
       _ -> {:error, :github_backlog_issue_create_failed}
+    end
+  end
+
+  @spec resolve_or_create_github_intake_label_ids(String.t(), [String.t()]) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def resolve_or_create_github_intake_label_ids(team_id, labels)
+      when is_binary(team_id) and is_list(labels) do
+    normalized_labels = normalize_label_names(labels)
+
+    with {:ok, existing_labels} <- fetch_team_labels(team_id) do
+      resolve_or_create_label_ids(team_id, normalized_labels, existing_label_ids_by_name(existing_labels))
     end
   end
 
@@ -374,6 +413,88 @@ defmodule SymphonyElixir.Linear.Adapter do
   defp client_module do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
   end
+
+  defp fetch_team_labels(team_id) do
+    with {:ok, response} <- client_module().graphql(@team_labels_query, %{teamId: team_id, first: 250}),
+         labels when is_list(labels) <- get_in(response, ["data", "team", "labels", "nodes"]) do
+      {:ok, labels}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :github_intake_team_labels_not_found}
+    end
+  end
+
+  defp create_issue_label(team_id, name) do
+    input = %{teamId: team_id, name: name, color: @github_intake_label_color}
+
+    with {:ok, response} <- client_module().graphql(@create_issue_label_mutation, %{input: input}),
+         true <- get_in(response, ["data", "issueLabelCreate", "success"]) == true,
+         label_id when is_binary(label_id) <- get_in(response, ["data", "issueLabelCreate", "issueLabel", "id"]) do
+      {:ok, label_id}
+    else
+      false -> {:error, :github_intake_label_create_failed}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :github_intake_label_create_failed}
+    end
+  end
+
+  defp resolve_or_create_label_ids(team_id, labels, known_labels) do
+    labels
+    |> Enum.reduce_while({:ok, [], known_labels}, &resolve_or_create_label_id(team_id, &1, &2))
+    |> case do
+      {:ok, ids, _known_labels} -> {:ok, Enum.reverse(ids)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp resolve_or_create_label_id(team_id, label, {:ok, ids, known_labels}) do
+    label_key = normalized_label_name(label)
+
+    case Map.fetch(known_labels, label_key) do
+      {:ok, label_id} -> {:cont, {:ok, [label_id | ids], known_labels}}
+      :error -> create_and_track_label_id(team_id, label, label_key, ids, known_labels)
+    end
+  end
+
+  defp create_and_track_label_id(team_id, label, label_key, ids, known_labels) do
+    case create_issue_label(team_id, label) do
+      {:ok, label_id} ->
+        {:cont, {:ok, [label_id | ids], Map.put(known_labels, label_key, label_id)}}
+
+      {:error, reason} ->
+        {:halt, {:error, reason}}
+    end
+  end
+
+  defp existing_label_ids_by_name(labels) do
+    labels
+    |> Enum.filter(&issue_label_id?/1)
+    |> Map.new(fn label ->
+      {normalized_label_name(Map.get(label, "name") || Map.get(label, :name)), Map.get(label, "id") || Map.get(label, :id)}
+    end)
+  end
+
+  defp normalize_label_names(labels) do
+    labels
+    |> Enum.flat_map(fn
+      label when is_binary(label) ->
+        case String.trim(label) do
+          "" -> []
+          trimmed -> [trimmed]
+        end
+
+      _ ->
+        []
+    end)
+    |> Enum.uniq_by(&normalized_label_name/1)
+  end
+
+  defp normalized_label_name(label) when is_binary(label), do: label |> String.trim() |> String.downcase()
+  defp normalized_label_name(_label), do: ""
+
+  defp issue_label_id?(%{"id" => id}) when is_binary(id), do: true
+  defp issue_label_id?(%{id: id}) when is_binary(id), do: true
+  defp issue_label_id?(_label), do: false
 
   defp fetch_team_projects_with_query(query, team_key) do
     with {:ok, response} <- client_module().graphql(query, %{teamKey: team_key, first: 250}),

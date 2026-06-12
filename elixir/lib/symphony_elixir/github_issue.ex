@@ -159,7 +159,7 @@ defmodule SymphonyElixir.GitHubIssue do
         issues
         |> Enum.reduce(
           {:ok, acc, attempts},
-          &sync_single_open_issue_result(&1, &2, repo, target, linear_adapter, now_ms)
+          &sync_single_open_issue_result(&1, &2, repo, settings, target, linear_adapter, now_ms)
         )
 
       {:error, :no_project_match} ->
@@ -187,8 +187,8 @@ defmodule SymphonyElixir.GitHubIssue do
     end
   end
 
-  defp sync_single_open_issue_result(issue, {:ok, acc, attempts}, repo, target, linear_adapter, now_ms) do
-    case sync_single_open_issue(repo, issue, target, linear_adapter) do
+  defp sync_single_open_issue_result(issue, {:ok, acc, attempts}, repo, settings, target, linear_adapter, now_ms) do
+    case sync_single_open_issue(repo, issue, settings, target, linear_adapter) do
       {:ok, :created} ->
         {:ok, %{acc | created: acc.created + 1}, clear_attempt(attempts, issue)}
 
@@ -250,17 +250,12 @@ defmodule SymphonyElixir.GitHubIssue do
 
   defp current_time_ms(_deps), do: System.monotonic_time(:millisecond)
 
-  defp sync_single_open_issue(repo, %{url: url} = issue, target, linear_adapter) when is_binary(url) do
+  defp sync_single_open_issue(repo, %{url: url} = issue, settings, target, linear_adapter) when is_binary(url) do
     with {:ok, false} <- linear_adapter.github_issue_synced?(url),
          {:ok, nil} <- linear_adapter.find_github_issue_by_description(url),
+         {:ok, label_ids} <- github_intake_label_ids(settings, issue, target, linear_adapter),
          {:ok, linear_issue} <-
-           linear_adapter.create_github_backlog_issue(%{
-             team_id: target.team_id,
-             state_id: target.state_id,
-             project_id: target.project_id,
-             title: github_issue_title(issue),
-             description: github_issue_description(repo, issue)
-           }),
+           linear_adapter.create_github_backlog_issue(github_intake_create_attrs(repo, issue, target, label_ids)),
          issue_id when is_binary(issue_id) <- linear_issue["id"] || linear_issue[:id],
          :ok <- linear_adapter.create_issue_attachment(issue_id, github_issue_attachment_title(issue), url) do
       Logger.info(
@@ -287,7 +282,56 @@ defmodule SymphonyElixir.GitHubIssue do
     end
   end
 
-  defp sync_single_open_issue(_repo, _issue, _target, _linear_adapter), do: {:ok, :skipped}
+  defp sync_single_open_issue(_repo, _issue, _settings, _target, _linear_adapter), do: {:ok, :skipped}
+
+  defp github_intake_create_attrs(repo, issue, target, label_ids) do
+    %{
+      team_id: target.team_id,
+      state_id: target.state_id,
+      project_id: target.project_id,
+      label_ids: label_ids,
+      title: github_issue_title(issue),
+      description: github_issue_description(repo, issue)
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp github_intake_label_ids(%{github_intake: %{mirror_labels: true}}, issue, target, linear_adapter) do
+    labels = issue |> Map.get(:labels, []) |> normalized_label_names()
+
+    cond do
+      labels == [] ->
+        {:ok, nil}
+
+      not function_exported?(linear_adapter, :resolve_or_create_github_intake_label_ids, 2) ->
+        Logger.warning(
+          "Skipping GitHub issue label mirroring for url=#{Map.get(issue, :url)}; " <>
+            "Linear adapter does not support label resolution"
+        )
+
+        {:ok, nil}
+
+      true ->
+        case linear_adapter.resolve_or_create_github_intake_label_ids(target.team_id, labels) do
+          {:ok, []} ->
+            {:ok, nil}
+
+          {:ok, label_ids} ->
+            {:ok, label_ids}
+
+          {:error, reason} ->
+            Logger.warning(
+              "Skipping GitHub issue label mirroring for url=#{Map.get(issue, :url)}; " <>
+                "failed to resolve Linear labels: #{inspect(reason)}"
+            )
+
+            {:ok, nil}
+        end
+    end
+  end
+
+  defp github_intake_label_ids(_settings, _issue, _target, _linear_adapter), do: {:ok, nil}
 
   defp repair_github_issue_attachment(repo, %{url: url} = issue, existing_issue, linear_adapter) do
     with issue_id when is_binary(issue_id) <- existing_issue["id"] || existing_issue[:id],
@@ -401,6 +445,23 @@ defmodule SymphonyElixir.GitHubIssue do
   end
 
   defp github_issue_matches_todo_label?(_issue, _todo_labels), do: false
+
+  defp normalized_label_names(labels) when is_list(labels) do
+    labels
+    |> Enum.flat_map(fn
+      label when is_binary(label) ->
+        case String.trim(label) do
+          "" -> []
+          trimmed -> [trimmed]
+        end
+
+      _ ->
+        []
+    end)
+    |> Enum.uniq_by(&normalized_label_name/1)
+  end
+
+  defp normalized_label_names(_labels), do: []
 
   defp normalized_label_name(label) when is_binary(label) do
     label

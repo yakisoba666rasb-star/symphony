@@ -42,6 +42,11 @@ defmodule SymphonyElixir.GitHubIssueTest do
       end
     end
 
+    def resolve_or_create_github_intake_label_ids(team_id, labels) do
+      send_recipient({:resolve_or_create_github_intake_label_ids, team_id, labels})
+      Application.get_env(:symphony_elixir, :github_intake_label_ids_result, {:ok, Enum.map(labels, &"label-#{&1}")})
+    end
+
     def create_issue_attachment(issue_id, title, url) do
       send_recipient({:create_issue_attachment, issue_id, title, url})
       Application.get_env(:symphony_elixir, :github_intake_attachment_result, :ok)
@@ -53,6 +58,14 @@ defmodule SymphonyElixir.GitHubIssueTest do
         _ -> :ok
       end
     end
+  end
+
+  defmodule FakeLinearIntakeNoLabelAdapter do
+    def github_issue_synced?(url), do: FakeLinearIntakeAdapter.github_issue_synced?(url)
+    def find_github_issue_by_description(url), do: FakeLinearIntakeAdapter.find_github_issue_by_description(url)
+    def resolve_github_intake_target(team_key, state_name, aliases), do: FakeLinearIntakeAdapter.resolve_github_intake_target(team_key, state_name, aliases)
+    def create_github_backlog_issue(attrs), do: FakeLinearIntakeAdapter.create_github_backlog_issue(attrs)
+    def create_issue_attachment(issue_id, title, url), do: FakeLinearIntakeAdapter.create_issue_attachment(issue_id, title, url)
   end
 
   defmodule FakeLinearProjectClient do
@@ -81,6 +94,7 @@ defmodule SymphonyElixir.GitHubIssueTest do
       :github_intake_description_issue,
       :github_intake_target_result,
       :github_intake_create_result,
+      :github_intake_label_ids_result,
       :github_intake_attachment_result,
       :github_intake_projects,
       :linear_client_module
@@ -167,6 +181,62 @@ defmodule SymphonyElixir.GitHubIssueTest do
     assert_received {:create_issue_attachment, "linear-1", "GitHub issue #67: Fix source sync", "https://github.com/octo/repo/issues/67"}
   end
 
+  test "sync mirrors GitHub labels into Linear issue label ids" do
+    deps =
+      single_issue_list_deps(
+        nil,
+        %{
+          "labels" => [
+            %{"name" => "Bug"},
+            %{"name" => "bug"},
+            %{"name" => " documentation "}
+          ]
+        }
+      )
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeAdapter, deps)
+
+    assert_received {:resolve_or_create_github_intake_label_ids, "team-1", ["Bug", "documentation"]}
+    assert_received {:create_github_backlog_issue, %{label_ids: ["label-Bug", "label-documentation"]}}
+  end
+
+  test "sync does not mirror GitHub labels when mirror_labels is disabled" do
+    settings = intake_settings(%{"github_intake" => %{"enabled" => true, "state" => "Backlog", "limit" => 25, "mirror_labels" => false}})
+    deps = single_issue_list_deps(nil, %{"labels" => [%{"name" => "bug"}]})
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(settings, FakeLinearIntakeAdapter, deps)
+
+    refute_received {:resolve_or_create_github_intake_label_ids, _team_id, _labels}
+    assert_received {:create_github_backlog_issue, attrs}
+    refute Map.has_key?(attrs, :label_ids)
+  end
+
+  test "sync creates issues without labels when label mirroring fails" do
+    Application.put_env(:symphony_elixir, :github_intake_label_ids_result, {:error, :linear_labels_down})
+
+    deps = single_issue_list_deps(nil, %{"labels" => [%{"name" => "bug"}]})
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeAdapter, deps)
+
+    assert_received {:resolve_or_create_github_intake_label_ids, "team-1", ["bug"]}
+    assert_received {:create_github_backlog_issue, attrs}
+    refute Map.has_key?(attrs, :label_ids)
+    assert_received {:create_issue_attachment, "linear-1", "GitHub issue #67: Fix source sync", "https://github.com/octo/repo/issues/67"}
+  end
+
+  test "sync creates issues without labels when adapter cannot mirror labels" do
+    deps = single_issue_list_deps(nil, %{"labels" => [%{"name" => "bug"}]})
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(intake_settings(), FakeLinearIntakeNoLabelAdapter, deps)
+
+    assert_received {:create_github_backlog_issue, attrs}
+    refute Map.has_key?(attrs, :label_ids)
+  end
+
   test "sync scans dynamically discovered project repository routes" do
     Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearProjectClient)
 
@@ -241,6 +311,30 @@ defmodule SymphonyElixir.GitHubIssueTest do
     assert_received {:resolve_github_intake_target, "LAB", "Todo", ["Symphony", "repo"]}
     refute_received {:resolve_github_intake_target, "LAB", "Backlog", ["Symphony", "repo"]}
     assert_received {:create_github_backlog_issue, %{state_id: "state-todo", title: "Promote me"}}
+  end
+
+  test "mirrored GitHub labels do not affect todo label promotion" do
+    deps =
+      single_issue_list_deps(
+        nil,
+        %{
+          "title" => "Only mirrored",
+          "labels" => [%{"name" => "bug"}]
+        }
+      )
+
+    settings =
+      intake_settings(%{
+        "github_intake" => %{"enabled" => true, "state" => "Backlog", "limit" => 25, "todo_labels" => ["symphony-auto"]}
+      })
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(settings, FakeLinearIntakeAdapter, deps)
+
+    assert_received {:resolve_or_create_github_intake_label_ids, "team-1", ["bug"]}
+    assert_received {:resolve_github_intake_target, "LAB", "Backlog", ["Symphony", "repo"]}
+    refute_received {:resolve_github_intake_target, "LAB", "Todo", ["Symphony", "repo"]}
+    assert_received {:create_github_backlog_issue, %{state_id: "state-backlog", label_ids: ["label-bug"]}}
   end
 
   test "sync keeps unlabeled issues in the configured intake state when todo labels are configured" do
@@ -1078,14 +1172,17 @@ defmodule SymphonyElixir.GitHubIssueTest do
              GitHubIssue.closed_at("octo/repo", "https://github.com/octo/repo/issues/67", invalid_json_deps)
   end
 
-  defp single_issue_list_deps(now_ms \\ nil) do
+  defp single_issue_list_deps(now_ms \\ nil, issue_overrides \\ %{}) do
     %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,
       run_command: fn "/tmp/fake-gh", _args, _opts ->
-        {:ok,
-         {Jason.encode!([
-            %{"number" => 67, "title" => "Fix source sync", "body" => "", "url" => "https://github.com/octo/repo/issues/67"}
-          ]), 0}}
+        issue =
+          Map.merge(
+            %{"number" => 67, "title" => "Fix source sync", "body" => "", "url" => "https://github.com/octo/repo/issues/67"},
+            issue_overrides
+          )
+
+        {:ok, {Jason.encode!([issue]), 0}}
       end,
       monotonic_time_ms: fn -> now_ms || System.monotonic_time(:millisecond) end
     }

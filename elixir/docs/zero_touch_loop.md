@@ -163,9 +163,16 @@ to Todo. That is the right safety default but blocks full zero-touch.
 Design:
 
 - New config `github_intake.todo_labels: []` (list of GitHub label names).
+- New config `github_intake.mirror_labels: true`. When enabled, GitHub issue
+  labels are mirrored to Linear issue labels during intake. Existing Linear
+  team labels are matched case-insensitively; missing labels are created with
+  the default color `#bec2c8`. Label lookup or creation failures are logged as
+  warnings and do not block Linear issue creation.
 - Add `labels` to the `gh issue list --json` fields. When an open issue
   carries any configured label, create the Linear issue directly in the
   tracker's first active state (Todo) instead of `github_intake.state`.
+- `todo_labels` promotion continues to use only GitHub labels from the intake
+  payload; mirrored Linear labels do not participate in the promotion gate.
 - Everything downstream is unchanged: dispatch still requires a uniquely
   resolved repository and project, and concurrency stays capped by
   `agent.max_concurrent_agents`.
@@ -204,6 +211,7 @@ Design:
 ```yaml
 github_intake:
   retry_ttl_ms: 3600000      # W1
+  mirror_labels: true        # LAB-422
   todo_labels: []            # W5
 done_sync:
   interval_ms: 120000        # W3

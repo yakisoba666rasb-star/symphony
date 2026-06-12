@@ -1178,6 +1178,19 @@ Additional normalization details:
 - `priority` -> integer only (non-integers become null)
 - `created_at` and `updated_at` -> parse ISO-8601 timestamps
 
+#### 11.3.1 GitHub Intake Label Mirroring
+
+GitHub issue intake MUST request GitHub issue labels. When `github_intake.mirror_labels` is true
+(the default), intake SHOULD mirror GitHub label names onto the created Linear issue:
+
+- Match Linear team labels by name case-insensitively.
+- Create missing Linear team labels with the default color `#bec2c8`.
+- Pass resolved label IDs as `labelIds` in the Linear issue create input.
+- Treat label lookup or creation failures as non-fatal: log a warning and create the issue without
+  mirrored labels.
+- Keep `github_intake.todo_labels` promotion based only on GitHub issue labels from the intake
+  payload; mirrored Linear labels MUST NOT affect the promotion gate.
+
 ### 11.4 Error Handling Contract
 
 RECOMMENDED error categories:
