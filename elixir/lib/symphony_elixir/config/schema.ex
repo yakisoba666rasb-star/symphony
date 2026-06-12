@@ -684,8 +684,8 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  @spec resolve_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil) :: map()
-  def resolve_turn_sandbox_policy(settings, workspace \\ nil) do
+  @spec resolve_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil, keyword()) :: map()
+  def resolve_turn_sandbox_policy(settings, workspace \\ nil, opts \\ []) do
     case settings.codex.turn_sandbox_policy do
       %{} = policy ->
         policy
@@ -693,7 +693,7 @@ defmodule SymphonyElixir.Config.Schema do
       _ ->
         workspace
         |> default_workspace_root(settings.workspace.root)
-        |> expand_local_workspace_root()
+        |> expand_local_workspace_root(Keyword.get(opts, :base_dir, File.cwd!()))
         |> default_turn_sandbox_policy()
     end
   end
@@ -710,6 +710,18 @@ defmodule SymphonyElixir.Config.Schema do
         |> default_workspace_root(settings.workspace.root)
         |> default_runtime_turn_sandbox_policy(opts)
     end
+  end
+
+  @spec expand_local_workspace_root(Path.t() | nil, Path.t()) :: Path.t()
+  def expand_local_workspace_root(workspace_root, base_dir \\ File.cwd!())
+
+  def expand_local_workspace_root(workspace_root, base_dir)
+      when is_binary(workspace_root) and workspace_root != "" and is_binary(base_dir) do
+    Path.expand(workspace_root, base_dir)
+  end
+
+  def expand_local_workspace_root(_workspace_root, _base_dir) do
+    Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
   end
 
   @spec normalize_issue_state(String.t()) :: String.t()
@@ -944,7 +956,8 @@ defmodule SymphonyElixir.Config.Schema do
     if Keyword.get(opts, :remote, false) do
       {:ok, default_turn_sandbox_policy(workspace_root)}
     else
-      with expanded_workspace_root <- expand_local_workspace_root(workspace_root),
+      with expanded_workspace_root <-
+             expand_local_workspace_root(workspace_root, Keyword.get(opts, :base_dir, File.cwd!())),
            {:ok, canonical_workspace_root} <- PathSafety.canonicalize(expanded_workspace_root) do
         {:ok, default_turn_sandbox_policy(canonical_workspace_root)}
       end
@@ -961,15 +974,6 @@ defmodule SymphonyElixir.Config.Schema do
   defp default_workspace_root(nil, fallback), do: fallback
   defp default_workspace_root("", fallback), do: fallback
   defp default_workspace_root(workspace, _fallback), do: workspace
-
-  defp expand_local_workspace_root(workspace_root)
-       when is_binary(workspace_root) and workspace_root != "" do
-    Path.expand(workspace_root)
-  end
-
-  defp expand_local_workspace_root(_workspace_root) do
-    Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
-  end
 
   defp format_errors(changeset) do
     changeset

@@ -324,7 +324,7 @@ defmodule SymphonyElixir.Workspace do
   def cleanup_dirty_workspaces(opts \\ []) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
     settings = Config.settings!()
-    root = settings.workspace.root
+    root = Config.local_workspace_root!(settings)
     retention_days = settings.workspace.dirty_workspace_retention_days
 
     with true <- retention_days > 0,
@@ -389,7 +389,7 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp workspace_path_for_issue(safe_id, nil) when is_binary(safe_id) do
-    Config.settings!().workspace.root
+    Config.local_workspace_root!()
     |> Path.join(safe_id)
     |> PathSafety.canonicalize()
   end
@@ -584,7 +584,7 @@ defmodule SymphonyElixir.Workspace do
 
   defp validate_workspace_path(workspace, nil) when is_binary(workspace) do
     expanded_workspace = Path.expand(workspace)
-    expanded_root = Path.expand(Config.settings!().workspace.root)
+    expanded_root = Config.local_workspace_root!()
     expanded_root_prefix = expanded_root <> "/"
 
     with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),

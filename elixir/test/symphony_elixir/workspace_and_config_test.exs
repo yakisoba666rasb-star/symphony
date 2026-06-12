@@ -2549,6 +2549,42 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }
   end
 
+  test "relative workspace root resolves against selected WORKFLOW.md directory for local use" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-relative-workflow-root-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workflow_dir = Path.join(test_root, "project")
+      workflow_file = Path.join(workflow_dir, "WORKFLOW.md")
+      expected_root = Path.join(workflow_dir, "workspaces")
+
+      File.mkdir_p!(workflow_dir)
+      File.mkdir_p!(expected_root)
+
+      write_workflow_file!(workflow_file, workspace_root: "workspaces")
+      Workflow.set_workflow_file_path(workflow_file)
+
+      assert Config.settings!().workspace.root == "workspaces"
+      assert Config.local_workspace_root!() == expected_root
+      refute Config.local_workspace_root!() == Path.expand("workspaces")
+
+      assert {:ok, default_runtime_policy} = Config.codex_runtime_settings(nil)
+
+      assert default_runtime_policy.turn_sandbox_policy["writableRoots"] == [
+               expected_root
+             ]
+
+      assert {:ok, workspace} = Workspace.create_for_issue("LAB-418-RELATIVE")
+      assert workspace == Path.join(expected_root, "LAB-418-RELATIVE")
+      assert File.dir?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "runtime sandbox policy resolution passes explicit policies through unchanged" do
     test_root =
       Path.join(

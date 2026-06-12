@@ -112,7 +112,7 @@ defmodule SymphonyElixir.Config do
 
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
-    case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do
+    case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace, base_dir: workflow_base_dir()) do
       {:ok, policy} ->
         policy
 
@@ -140,6 +140,15 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @spec local_workspace_root!() :: Path.t()
+  def local_workspace_root! do
+    settings!()
+    |> local_workspace_root()
+  end
+
+  @spec local_workspace_root!(Schema.t()) :: Path.t()
+  def local_workspace_root!(settings), do: local_workspace_root(settings)
+
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
     with {:ok, settings} <- settings() do
@@ -150,6 +159,8 @@ defmodule SymphonyElixir.Config do
   @spec codex_runtime_settings(Path.t() | nil, keyword()) ::
           {:ok, codex_runtime_settings()} | {:error, term()}
   def codex_runtime_settings(workspace \\ nil, opts \\ []) do
+    opts = Keyword.put_new(opts, :base_dir, workflow_base_dir())
+
     with {:ok, settings} <- settings() do
       with {:ok, turn_sandbox_policy} <-
              Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts) do
@@ -161,6 +172,16 @@ defmodule SymphonyElixir.Config do
          }}
       end
     end
+  end
+
+  defp local_workspace_root(settings) do
+    Schema.expand_local_workspace_root(settings.workspace.root, workflow_base_dir())
+  end
+
+  defp workflow_base_dir do
+    Workflow.workflow_file_path()
+    |> Path.expand()
+    |> Path.dirname()
   end
 
   defp validate_semantics(settings) do
