@@ -14,6 +14,14 @@ defmodule SymphonyElixirWeb.Router do
     plug(:put_secure_browser_headers)
   end
 
+  pipeline :observability_browser_access do
+    plug(SymphonyElixirWeb.Plugs.ObservabilityAccess)
+  end
+
+  pipeline :observability_api_access do
+    plug(SymphonyElixirWeb.Plugs.ObservabilityAccess, format: :json)
+  end
+
   scope "/", SymphonyElixirWeb do
     get("/dashboard.css", StaticAssetController, :dashboard_css)
     get("/vendor/phoenix_html/phoenix_html.js", StaticAssetController, :phoenix_html_js)
@@ -22,12 +30,14 @@ defmodule SymphonyElixirWeb.Router do
   end
 
   scope "/", SymphonyElixirWeb do
-    pipe_through(:browser)
+    pipe_through([:observability_browser_access, :browser])
 
     live("/", DashboardLive, :index)
   end
 
   scope "/", SymphonyElixirWeb do
+    pipe_through(:observability_api_access)
+
     get("/api/v1/state", ObservabilityApiController, :state)
 
     match(:*, "/", ObservabilityApiController, :method_not_allowed)

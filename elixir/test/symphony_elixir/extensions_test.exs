@@ -1024,6 +1024,36 @@ defmodule SymphonyElixir.ExtensionsTest do
            }
   end
 
+  test "observability dashboard requires local access or bearer token" do
+    snapshot = static_snapshot()
+    orchestrator_name = Module.concat(__MODULE__, :ProtectedDashboardOrchestrator)
+
+    start_supervised!({StaticOrchestrator, name: orchestrator_name, snapshot: snapshot})
+
+    start_test_endpoint(
+      orchestrator: orchestrator_name,
+      observability_token: "test-observability-token",
+      snapshot_timeout_ms: 50
+    )
+
+    forbidden_conn =
+      build_conn()
+      |> Map.put(:remote_ip, {203, 0, 113, 10})
+      |> get("/")
+
+    assert forbidden_conn.status == 403
+    assert forbidden_conn.resp_body == "Observability dashboard access denied"
+    refute forbidden_conn.resp_body =~ "Operations Dashboard"
+
+    authorized_conn =
+      build_conn()
+      |> Map.put(:remote_ip, {203, 0, 113, 10})
+      |> Plug.Conn.put_req_header("authorization", "Bearer test-observability-token")
+      |> get("/")
+
+    assert html_response(authorized_conn, 200) =~ "Operations Dashboard"
+  end
+
   test "http server serves embedded assets, accepts form posts, and rejects invalid hosts" do
     spec = HttpServer.child_spec(port: 0)
     assert spec.id == HttpServer
