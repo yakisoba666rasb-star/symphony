@@ -6,6 +6,7 @@ defmodule SymphonyElixir.RuntimeShutdown do
   @spec mark_started(term()) :: :ok
   def mark_started(reason \\ :shutdown) do
     :persistent_term.put(@key, {DateTime.utc_now(), reason})
+    notify_observer(reason)
     :ok
   end
 
@@ -21,5 +22,14 @@ defmodule SymphonyElixir.RuntimeShutdown do
     :ok
   rescue
     ArgumentError -> :ok
+  end
+
+  defp notify_observer(reason) do
+    case Application.get_env(:symphony_elixir, :runtime_shutdown_observer) do
+      observer when is_function(observer, 1) -> observer.(reason)
+      _ -> :ok
+    end
+  rescue
+    _error -> :ok
   end
 end

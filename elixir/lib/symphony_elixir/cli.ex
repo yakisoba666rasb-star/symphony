@@ -191,10 +191,15 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
-  defp trap_shutdown_signal(signal) do
+  @doc false
+  @spec trap_shutdown_signal(atom()) :: :ok
+  def trap_shutdown_signal(signal) do
     System.trap_signal(signal, fn ->
       SymphonyElixir.RuntimeShutdown.mark_started(signal)
+      System.stop(0)
     end)
+
+    :ok
   rescue
     _error -> :ok
   end
