@@ -1046,21 +1046,30 @@ defmodule SymphonyElixir.GitHubIssueTest do
              )
   end
 
-  test "returns unexpected issue state errors" do
+  test "skips merged pull requests returned for issue URLs" do
+    parent = self()
+
     deps = %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,
-      run_command: fn "/tmp/fake-gh", ["issue", "view", "67", "--repo", "octo/repo", "--json", "state"], _opts ->
-        {:ok, {Jason.encode!(%{"state" => "MERGED"}), 0}}
+      run_command: fn
+        "/tmp/fake-gh", ["issue", "view", "67", "--repo", "octo/repo", "--json", "state"], _opts ->
+          {:ok, {Jason.encode!(%{"state" => "MERGED"}), 0}}
+
+        "/tmp/fake-gh", ["issue", "close", "67" | _args], _opts ->
+          send(parent, :unexpected_close_command)
+          {:ok, {"", 0}}
       end
     }
 
-    assert {:error, {:unexpected_issue_state, "MERGED"}} =
+    assert {:ok, :not_applicable} =
              GitHubIssue.close_if_open(
                "octo/repo",
                "https://github.com/octo/repo/issues/67",
                "done via PR",
                deps
              )
+
+    refute_received :unexpected_close_command
   end
 
   test "returns close command failures" do
