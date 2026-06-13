@@ -13,6 +13,8 @@ ExecStartPre=/home/ryo/src/symphony/ops/ryo/preflight.sh /home/ryo/src/symphony/
 ExecStart=/home/ryo/.local/bin/mise exec -- /home/ryo/src/symphony/elixir/bin/symphony --port 4000 --i-understand-that-this-will-be-running-without-the-usual-guardrails /home/ryo/src/symphony/ops/ryo/WORKFLOW.md
 Restart=always
 RestartSec=5
+KillMode=process
+TimeoutStopSec=120s
 StandardOutput=append:/var/log/symphony-ryo/engine.log
 StandardError=append:/var/log/symphony-ryo/engine-error.log
 
