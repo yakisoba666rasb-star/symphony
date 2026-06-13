@@ -135,7 +135,7 @@ defmodule SymphonyElixir.Codex.AppServer do
              }}
 
           {:error, reason} ->
-            Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
+            log_turn_error(reason, issue, session_id)
 
             emit_message(
               on_message,
@@ -377,6 +377,21 @@ defmodule SymphonyElixir.Codex.AppServer do
       timeout_ms ->
         {:error, :turn_timeout}
     end
+  end
+
+  defp log_turn_error({:port_exit, 143}, issue, session_id) do
+    if SymphonyElixir.RuntimeShutdown.started?() do
+      Logger.info(
+        "Codex session interrupted by runtime shutdown for #{issue_context(issue)} " <>
+          "session_id=#{session_id}: {:port_exit, 143}; automatic retry is expected after restart"
+      )
+    else
+      Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: {:port_exit, 143}")
+    end
+  end
+
+  defp log_turn_error(reason, issue, session_id) do
+    Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
   end
 
   defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests) do

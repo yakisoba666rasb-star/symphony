@@ -1648,6 +1648,126 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server logs ordinary port exit 143 as a session warning" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-port-exit-warning-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1017")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(workspace)
+      File.write!(codex_binary, port_exit_143_codex_script())
+      File.chmod!(codex_binary, 0o755)
+
+      SymphonyElixir.RuntimeShutdown.reset_for_test()
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-port-exit-warning",
+        identifier: "MT-1017",
+        title: "Port exit warning",
+        description: "Ensure ordinary port exit 143 remains a warning",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-1017",
+        labels: ["backend"]
+      }
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:port_exit, 143}} = AppServer.run(workspace, "Port exit warning", issue)
+        end)
+
+      assert log =~ "Codex session ended with error for issue_id=issue-port-exit-warning issue_identifier=MT-1017"
+      assert log =~ "{:port_exit, 143}"
+      refute log =~ "automatic retry is expected after restart"
+    after
+      SymphonyElixir.RuntimeShutdown.reset_for_test()
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server logs shutdown port exit 143 as retry-planned interruption" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-port-exit-shutdown-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1018")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(workspace)
+      File.write!(codex_binary, port_exit_143_codex_script())
+      File.chmod!(codex_binary, 0o755)
+
+      SymphonyElixir.RuntimeShutdown.mark_started(:sigterm)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-port-exit-shutdown",
+        identifier: "MT-1018",
+        title: "Port exit shutdown",
+        description: "Ensure shutdown port exit 143 is logged as intentional",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-1018",
+        labels: ["backend"]
+      }
+
+      log =
+        capture_log([level: :info], fn ->
+          assert {:error, {:port_exit, 143}} = AppServer.run(workspace, "Port exit shutdown", issue)
+        end)
+
+      assert log =~ "Codex session interrupted by runtime shutdown for issue_id=issue-port-exit-shutdown issue_identifier=MT-1018"
+      assert log =~ "{:port_exit, 143}"
+      assert log =~ "automatic retry is expected after restart"
+      refute log =~ "Codex session ended with error for issue_id=issue-port-exit-shutdown issue_identifier=MT-1018"
+    after
+      SymphonyElixir.RuntimeShutdown.reset_for_test()
+      File.rm_rf(test_root)
+    end
+  end
+
+  defp port_exit_143_codex_script do
+    """
+    #!/bin/sh
+    count=0
+
+    while IFS= read -r line; do
+      count=$((count + 1))
+
+      case "$count" in
+        1)
+          printf '%s\\n' '{"id":1,"result":{}}'
+          ;;
+        2)
+          printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-port-exit"}}}'
+          ;;
+        3)
+          printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-port-exit"}}}'
+          sleep 0.2
+          exit 143
+          ;;
+      esac
+    done
+    """
+  end
+
   test "app server launches over ssh for remote workers" do
     test_root =
       Path.join(

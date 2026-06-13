@@ -178,6 +178,8 @@ defmodule SymphonyElixir.CLI do
 
   @spec wait_for_shutdown() :: no_return()
   defp wait_for_shutdown do
+    trap_shutdown_signal(:sigterm)
+
     case Process.whereis(SymphonyElixir.Supervisor) do
       nil ->
         IO.puts(:stderr, "Symphony supervisor is not running")
@@ -191,5 +193,18 @@ defmodule SymphonyElixir.CLI do
             System.halt(shutdown_exit_code(reason))
         end
     end
+  end
+
+  @doc false
+  @spec trap_shutdown_signal(atom()) :: :ok
+  def trap_shutdown_signal(signal) do
+    System.trap_signal(signal, fn ->
+      SymphonyElixir.RuntimeShutdown.mark_started(signal)
+      System.stop(0)
+    end)
+
+    :ok
+  rescue
+    _error -> :ok
   end
 end

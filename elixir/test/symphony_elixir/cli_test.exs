@@ -154,4 +154,68 @@ defmodule SymphonyElixir.CLITest do
     assert usage =~ "Usage: symphony"
     assert usage =~ @ack_flag
   end
+
+  test "SIGTERM trap marks runtime shutdown and exits the BEAM" do
+    tmp_dir = Path.join(System.tmp_dir!(), "symphony-cli-sigterm-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(tmp_dir)
+
+    ready_path = Path.join(tmp_dir, "ready")
+    marker_path = Path.join(tmp_dir, "marked")
+    elixir = System.find_executable("elixir") || flunk("elixir executable not found")
+    ebin_path = Path.expand("_build/test/lib/symphony_elixir/ebin")
+
+    script = """
+    Application.put_env(:symphony_elixir, :runtime_shutdown_observer, fn reason ->
+      File.write!(
+        #{inspect(marker_path)},
+        "started=" <> inspect(SymphonyElixir.RuntimeShutdown.started?()) <> " reason=" <> inspect(reason)
+      )
+    end)
+
+    SymphonyElixir.RuntimeShutdown.reset_for_test()
+    :ok = SymphonyElixir.CLI.trap_shutdown_signal(:sigterm)
+    File.write!(#{inspect(ready_path)}, "ready")
+    Process.sleep(:infinity)
+    """
+
+    port =
+      Port.open({:spawn_executable, elixir}, [
+        :binary,
+        :exit_status,
+        args: ["--erl", "-noshell", "-pa", ebin_path, "-e", script]
+      ])
+
+    {:os_pid, os_pid} = Port.info(port, :os_pid)
+
+    try do
+      assert wait_until(fn -> File.exists?(ready_path) end, 2_000)
+      assert {_, 0} = System.cmd("kill", ["-TERM", Integer.to_string(os_pid)])
+      assert_receive {^port, {:exit_status, 0}}, 2_000
+      assert File.read!(marker_path) == "started=true reason=:sigterm"
+    after
+      System.cmd("kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
+      File.rm_rf!(tmp_dir)
+    end
+  end
+
+  defp wait_until(fun, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    wait_until(fun, deadline, nil)
+  end
+
+  defp wait_until(fun, deadline, _last_result) do
+    result = fun.()
+
+    cond do
+      result ->
+        result
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        result
+
+      true ->
+        Process.sleep(10)
+        wait_until(fun, deadline, result)
+    end
+  end
 end
