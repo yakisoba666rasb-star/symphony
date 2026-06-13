@@ -70,6 +70,13 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
+  @doc false
+  @spec shutdown_exit_code(term()) :: 0 | 1
+  def shutdown_exit_code(:normal), do: 0
+  def shutdown_exit_code(:shutdown), do: 0
+  def shutdown_exit_code({:shutdown, _reason}), do: 0
+  def shutdown_exit_code(_reason), do: 1
+
   @spec usage_message() :: String.t()
   defp usage_message do
     "Usage: symphony --i-understand-that-this-will-be-running-without-the-usual-guardrails [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
@@ -181,10 +188,7 @@ defmodule SymphonyElixir.CLI do
 
         receive do
           {:DOWN, ^ref, :process, ^pid, reason} ->
-            case reason do
-              :normal -> System.halt(0)
-              _ -> System.halt(1)
-            end
+            System.halt(shutdown_exit_code(reason))
         end
     end
   end

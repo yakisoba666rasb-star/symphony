@@ -138,6 +138,17 @@ defmodule SymphonyElixir.CLITest do
     assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
   end
 
+  test "maps graceful shutdown reasons to exit 0" do
+    assert CLI.shutdown_exit_code(:normal) == 0
+    assert CLI.shutdown_exit_code(:shutdown) == 0
+    assert CLI.shutdown_exit_code({:shutdown, :sigterm}) == 0
+  end
+
+  test "maps abnormal shutdown reasons to exit 1" do
+    assert CLI.shutdown_exit_code(:killed) == 1
+    assert CLI.shutdown_exit_code({:error, :boom}) == 1
+  end
+
   test "usage message includes the required guardrails acknowledgement flag" do
     assert {:error, usage} = CLI.evaluate(["--unknown"])
     assert usage =~ "Usage: symphony"
