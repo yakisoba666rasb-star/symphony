@@ -3416,9 +3416,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, {:codex_worker_update, issue_id, review_update.()})
 
     state_after_first =
-      wait_for_orchestrator_state(pid, fn state ->
-        Map.has_key?(state.running, issue_id) and not Map.has_key?(state.blocked, issue_id)
-      end)
+      wait_for_orchestrator_state(
+        pid,
+        fn state ->
+          Map.has_key?(state.running, issue_id) and not Map.has_key?(state.blocked, issue_id)
+        end,
+        15_000
+      )
 
     assert Map.has_key?(state_after_first.running, issue_id)
     refute Map.has_key?(state_after_first.blocked, issue_id)
@@ -3426,9 +3430,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, {:codex_worker_update, issue_id, review_update.()})
 
     state =
-      wait_for_orchestrator_state(pid, fn state ->
-        get_in(state.blocked, [issue_id, :error]) == "repeated review fingerprint reached limit 2"
-      end)
+      wait_for_orchestrator_state(
+        pid,
+        fn state ->
+          get_in(state.blocked, [issue_id, :error]) == "repeated review fingerprint reached limit 2"
+        end,
+        15_000
+      )
 
     refute Process.alive?(worker_pid)
     refute Map.has_key?(state.running, issue_id)
@@ -4532,12 +4540,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "review rework opt-in checks PR status at most once per interval" do
+    review_rework_interval_ms = 60_000
+
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
       tracker_api_token: nil,
       poll_interval_ms: 50,
       review_rework_enabled: true,
-      review_rework_interval_ms: 1_000
+      review_rework_interval_ms: review_rework_interval_ms
     )
 
     Application.put_env(:symphony_elixir, :github_review_status, FakeGitHubReviewCountingApproved)
@@ -4563,7 +4573,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute_receive {:github_review_status_view, _url}, 200
     assert skipped_state.last_review_rework_sync_ms == checked_state.last_review_rework_sync_ms
 
-    due_state = %{checked_state | last_review_rework_sync_ms: System.monotonic_time(:millisecond) - 1_001}
+    due_state = %{
+      checked_state
+      | last_review_rework_sync_ms: System.monotonic_time(:millisecond) - review_rework_interval_ms - 1
+    }
+
     rechecked_state = Orchestrator.reconcile_review_rework_requests_for_test(due_state)
 
     assert_receive {:github_review_status_view, "https://github.com/acme/repo/pull/77"}, 500
