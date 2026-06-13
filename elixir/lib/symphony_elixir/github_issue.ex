@@ -69,6 +69,7 @@ defmodule SymphonyElixir.GitHubIssue do
       case String.upcase(to_string(state)) do
         "OPEN" -> close_issue(gh_bin, repo, number, comment, deps)
         "CLOSED" -> {:ok, :already_closed}
+        "MERGED" -> {:ok, :not_applicable}
         other -> {:error, {:unexpected_issue_state, other}}
       end
     else
