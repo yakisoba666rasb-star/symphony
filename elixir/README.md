@@ -103,6 +103,18 @@ Optional flags:
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
 Codex session prompt.
 
+Related operator and design references:
+
+- [Repository and Linear Project Routing](docs/project_routing.md): repository resolution order,
+  Linear Project assignment, and dynamic route trust assumptions.
+- [GitHub Intake Prompt-Injection Threat Model](docs/github_intake_threat_model.md): safety boundary
+  for GitHub issue intake and label-gated promotion.
+- [Zero-Touch GitHub Issue Loop](docs/zero_touch_loop.md): GitHub issue -> Linear -> PR -> Done
+  lifecycle and current leg status.
+- [Observability and Review-Loop Hardening Plan](docs/observability_hardening_plan.md): stall
+  detection, log surfaces, acceptance runner, and changes-requested rework behavior.
+- [Logging Best Practices](docs/logging.md): required log context fields and message conventions.
+
 Minimal example:
 
 ```md
@@ -225,7 +237,7 @@ mise exec -- mix run -e 'SymphonyElixir.Workflow.set_workflow_file_path("/path/f
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 - The dashboard and JSON API only accept loopback requests by default. For trusted remote access,
-  set `SYMPHONY_OBSERVABILITY_TOKEN` and send `Authorization: Bearer <token>`.
+  set `SYMPHONY_OBSERVABILITY_TOKEN` and send an `Authorization` header using the Bearer scheme.
 - Binding the observability server to a non-loopback host requires
   `SYMPHONY_ALLOW_PUBLIC_OBSERVABILITY=true`. This only permits the public bind; it does not bypass
   the loopback-or-bearer-token access gate for `/` or `/api/v1/*`.
@@ -244,8 +256,8 @@ The observability UI now runs on a minimal Phoenix stack:
 - Phoenix dependency static assets for the LiveView client bootstrap
 
 Both the dashboard and JSON API use the same access policy: local loopback clients are allowed
-without a token, and non-loopback clients must provide `Authorization: Bearer <token>` matching
-`SYMPHONY_OBSERVABILITY_TOKEN`.
+without a token, and non-loopback clients must provide an `Authorization` header using the Bearer
+scheme with the value from `SYMPHONY_OBSERVABILITY_TOKEN`.
 
 ## Project Layout
 

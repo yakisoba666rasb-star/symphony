@@ -1,7 +1,6 @@
 # Observability and Review-Loop Hardening Plan
 
-Status: H1/H2/H4/H5 implemented on PR #103 branch; H3 remains conditional.
-H6 is implemented as an H4 runner flag.
+Status: H1/H2/H4/H5/H6 implemented on `main`; H3 remains conditional.
 Last updated: 2026-06-11
 
 ## Goal
@@ -29,8 +28,8 @@ otherwise:
   ticket key (`LAB-403`) missed them.
 
 Implementation note: H1, H2, H4, H5, and the H6 runner scenario are now
-implemented in the PR #103 branch. H3 intentionally remains a decision-gated
-follow-up only if the new surfaces are insufficient.
+merged on `main`. H3 intentionally remains a decision-gated follow-up only if
+the new surfaces are insufficient.
 
 ## H1: Stall detection for pending review handoffs
 

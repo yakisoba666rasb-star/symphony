@@ -20,6 +20,11 @@ GitHub owners. `repository.project_routes` remains the explicit override map:
   discovered without restarting the engine.
 - Static project routes win when a repository also appears in Linear Project metadata.
 
+Before changing routing or GitHub intake settings, review the engine docs in
+`../../elixir/docs/project_routing.md` and
+`../../elixir/docs/github_intake_threat_model.md`. They define the resolution order,
+allowlisted-owner boundary, and prompt-injection assumptions used by this deployment.
+
 ## Install
 
 ```bash
@@ -49,6 +54,20 @@ validation. This is required for the service stdout/stderr files written by
 `StandardOutput=append:` and `StandardError=append:`. If the logrotate config
 is not installed, `/var/log/symphony-ryo/engine.log` and
 `/var/log/symphony-ryo/engine-error.log` can grow without bound.
+
+## Validation
+
+Use the deployment preflight before restarting the service:
+
+```bash
+/home/ryo/src/symphony/ops/ryo/preflight.sh /home/ryo/src/symphony/ops/ryo/WORKFLOW.md
+```
+
+After a restart, confirm the loopback API is reachable and points at the expected project:
+
+```bash
+curl -fsS http://127.0.0.1:4000/api/v1/state
+```
 
 ## Legacy Lab Cleanup Checklist
 

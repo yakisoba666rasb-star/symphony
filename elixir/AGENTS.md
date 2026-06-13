@@ -23,6 +23,9 @@ This directory contains the Elixir agent orchestration service that polls Linear
   - Workspaces must stay under configured workspace root.
 - Orchestrator behavior is stateful and concurrency-sensitive; preserve retry, reconciliation, and cleanup semantics.
 - Follow `docs/logging.md` for logging conventions and required issue/session context fields.
+- Use `docs/project_routing.md`, `docs/github_intake_threat_model.md`,
+  `docs/zero_touch_loop.md`, and `docs/observability_hardening_plan.md` as the operational design
+  map before changing routing, GitHub intake, zero-touch automation, or review-loop behavior.
 
 ## Tests and Validation
 
@@ -62,3 +65,4 @@ If behavior/config changes, update docs in the same PR:
 - `../README.md` for project concept and goals.
 - `README.md` for Elixir implementation and run instructions.
 - `WORKFLOW.md` for workflow/config contract changes.
+- `docs/*.md` for routing, intake, observability, logging, and automation design notes.

@@ -49,8 +49,7 @@ promotion, E2E evidence) is implemented; see
 [Zero-Touch GitHub Issue Loop](zero_touch_loop.md) for the issue/PR map.
 The observability/review-loop hardening work is tracked in
 [Observability and Review-Loop Hardening](observability_hardening_plan.md):
-H1/H2/H4/H5 are implemented on the PR #103 branch, H6 is available as an
-acceptance-runner scenario, and H3 remains conditional. Known maintainability
+H1/H2/H4/H5/H6 are implemented on `main`, and H3 remains conditional. Known maintainability
 issues remain in Backlog: LAB-389 (Orchestrator god module), LAB-388
 (coverage gate excludes core modules).
 
