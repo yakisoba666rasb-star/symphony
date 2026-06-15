@@ -40,20 +40,24 @@ sudo mkdir -p /etc/systemd/system/auto-template.service.d
 sudo cp /home/ryo/src/symphony/ops/ryo/systemd/auto-template.service.d/zz-linear-env.conf \
   /etc/systemd/system/auto-template.service.d/zz-linear-env.conf
 sudo systemctl daemon-reload
-/home/ryo/src/symphony/ops/ryo/preflight.sh /home/ryo/src/symphony/ops/ryo/WORKFLOW.md
 /home/ryo/src/symphony/ops/ryo/install-logrotate.sh
+/home/ryo/src/symphony/ops/ryo/preflight.sh /home/ryo/src/symphony/ops/ryo/WORKFLOW.md
 sudo systemctl restart symphony-engine.service
 sudo systemctl restart auto-template.service
 curl -fsS http://127.0.0.1:4000/api/v1/state
 ```
 
-`install-logrotate.sh` installs
+`install-logrotate.sh` creates `/var/log/symphony-ryo` with `ryo:ryo`
+ownership and `0755` permissions, installs
 `ops/ryo/logrotate/symphony-ryo` to `/etc/logrotate.d/symphony-ryo` and
 runs `sudo logrotate -d /etc/logrotate.d/symphony-ryo` as a dry-run
 validation. This is required for the service stdout/stderr files written by
 `StandardOutput=append:` and `StandardError=append:`. If the logrotate config
 is not installed, `/var/log/symphony-ryo/engine.log` and
 `/var/log/symphony-ryo/engine-error.log` can grow without bound.
+
+`preflight.sh` validates that `/var/log/symphony-ryo` exists and is writable by
+the `ryo` runtime user before it validates the workflow configuration.
 
 ## Validation
 
