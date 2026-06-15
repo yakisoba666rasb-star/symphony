@@ -139,6 +139,56 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert repository.slug == "kasotuosawari-design/auto_template"
   end
 
+  test "repository resolver parses explicit repo hints from string input" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "default" => "yakisoba666rasb-star/symphony",
+                 "clone_protocol" => "ssh"
+               }
+             })
+
+    text = "Repo: kasotuosawari-design/auto_template"
+
+    assert RepositoryResolver.repository_hint?(text)
+    assert {:ok, repository} = RepositoryResolver.resolve(text, settings)
+    assert repository.slug == "kasotuosawari-design/auto_template"
+    assert repository.clone_url == "git@github.com:kasotuosawari-design/auto_template.git"
+  end
+
+  test "repository resolver extracts GitHub issue URLs from string input" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "default" => "yakisoba666rasb-star/symphony"
+               }
+             })
+
+    text = "See https://github.com/kasotuosawari-design/auto_template/issues/338"
+
+    assert RepositoryResolver.repository_hint?(text)
+    assert RepositoryResolver.source_github_issue_url(text) == "https://github.com/kasotuosawari-design/auto_template/issues/338"
+    assert {:ok, repository} = RepositoryResolver.resolve(text, settings)
+    assert repository.slug == "kasotuosawari-design/auto_template"
+    assert repository.github_issue_url == "https://github.com/kasotuosawari-design/auto_template/issues/338"
+  end
+
+  test "repository resolver keeps project route fallback metadata-based for string input" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "default" => "yakisoba666rasb-star/symphony",
+                 "project_routes" => %{
+                   "example-org/worker-app" => ["Worker App"]
+                 }
+               }
+             })
+
+    assert RepositoryResolver.project_route_slug("Worker App", settings) == :none
+    assert {:ok, repository} = RepositoryResolver.resolve("Worker App", settings)
+    assert repository.slug == "yakisoba666rasb-star/symphony"
+  end
+
   test "workflow config supports opt-in GitHub issue intake" do
     assert {:ok, settings} =
              Schema.parse(%{
