@@ -173,6 +173,65 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert repository.github_issue_url == "https://github.com/kasotuosawari-design/auto_template/issues/338"
   end
 
+  test "repository resolver extracts labeled GitHub PR source URLs from string input" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "default" => "yakisoba666rasb-star/symphony"
+               }
+             })
+
+    text = "GitHub PR: https://github.com/kasotuosawari-design/auto_template/pull/339"
+
+    assert RepositoryResolver.repository_hint?(text)
+    assert RepositoryResolver.source_github_issue_url(text) == "https://github.com/kasotuosawari-design/auto_template/pull/339"
+    assert {:ok, repository} = RepositoryResolver.resolve(text, settings)
+    assert repository.slug == "kasotuosawari-design/auto_template"
+    assert repository.github_issue_url == "https://github.com/kasotuosawari-design/auto_template/pull/339"
+  end
+
+  test "repository resolver raises for invalid string input through bang API" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "default" => "yakisoba666rasb-star/symphony"
+               }
+             })
+
+    text = """
+    See https://github.com/yakisoba666rasb-star/symphony/issues/1
+    and https://github.com/kasotuosawari-design/auto_template/issues/338
+    """
+
+    assert_raise ArgumentError, ~r/ambiguous_repository_urls/, fn ->
+      RepositoryResolver.resolve!(text, settings)
+    end
+  end
+
+  test "repository resolver normalizes plain map input without treating text as project routes" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "repository" => %{
+                 "default" => "yakisoba666rasb-star/symphony",
+                 "project_routes" => %{
+                   "example-org/worker-app" => ["Worker App"]
+                 }
+               }
+             })
+
+    issue = %{
+      "title" => "Map input with repository hint",
+      "description" => "Repo: kasotuosawari-design/auto_template",
+      "attachmentUrls" => ["https://github.com/kasotuosawari-design/auto_template/issues/338"],
+      "projectName" => ["Worker App", 123]
+    }
+
+    assert {:ok, "example-org/worker-app"} = RepositoryResolver.project_route_slug(issue, settings)
+    assert {:ok, repository} = RepositoryResolver.resolve(issue, settings)
+    assert repository.slug == "kasotuosawari-design/auto_template"
+    assert repository.github_issue_url == "https://github.com/kasotuosawari-design/auto_template/issues/338"
+  end
+
   test "repository resolver keeps project route fallback metadata-based for string input" do
     assert {:ok, settings} =
              Schema.parse(%{
