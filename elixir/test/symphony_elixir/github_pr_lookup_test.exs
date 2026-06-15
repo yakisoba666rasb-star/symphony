@@ -638,6 +638,45 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
              )
   end
 
+  test "workspace handoff lookup matches linked PR repo case-insensitively" do
+    workspace = "/tmp/owner-workspace-linked-pr-repo-case"
+
+    deps = %{
+      find_git_bin: fn -> "/tmp/fake-git" end,
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-git", _args, _opts ->
+          {:ok, {"https://github.com/octo/repo.git", 0}}
+
+        "/tmp/fake-gh", ["pr", "list" | _args], _opts ->
+          {:ok, {"[]", 0}}
+
+        "/tmp/fake-gh", ["pr", "view", "79" | _args], _opts ->
+          {:ok,
+           {Jason.encode!(%{
+              "number" => 79,
+              "url" => "https://github.com/Octo/Repo/pull/79",
+              "headRefName" => "feature/linear",
+              "isDraft" => false,
+              "mergeStateStatus" => "CLEAN",
+              "state" => "OPEN"
+            }), 0}}
+      end
+    }
+
+    assert {:ok,
+            %{
+              "number" => 79,
+              "__symphonyLookupSource" => "linked_pull_request"
+            }} =
+             GitHubPrLookup.lookup_workspace_handoff_pr(
+               workspace,
+               "feature/linear",
+               ["https://github.com/Octo/Repo/pull/79"],
+               deps
+             )
+  end
+
   test "workspace handoff lookup rejects multiple linked PR attachments" do
     workspace = "/tmp/owner-workspace-ambiguous-linked-pr"
 
