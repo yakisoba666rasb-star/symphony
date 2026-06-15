@@ -58,7 +58,8 @@ defmodule SymphonyElixirWeb.Plugs.ObservabilityAccess do
   end
 
   defp observability_token do
-    Endpoint.config(:observability_token) || blank_to_nil(System.get_env("SYMPHONY_OBSERVABILITY_TOKEN"))
+    blank_to_nil(Endpoint.config(:observability_token)) ||
+      blank_to_nil(System.get_env("SYMPHONY_OBSERVABILITY_TOKEN"))
   end
 
   defp blank_to_nil(nil), do: nil
