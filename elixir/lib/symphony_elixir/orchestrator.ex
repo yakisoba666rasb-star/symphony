@@ -200,6 +200,8 @@ defmodule SymphonyElixir.Orchestrator do
           |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
           |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
 
+        comment_on_quarantined_workspace(issue_id, updated_running_entry, runtime_info[:workspace_quarantine])
+
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
     end
@@ -291,9 +293,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
     cond do
-      dirty_workspace_reason?(reason) ->
-        block_dirty_workspace_agent_down(state, issue_id, running_entry, session_id, reason)
-
       max_turns_reached_active_issue?(reason) ->
         block_max_turns_agent_down(state, issue_id, running_entry, session_id)
 
@@ -583,24 +582,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp max_turns_reached_active_issue?({:max_turns_reached_active_issue, _issue_id}), do: true
   defp max_turns_reached_active_issue?(_reason), do: false
-
-  defp dirty_workspace_reason?({:dirty_workspace, workspace, status})
-       when is_binary(workspace) and is_binary(status),
-       do: true
-
-  defp dirty_workspace_reason?(_reason), do: false
-
-  defp block_dirty_workspace_agent_down(
-         state,
-         issue_id,
-         running_entry,
-         session_id,
-         {:dirty_workspace, workspace, status}
-       ) do
-    error = "dirty workspace detected at #{workspace}: #{String.trim(status)}"
-    Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
-    block_issue_from_entry(state, issue_id, running_entry, error)
-  end
 
   defp block_max_turns_agent_down(state, issue_id, running_entry, session_id) do
     case branch_name_and_workspace(running_entry) do
@@ -3499,6 +3480,40 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp comment_on_blocked_issue(_issue_id, _running_entry, _error), do: :ok
+
+  defp comment_on_quarantined_workspace(issue_id, running_entry, %{
+         workspace: workspace,
+         quarantine: quarantine,
+         dirty_status: dirty_status
+       })
+       when is_binary(issue_id) and is_binary(workspace) and is_binary(quarantine) and is_binary(dirty_status) do
+    identifier = Map.get(running_entry, :identifier, issue_id)
+
+    body = """
+    Symphony quarantined a dirty workspace before rerunning #{identifier}.
+
+    Workspace: #{workspace}
+    Quarantine: #{quarantine}
+
+    Git status --porcelain:
+    #{String.trim(dirty_status)}
+    """
+
+    case tracker_module().create_comment(issue_id, body) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.debug("Failed to create dirty-workspace quarantine comment for issue_id=#{issue_id}: #{inspect(reason)}")
+        :ok
+    end
+  rescue
+    exception ->
+      Logger.debug("Failed to create dirty-workspace quarantine comment for issue_id=#{issue_id}: #{Exception.message(exception)}")
+      :ok
+  end
+
+  defp comment_on_quarantined_workspace(_issue_id, _running_entry, _quarantine), do: :ok
 
   defp choose_issues(issues, state) do
     active_states = active_state_set()
