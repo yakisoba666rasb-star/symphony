@@ -1254,6 +1254,7 @@ defmodule SymphonyElixir.Orchestrator do
     if module_exports?(module, :fetch_issues_by_states, 1) do
       do_sync_merged_linked_pull_requests_to_done(state, module, states)
     else
+      Logger.warning("Skipping merged linked PR Done sync; #{inspect(module)} does not export fetch_issues_by_states/1")
       state
     end
   end
@@ -1298,6 +1299,9 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       done_sync_terminal_blocked?(state, issue.id) ->
         state
+
+      done_sync_runtime_owned?(state, issue.id) ->
+        clear_done_sync_attempt(state, issue.id)
 
       issue_has_done_sync_evidence?(issue) ->
         do_maybe_sync_merged_linked_pr_issue_to_done(issue, state)
@@ -1405,6 +1409,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     if RetryPolicy.allow_attempt?(next_attempt, policy) do
       Logger.warning("#{error} attempt=#{next_attempt}")
+      maybe_comment_on_done_sync_failure(issue, error, next_attempt)
 
       %{
         state
@@ -1446,6 +1451,42 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp maybe_comment_on_done_sync_failure(%Issue{} = issue, error, 1) do
+    module = tracker_module()
+
+    if module_exports?(module, :create_comment, 2) do
+      body = done_sync_failure_comment(issue, error)
+
+      case module.create_comment(issue.id, body) do
+        :ok ->
+          :ok
+
+        {:ok, _comment} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Merged linked PR Done sync could not leave failure comment for #{issue_context(issue)}: #{inspect(reason)}")
+
+        other ->
+          Logger.warning("Merged linked PR Done sync failure comment returned unexpected result for #{issue_context(issue)}: #{inspect(other)}")
+      end
+    end
+  rescue
+    exception ->
+      Logger.warning("Merged linked PR Done sync failure comment crashed for #{issue_context(issue)}: #{Exception.message(exception)}")
+  end
+
+  defp maybe_comment_on_done_sync_failure(_issue, _error, _attempt), do: :ok
+
+  defp done_sync_failure_comment(%Issue{} = issue, error) do
+    """
+    Symphony warning: merged PR Done sync could not complete for #{issue.identifier || issue.id}.
+
+    #{error}
+    """
+    |> String.trim()
+  end
+
   defp clear_done_sync_attempt(%State{} = state, issue_id) do
     case Map.get(state.retry_attempts, issue_id) do
       %{policy_context: :done_sync} ->
@@ -1460,6 +1501,10 @@ defmodule SymphonyElixir.Orchestrator do
     state.blocked
     |> Map.get(issue_id)
     |> policy_terminal_context?(:done_sync)
+  end
+
+  defp done_sync_runtime_owned?(%State{} = state, issue_id) do
+    Map.has_key?(state.running, issue_id) or pending_review_handoff_for_issue?(state, issue_id)
   end
 
   defp put_blocked_policy_terminal_context(%State{} = state, issue_id, context) do
@@ -1478,7 +1523,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp issue_has_done_sync_evidence?(%Issue{} = issue) do
-    issue_has_pull_request_attachment?(issue) or present_string?(issue.branch_name)
+    issue_has_pull_request_attachment?(issue) or
+      present_string?(issue.branch_name) or
+      (RepositoryResolver.repository_hint?(issue) and
+         (present_string?(issue.identifier) or present_string?(issue.url)))
   end
 
   defp handoff_pr_evidence(running_entry) when is_map(running_entry) do
@@ -1498,6 +1546,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp done_sync_evidence(%Issue{} = issue) do
     %{
+      identifier: issue.identifier,
+      url: issue.url,
       branch_name: issue.branch_name,
       attachment_urls: issue_attachment_urls(issue)
     }
@@ -1642,6 +1692,20 @@ defmodule SymphonyElixir.Orchestrator do
          repo,
          fallback_to_issue_evidence?
        ) do
+    fallback_to_merged_issue_pull_request_for_done(issue, repo, fallback_to_issue_evidence?)
+  end
+
+  defp handle_merged_linked_pull_request_for_done(
+         {:error, {:ambiguous_linked_pull_requests, _urls} = reason},
+         issue,
+         repo,
+         fallback_to_issue_evidence?
+       ) do
+    Logger.info(
+      "Merged PR Done sync ignored ambiguous linked PR attachments for #{issue_context(issue)} " <>
+        "repo=#{repo} reason=#{inspect(reason)}; falling back to issue evidence"
+    )
+
     fallback_to_merged_issue_pull_request_for_done(issue, repo, fallback_to_issue_evidence?)
   end
 
@@ -2464,9 +2528,65 @@ defmodule SymphonyElixir.Orchestrator do
   defp reconcile_blocked_issue_state(_issue, state, _active_states, _terminal_states), do: state
 
   defp reconcile_active_blocked_issue_state(%State{} = state, %Issue{} = issue) do
+    case maybe_recover_done_sync_blocked_open_pr_handoff(state, issue) do
+      {:ok, recovered_state} ->
+        recovered_state
+
+      :miss ->
+        maybe_recover_active_review_handoff_issue(state, issue)
+    end
+  end
+
+  defp maybe_recover_active_review_handoff_issue(%State{} = state, %Issue{} = issue) do
     case maybe_recover_blocked_review_handoff_issue(state, issue) do
       {:ok, recovered_state} -> recovered_state
       :miss -> refresh_blocked_issue_state(state, issue)
+    end
+  end
+
+  defp maybe_recover_done_sync_blocked_open_pr_handoff(%State{} = state, %Issue{} = issue) do
+    with blocked_entry when is_map(blocked_entry) <- Map.get(state.blocked, issue.id),
+         true <- policy_terminal_context?(blocked_entry, :done_sync),
+         false <- pending_review_handoff_for_issue?(state, issue.id),
+         true <- open_issue_pr_lookup_available?() do
+      case lookup_open_pr_for_dispatch(issue) do
+        {:ok, %{} = pr} ->
+          Logger.info(
+            "Recovering Done sync blocked issue after open PR discovery: " <>
+              "#{issue_context(issue)} pr=#{pr_url(pr)}"
+          )
+
+          state = release_issue_claim(state, issue.id)
+
+          {:handoff, recovered_state} =
+            start_existing_open_pr_handoff(state, issue, pr,
+              reason: :blocked_done_sync_reconcile,
+              release_claim_on_completion: true
+            )
+
+          {:ok, recovered_state}
+
+        {:ok, nil} ->
+          :miss
+
+        {:error, reason} ->
+          Logger.warning(
+            "Continuing Done sync blocked issue reconcile for #{issue_context(issue)}; " <>
+              "open PR lookup failed: #{inspect(reason)}"
+          )
+
+          :miss
+
+        other ->
+          Logger.warning(
+            "Continuing Done sync blocked issue reconcile for #{issue_context(issue)}; " <>
+              "open PR lookup returned unexpected result: #{inspect(other)}"
+          )
+
+          :miss
+      end
+    else
+      _other -> :miss
     end
   end
 
@@ -3774,7 +3894,7 @@ defmodule SymphonyElixir.Orchestrator do
               retry_attempts: Map.delete(state.retry_attempts, issue.id)
           }
 
-        {:handoff, start_review_handoff_task(state, :normal, issue.id, running_entry, session_id, pr, nil)}
+        {:handoff, start_review_handoff_task(state, :normal, issue.id, running_entry, session_id, pr, nil, release_claim_on_completion: Keyword.get(opts, :release_claim_on_completion, false))}
 
       {:error, reason} ->
         error = "failed to prepare workspace for existing open PR before dispatch: #{inspect(reason)}"
@@ -3805,9 +3925,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp open_pr_handoff_session_id(:polling_reconcile), do: "polling-open-pr-reconcile"
+  defp open_pr_handoff_session_id(:blocked_done_sync_reconcile), do: "blocked-done-sync-open-pr-reconcile"
   defp open_pr_handoff_session_id(_reason), do: "dispatch-open-pr-guard"
 
   defp open_pr_handoff_log_context(:polling_reconcile), do: "during active issue reconcile"
+  defp open_pr_handoff_log_context(:blocked_done_sync_reconcile), do: "during Done sync blocked issue recovery"
   defp open_pr_handoff_log_context(_reason), do: "before dispatch"
 
   defp claim_issue_for_dispatch(%Issue{state: state_name} = issue, state_updater)
