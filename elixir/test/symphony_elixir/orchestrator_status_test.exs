@@ -133,7 +133,19 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            "mergedAt" => "2026-06-09T03:42:42Z"
          }}
       else
-        {:ok, nil}
+        if issue_identifier == "MT-382" and
+             issue_url == "https://linear.app/example/issue/MT-382/no-pr-evidence" do
+          {:ok,
+           %{
+             "number" => 202,
+             "url" => "https://github.com/octo/repo/pull/202",
+             "headRefName" => "lab-382-identifier-only",
+             "state" => "MERGED",
+             "mergedAt" => "2026-06-09T04:42:42Z"
+           }}
+        else
+          {:ok, nil}
+        end
       end
     end
   end
@@ -2418,11 +2430,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_receive {:merged_issue_pr_lookup_called, "MT-381", "https://linear.app/example/issue/MT-381/body-linked-merged-pr", "lab-381-body-linked"},
                    200
 
-    refute_receive {:merged_issue_pr_lookup_called, "MT-382", _, _}, 100
+    assert_receive {:merged_issue_pr_lookup_called, "MT-382", "https://linear.app/example/issue/MT-382/no-pr-evidence", nil},
+                   200
 
     assert_receive {:tracker_state_update_called, "issue-review-merged", "Done"}, 200
     assert_receive {:tracker_state_update_called, "issue-progress-merged", "Done"}, 200
     assert_receive {:tracker_state_update_called, "issue-body-linked-merged", "Done"}, 200
+    assert_receive {:tracker_state_update_called, "issue-identifier-url-only", "Done"}, 200
 
     assert_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", close_comment}, 200
     assert close_comment =~ "https://github.com/octo/repo/pull/201"
@@ -2431,6 +2445,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert MapSet.member?(state.completed, "issue-review-merged")
     assert MapSet.member?(state.completed, "issue-progress-merged")
     assert MapSet.member?(state.completed, "issue-body-linked-merged")
+    assert MapSet.member?(state.completed, "issue-identifier-url-only")
   end
 
   test "Done sync prefers merged implementation PR evidence over unrelated linked PR attachments" do
@@ -2684,6 +2699,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end)
 
     assert %{policy_context: :done_sync, attempt: 1} = state.retry_attempts[issue_id]
+    assert_receive {:tracker_comment_called, ^issue_id, first_attempt_comment}, 500
+    assert first_attempt_comment =~ "Symphony warning: merged PR Done sync could not complete"
+    assert first_attempt_comment =~ "failed to move Linear issue to Done"
 
     Application.put_env(
       :symphony_elixir,
@@ -2701,6 +2719,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert %{policy_context: :done_sync, attempt: 1, error: error} = state.retry_attempts[issue_id]
     assert error =~ "failed to move Linear issue to Done"
+    assert_receive {:tracker_comment_called, ^issue_id, refreshed_evidence_comment}, 500
+    assert refreshed_evidence_comment =~ "Symphony warning: merged PR Done sync could not complete"
 
     :sys.replace_state(pid, fn state -> %{state | last_done_sync_ms: nil} end)
     send(pid, :run_poll_cycle)

@@ -1254,6 +1254,7 @@ defmodule SymphonyElixir.Orchestrator do
     if module_exports?(module, :fetch_issues_by_states, 1) do
       do_sync_merged_linked_pull_requests_to_done(state, module, states)
     else
+      Logger.warning("Skipping merged linked PR Done sync; #{inspect(module)} does not export fetch_issues_by_states/1")
       state
     end
   end
@@ -1405,6 +1406,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     if RetryPolicy.allow_attempt?(next_attempt, policy) do
       Logger.warning("#{error} attempt=#{next_attempt}")
+      maybe_comment_on_done_sync_failure(issue, error, next_attempt)
 
       %{
         state
@@ -1446,6 +1448,42 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp maybe_comment_on_done_sync_failure(%Issue{} = issue, error, 1) do
+    module = tracker_module()
+
+    if module_exports?(module, :create_comment, 2) do
+      body = done_sync_failure_comment(issue, error)
+
+      case module.create_comment(issue.id, body) do
+        :ok ->
+          :ok
+
+        {:ok, _comment} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Merged linked PR Done sync could not leave failure comment for #{issue_context(issue)}: #{inspect(reason)}")
+
+        other ->
+          Logger.warning("Merged linked PR Done sync failure comment returned unexpected result for #{issue_context(issue)}: #{inspect(other)}")
+      end
+    end
+  rescue
+    exception ->
+      Logger.warning("Merged linked PR Done sync failure comment crashed for #{issue_context(issue)}: #{Exception.message(exception)}")
+  end
+
+  defp maybe_comment_on_done_sync_failure(_issue, _error, _attempt), do: :ok
+
+  defp done_sync_failure_comment(%Issue{} = issue, error) do
+    """
+    Symphony warning: merged PR Done sync could not complete for #{issue.identifier || issue.id}.
+
+    #{error}
+    """
+    |> String.trim()
+  end
+
   defp clear_done_sync_attempt(%State{} = state, issue_id) do
     case Map.get(state.retry_attempts, issue_id) do
       %{policy_context: :done_sync} ->
@@ -1478,7 +1516,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp issue_has_done_sync_evidence?(%Issue{} = issue) do
-    issue_has_pull_request_attachment?(issue) or present_string?(issue.branch_name)
+    issue_has_pull_request_attachment?(issue) or
+      present_string?(issue.branch_name) or
+      (RepositoryResolver.repository_hint?(issue) and
+         (present_string?(issue.identifier) or present_string?(issue.url)))
   end
 
   defp handoff_pr_evidence(running_entry) when is_map(running_entry) do
@@ -1498,6 +1539,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp done_sync_evidence(%Issue{} = issue) do
     %{
+      identifier: issue.identifier,
+      url: issue.url,
       branch_name: issue.branch_name,
       attachment_urls: issue_attachment_urls(issue)
     }
