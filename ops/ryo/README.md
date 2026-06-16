@@ -29,6 +29,7 @@ allowlisted-owner boundary, and prompt-injection assumptions used by this deploy
 
 ```bash
 sudo mkdir -p /etc/systemd/system/symphony-engine.service.d
+mkdir -p /home/ryo/.config/symphony-ryo
 install -m 0600 /home/ryo/src/symphony/ops/ryo/symphony.env.example \
   /home/ryo/.config/symphony-ryo/symphony.env
 $EDITOR /home/ryo/.config/symphony-ryo/symphony.env
