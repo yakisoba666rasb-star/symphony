@@ -279,21 +279,36 @@ defmodule SymphonyElixir.GitHubPrPublisher do
     github_issue_url = github_issue_url(issue)
 
     """
+    #### Context
+
     Automated Symphony runtime handoff for #{issue_identifier(issue)}.
 
-    PR URL is required before In Review handoff. This legacy runtime helper created this draft PR after Codex completed workspace changes.
+    #### TL;DR
 
-    Linear: #{issue_url}
-    #{source_issue_line(github_issue_url)}
+    Runtime-created draft PR for #{issue_identifier(issue)}.
+
+    #### Summary
+
+    - Symphony created this draft PR after Codex completed workspace changes.
+    - PR URL is required before In Review handoff.
+    - Linear: #{issue_url}
+    #{source_issue_lines(github_issue_url)}
+    #### Alternatives
+
+    - Keep runtime-created PRs under the repository PR description lint.
+
+    #### Test Plan
+
+    - [x] Runtime generated this draft PR body.
     """
   end
 
-  defp source_issue_line(nil), do: ""
+  defp source_issue_lines(nil), do: ""
 
-  defp source_issue_line(url) do
+  defp source_issue_lines(url) do
     case github_issue_number(url) do
-      nil -> "Source GitHub issue: #{url}"
-      number -> "Source GitHub issue: #{url}\nFixes ##{number}"
+      nil -> "- Source GitHub issue: #{url}\n"
+      number -> "- Source GitHub issue: #{url}\n- Fixes ##{number}\n"
     end
   end
 

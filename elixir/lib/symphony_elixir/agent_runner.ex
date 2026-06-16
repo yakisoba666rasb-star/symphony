@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, GitHubPrLookup, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, GitHubPrLookup, Linear.Issue, PromptBuilder, SSH, Tracker, Workspace}
 
   @ignored_dirty_status_pathspecs [
     ":!.symphony-review-verdict.json",
@@ -52,7 +52,7 @@ defmodule SymphonyElixir.AgentRunner do
     case Workspace.create_for_issue(issue, worker_host, workspace_opts) do
       {:ok, workspace} ->
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
-        dirty_resume? = Keyword.get(workspace_opts, :allow_dirty_existing_workspace, false) and workspace_has_changes?(workspace)
+        dirty_resume? = Keyword.get(workspace_opts, :allow_dirty_existing_workspace, false) and workspace_has_changes?(workspace, worker_host)
 
         try do
           with :ok <- maybe_run_before_run_hook(workspace, issue, worker_host, dirty_resume?) do
@@ -131,7 +131,7 @@ defmodule SymphonyElixir.AgentRunner do
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      if workspace_has_changes?(workspace) do
+      if workspace_has_changes?(workspace, app_session.worker_host) do
         Logger.info("Workspace has uncommitted changes after normal turn for #{issue_context(issue)}; stopping for runtime PR handoff")
         :ok
       else
@@ -292,7 +292,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp pr_lookup_source(%{__symphonyLookupSource: source}), do: source
   defp pr_lookup_source(_pr), do: nil
 
-  defp workspace_has_changes?(workspace) when is_binary(workspace) do
+  defp workspace_has_changes?(workspace, nil) when is_binary(workspace) do
     case System.cmd("git", ["-C", workspace, "status", "--porcelain", "--"] ++ @ignored_dirty_status_pathspecs, stderr_to_stdout: true) do
       {"", 0} ->
         false
@@ -308,6 +308,72 @@ defmodule SymphonyElixir.AgentRunner do
     exception ->
       Logger.warning("Could not inspect workspace dirty status for #{workspace}: #{Exception.message(exception)}")
       false
+  end
+
+  defp workspace_has_changes?(workspace, worker_host)
+       when is_binary(workspace) and is_binary(worker_host) do
+    case remote_workspace_status(workspace, worker_host) do
+      {:ok, ""} ->
+        false
+
+      {:ok, _status} ->
+        true
+
+      {:error, reason} ->
+        Logger.warning("Could not inspect remote workspace dirty status for #{workspace} worker_host=#{worker_host_for_log(worker_host)}: #{inspect(reason)}; treating as dirty")
+
+        true
+    end
+  end
+
+  defp remote_workspace_status(workspace, worker_host) do
+    script =
+      [
+        "set -eu",
+        remote_shell_assign("workspace", workspace),
+        "cd \"$workspace\"",
+        "git status --porcelain -- ':!.symphony-review-verdict.json' ':!.symphony-review-verdict-*.json'"
+      ]
+      |> Enum.join("\n")
+
+    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
+      {:ok, {output, 0}} -> {:ok, output}
+      {:ok, {output, status}} -> {:error, {:remote_git_status_failed, status, output}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp run_remote_command(worker_host, script, timeout_ms)
+       when is_binary(worker_host) and is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 do
+    task =
+      Task.async(fn ->
+        SSH.run(worker_host, script, stderr_to_stdout: true)
+      end)
+
+    case Task.yield(task, timeout_ms) do
+      {:ok, result} ->
+        result
+
+      nil ->
+        Task.shutdown(task, :brutal_kill)
+        {:error, {:remote_command_timeout, timeout_ms}}
+    end
+  end
+
+  defp remote_shell_assign(variable_name, raw_value)
+       when is_binary(variable_name) and is_binary(raw_value) do
+    [
+      "#{variable_name}=#{shell_escape(raw_value)}",
+      "case \"$#{variable_name}\" in",
+      "  '~') #{variable_name}=\"$HOME\" ;;",
+      "  '~/'*) " <> variable_name <> "=\"$HOME/${" <> variable_name <> "#~/}\" ;;",
+      "esac"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp shell_escape(value) when is_binary(value) do
+    "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
   end
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
