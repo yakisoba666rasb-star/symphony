@@ -909,6 +909,27 @@ defmodule SymphonyElixir.GitHubIssueTest do
              )
   end
 
+  test "matches issue URL repo case-insensitively" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn
+        "/tmp/fake-gh", ["issue", "view", "67", "--repo", "octo/repo", "--json", "state"], _opts ->
+          {:ok, {Jason.encode!(%{"state" => "OPEN"}), 0}}
+
+        "/tmp/fake-gh", ["issue", "close", "67", "--repo", "octo/repo", "--comment", "done via PR"], _opts ->
+          {:ok, {"closed\n", 0}}
+      end
+    }
+
+    assert {:ok, :closed} =
+             GitHubIssue.close_if_open(
+               "octo/repo",
+               "https://github.com/Octo/Repo/issues/67",
+               "done via PR",
+               deps
+             )
+  end
+
   test "does not close already closed issues" do
     deps = %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,

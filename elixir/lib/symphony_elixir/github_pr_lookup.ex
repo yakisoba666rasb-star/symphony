@@ -658,8 +658,13 @@ defmodule SymphonyElixir.GitHubPrLookup do
 
   defp linked_pull_url(repo, url) do
     case Regex.run(~r{^https://github\.com/([^/]+/[^/]+)/pull/(\d+)(?:[/?#].*)?$}i, String.trim(url)) do
-      [matched_url, ^repo, number] -> {matched_url, String.to_integer(number)}
-      _other -> nil
+      [matched_url, url_repo, number] ->
+        if String.downcase(url_repo) == String.downcase(repo) do
+          {matched_url, String.to_integer(number)}
+        end
+
+      _other ->
+        nil
     end
   end
 

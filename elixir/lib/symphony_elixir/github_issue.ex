@@ -554,9 +554,15 @@ defmodule SymphonyElixir.GitHubIssue do
 
   defp issue_number_for_repo(repo, issue_url) do
     case Regex.run(~r{^https://github\.com/([^/]+/[^/]+)/issues/(\d+)(?:[/?#].*)?$}i, String.trim(issue_url)) do
-      [_, ^repo, number] -> {:ok, String.to_integer(number)}
-      [_matched, _other_repo, _number] -> :not_applicable
-      _other -> :not_applicable
+      [_, url_repo, number] ->
+        if String.downcase(url_repo) == String.downcase(repo) do
+          {:ok, String.to_integer(number)}
+        else
+          :not_applicable
+        end
+
+      _other ->
+        :not_applicable
     end
   end
 
