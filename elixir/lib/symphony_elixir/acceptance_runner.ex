@@ -161,12 +161,15 @@ defmodule SymphonyElixir.AcceptanceRunner do
   defp target_legs(_up_to), do: [:linear_created, :todo, :in_progress, :pr_exists, :in_review, :done]
 
   defp maybe_restart_during_review(:pr_exists, true, command, deps) do
-    [cmd | args] = String.split(command, " ", trim: true)
+    case normalize_command_result(deps.run_command.("sh", ["-lc", command], stderr_to_stdout: true)) do
+      {:ok, {_output, 0}} ->
+        :ok
 
-    case normalize_command_result(deps.run_command.(cmd, args, stderr_to_stdout: true)) do
-      {:ok, {_output, 0}} -> :ok
-      {:ok, {output, status}} -> Logger.warning("Acceptance restart command exited #{status}: #{String.trim(output)}")
-      {:error, reason} -> Logger.warning("Acceptance restart command failed: #{inspect(reason)}")
+      {:ok, {output, status}} ->
+        Logger.warning("Acceptance restart command #{inspect(command)} exited #{status}: #{String.trim(output)}")
+
+      {:error, reason} ->
+        Logger.warning("Acceptance restart command #{inspect(command)} failed: #{inspect(reason)}")
     end
   end
 

@@ -93,7 +93,7 @@ defmodule SymphonyElixir.AcceptanceRunnerTest do
         "gh", ["issue", "create" | _args], _opts ->
           {source_url, 0}
 
-        "systemctl", ["restart", "symphony-engine.service"], _opts ->
+        "sh", ["-lc", "systemctl restart symphony-engine.service"], _opts ->
           fetch_count = Agent.get(fetch_agent, fn count -> count end)
           Agent.update(restart_agent, fn restarts -> [{:restart, fetch_count} | restarts] end)
           {"restarted", 0}
@@ -125,6 +125,101 @@ defmodule SymphonyElixir.AcceptanceRunnerTest do
     assert [{:restart, restart_fetch_count}] = Agent.get(restart_agent, &Enum.reverse/1)
     assert restart_fetch_count >= 4
     assert not Map.has_key?(result.legs, :done)
+  end
+
+  test "runs quoted restart commands through the shell without whitespace splitting" do
+    for command <- [
+          "bash -lc 'printf %s \"quoted unit.service\"'",
+          "RESTART_UNIT='quoted unit.service' systemctl restart \"$RESTART_UNIT\""
+        ] do
+      nonce = "acceptance-restart-quoted-#{System.unique_integer([:positive])}"
+      source_url = "https://github.com/acme/repo/issues/508"
+      fetch_agent = start_supervised!({Agent, fn -> 0 end}, id: {:agent, nonce})
+      command_agent = start_supervised!({Agent, fn -> [] end}, id: {:agent, {:commands, nonce}})
+
+      deps = %{
+        find_gh_bin: fn -> "gh" end,
+        run_command: fn
+          "gh", ["issue", "create" | _args], _opts ->
+            {source_url, 0}
+
+          "sh", ["-lc", ^command], _opts ->
+            Agent.update(command_agent, fn commands -> [command | commands] end)
+            {"restarted", 0}
+
+          cmd, args, _opts ->
+            flunk("unexpected restart command: #{inspect({cmd, args})}")
+        end,
+        fetch_issues_by_states: fn _states ->
+          count = Agent.get_and_update(fetch_agent, &{&1, &1 + 1})
+          {:ok, [issue_for_count(count, nonce, source_url)]}
+        end
+      }
+
+      assert {:ok, result} =
+               AcceptanceRunner.run(
+                 [
+                   repo: "acme/repo",
+                   label: "symphony-auto",
+                   nonce: nonce,
+                   up_to: :in_review,
+                   timeout_ms: 1_000,
+                   poll_ms: 1,
+                   restart_during_review: true,
+                   restart_command: command
+                 ],
+                 deps
+               )
+
+      assert result.status == :passed
+      assert Agent.get(command_agent, &Enum.reverse/1) == [command]
+    end
+  end
+
+  test "restart command supports shell syntax when executed by runtime deps" do
+    nonce = "acceptance-restart-shell-#{System.unique_integer([:positive])}"
+    source_url = "https://github.com/acme/repo/issues/509"
+    fetch_agent = start_supervised!({Agent, fn -> 0 end})
+    output_path = Path.join(System.tmp_dir!(), "#{nonce}.txt")
+    on_exit(fn -> File.rm(output_path) end)
+
+    command = "RESTART_VALUE='quoted value'; printf '%s' \"$RESTART_VALUE\" > #{inspect(output_path)}"
+
+    deps = %{
+      find_gh_bin: fn -> "gh" end,
+      run_command: fn
+        "gh", ["issue", "create" | _args], _opts ->
+          {source_url, 0}
+
+        "sh", ["-lc", ^command], opts ->
+          {:ok, System.cmd("sh", ["-lc", command], opts)}
+
+        cmd, args, _opts ->
+          flunk("unexpected restart command: #{inspect({cmd, args})}")
+      end,
+      fetch_issues_by_states: fn _states ->
+        count = Agent.get_and_update(fetch_agent, &{&1, &1 + 1})
+        {:ok, [issue_for_count(count, nonce, source_url)]}
+      end
+    }
+
+    assert {:ok, result} =
+             AcceptanceRunner.run(
+               [
+                 repo: "acme/repo",
+                 label: "symphony-auto",
+                 nonce: nonce,
+                 up_to: :in_review,
+                 timeout_ms: 1_000,
+                 poll_ms: 1,
+                 restart_during_review: true,
+                 restart_command: command
+               ],
+               deps
+             )
+
+    assert result.status == :passed
+    assert File.read!(output_path) == "quoted value"
   end
 
   test "returns failed result when a leg times out" do
@@ -256,22 +351,32 @@ defmodule SymphonyElixir.AcceptanceRunnerTest do
         end
       }
 
-      assert {:ok, result} =
-               AcceptanceRunner.run(
-                 [
-                   repo: "acme/repo",
-                   label: "symphony-auto",
-                   nonce: nonce,
-                   up_to: "in_review",
-                   timeout_ms: 1_000,
-                   poll_ms: 1,
-                   restart_during_review: true,
-                   restart_command: command
-                 ],
-                 deps
-               )
+      log =
+        capture_log(fn ->
+          assert {:ok, result} =
+                   AcceptanceRunner.run(
+                     [
+                       repo: "acme/repo",
+                       label: "symphony-auto",
+                       nonce: nonce,
+                       up_to: "in_review",
+                       timeout_ms: 1_000,
+                       poll_ms: 1,
+                       restart_during_review: true,
+                       restart_command: command
+                     ],
+                     deps
+                   )
 
-      assert result.status == :passed
+          assert result.status == :passed
+        end)
+
+      assert log =~ "Acceptance restart command #{inspect(command)}"
+
+      case command_result do
+        {_output, status} when is_integer(status) -> assert log =~ "exited #{status}"
+        {:error, reason} -> assert log =~ "failed: #{inspect(reason)}"
+      end
     end
   end
 
