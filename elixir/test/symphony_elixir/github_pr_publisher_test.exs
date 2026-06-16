@@ -1,8 +1,11 @@
 defmodule SymphonyElixir.GitHubPrPublisherTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
+  alias Mix.Tasks.PrBody.Check
   alias SymphonyElixir.GitHubPrPublisher
   alias SymphonyElixir.Linear.Issue
+
+  import ExUnit.CaptureIO
 
   test "publishes dirty workspace changes and returns created draft PR" do
     parent = self()
@@ -96,6 +99,7 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
     assert body =~ "https://linear.app/ryo-work/issue/LAB-236/test"
     assert body =~ "Source GitHub issue: https://github.com/octo/repo/issues/236"
     assert body =~ "Fixes #236"
+    assert_runtime_pr_body_lints(body)
   end
 
   test "does not publish when workspace has no changes" do
@@ -240,6 +244,7 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
     assert body =~ "Linear: n/a"
     refute body =~ "Source GitHub issue:"
     refute body =~ "Fixes #"
+    assert_runtime_pr_body_lints(body)
   end
 
   test "returns an error when add produces no staged changes" do
@@ -594,5 +599,27 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
 
     assert {:error, {:invalid_branch_name, :git_check_ref_format}} =
              GitHubPrPublisher.publish_workspace("/work/unsafe", "@{-1}", %Issue{identifier: "LAB-420"}, deps)
+  end
+
+  defp assert_runtime_pr_body_lints(body) do
+    Enum.each(["#### Context", "#### TL;DR", "#### Summary", "#### Alternatives", "#### Test Plan"], fn heading ->
+      assert body =~ heading
+    end)
+
+    path = Path.join(System.tmp_dir!(), "runtime-pr-body-#{System.unique_integer([:positive, :monotonic])}.md")
+    File.write!(path, body)
+
+    try do
+      Mix.Task.reenable("pr_body.check")
+
+      output =
+        capture_io(fn ->
+          Check.run(["--file", path])
+        end)
+
+      assert output =~ "PR body format OK"
+    after
+      File.rm(path)
+    end
   end
 end
