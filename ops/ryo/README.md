@@ -37,14 +37,10 @@ sudo cp /home/ryo/src/symphony/ops/ryo/systemd/symphony-engine.service \
   /etc/systemd/system/symphony-engine.service
 sudo cp /home/ryo/src/symphony/ops/ryo/systemd/symphony-engine.service.d/override.conf \
   /etc/systemd/system/symphony-engine.service.d/override.conf
-sudo mkdir -p /etc/systemd/system/auto-template.service.d
-sudo cp /home/ryo/src/symphony/ops/ryo/systemd/auto-template.service.d/zz-linear-env.conf \
-  /etc/systemd/system/auto-template.service.d/zz-linear-env.conf
 sudo systemctl daemon-reload
 /home/ryo/src/symphony/ops/ryo/install-logrotate.sh
 /home/ryo/src/symphony/ops/ryo/preflight.sh /home/ryo/src/symphony/ops/ryo/WORKFLOW.md
 sudo systemctl restart symphony-engine.service
-sudo systemctl restart auto-template.service
 curl -fsS http://127.0.0.1:4000/api/v1/state
 ```
 
@@ -59,6 +55,24 @@ is not installed, `/var/log/symphony-ryo/engine.log` and
 
 `preflight.sh` validates that `/var/log/symphony-ryo` exists and is writable by
 the `ryo` runtime user before it validates the workflow configuration.
+
+## Optional auto-template Integration
+
+The `auto-template.service` drop-in is a host-specific integration for the Ryo
+Pi only. It is not required to install or update `symphony-engine.service`, and
+the default engine deployment above intentionally does not copy or restart it.
+
+Apply it only on hosts where `auto-template.service` already exists and the
+external script path in the drop-in is valid:
+
+```bash
+test -f /home/ryo/Github/kasotuosawari-design/auto_template/run_auto_template.py
+sudo mkdir -p /etc/systemd/system/auto-template.service.d
+sudo cp /home/ryo/src/symphony/ops/ryo/systemd/auto-template.service.d/zz-linear-env.conf \
+  /etc/systemd/system/auto-template.service.d/zz-linear-env.conf
+sudo systemctl daemon-reload
+sudo systemctl restart auto-template.service
+```
 
 ## Validation
 
