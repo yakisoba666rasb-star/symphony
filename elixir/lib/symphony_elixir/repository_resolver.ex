@@ -139,6 +139,8 @@ defmodule SymphonyElixir.RepositoryResolver do
     |> Enum.join("\n")
   end
 
+  defp issue_text(text) when is_binary(text), do: text
+
   defp issue_text(_issue_or_identifier), do: ""
 
   defp project_route_fallback_slug(nil, issue_or_identifier, settings) do
