@@ -2499,7 +2499,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "agent runner quarantines dirty workspace before rerun" do
+  test "agent runner sends quarantined workspace runtime info before rerun" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -2563,7 +2563,22 @@ defmodule SymphonyElixir.CoreTest do
 
       state_fetcher = fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert :ok = AgentRunner.run(issue, self(), issue_state_fetcher: state_fetcher)
+
+      assert_receive {:worker_runtime_info, "issue-dirty-workspace",
+                      %{
+                        worker_host: nil,
+                        workspace_path: ^workspace,
+                        workspace_quarantine: %{
+                          workspace: ^workspace,
+                          quarantine: quarantine_workspace,
+                          dirty_status: dirty_status
+                        }
+                      }},
+                     500
+
+      assert dirty_status =~ "agent-output.txt"
+      assert File.dir?(quarantine_workspace)
       refute File.exists?(Path.join(workspace, "agent-output.txt"))
       assert File.exists?(Path.join(workspace_root, "MT-DIRTY-RUNNER.dirty-reason.log"))
       assert File.read!(trace_file) =~ "RUN"

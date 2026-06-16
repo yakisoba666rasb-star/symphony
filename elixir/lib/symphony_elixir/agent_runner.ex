@@ -105,7 +105,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp put_worker_runtime_quarantine(message, %{quarantined_workspace: quarantine})
        when is_map(quarantine) do
-    put_in(message, [Access.elem(1), :workspace_quarantine], quarantine)
+    put_in(message, [Access.elem(2), :workspace_quarantine], quarantine)
   end
 
   defp put_worker_runtime_quarantine(message, _metadata), do: message
