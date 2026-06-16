@@ -1301,7 +1301,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
 
     running_entry = %{
       pid: self(),
@@ -1320,7 +1320,7 @@ defmodule SymphonyElixir.CoreTest do
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = orchestrator_state(pid)
 
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
@@ -1344,7 +1344,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
 
     running_entry = %{
       pid: self(),
@@ -1364,7 +1364,7 @@ defmodule SymphonyElixir.CoreTest do
 
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = orchestrator_state(pid)
 
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
@@ -1392,7 +1392,7 @@ defmodule SymphonyElixir.CoreTest do
         end
       end)
 
-      initial_state = :sys.get_state(pid)
+      initial_state = orchestrator_state(pid)
 
       running_entry = %{
         pid: self(),
@@ -1412,7 +1412,7 @@ defmodule SymphonyElixir.CoreTest do
 
       send(pid, {:DOWN, ref, :process, self(), :boom})
       Process.sleep(50)
-      state = :sys.get_state(pid)
+      state = orchestrator_state(pid)
 
       assert_receive {:tracker_comment, ^issue_id, comment_body}
       assert comment_body =~ "agent failure retry limit reached (1)"
@@ -1440,7 +1440,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
 
     running_entry = %{
       pid: self(),
@@ -1459,7 +1459,7 @@ defmodule SymphonyElixir.CoreTest do
 
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = orchestrator_state(pid)
 
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
@@ -1478,7 +1478,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
     current_retry_token = make_ref()
     stale_retry_token = make_ref()
 
@@ -1504,7 +1504,7 @@ defmodule SymphonyElixir.CoreTest do
              retry_token: ^current_retry_token,
              identifier: "MT-561",
              error: "agent exited: :boom"
-           } = :sys.get_state(pid).retry_attempts[issue_id]
+           } = orchestrator_state(pid).retry_attempts[issue_id]
   end
 
   test "manual refresh coalesces repeated requests and ignores superseded ticks" do
@@ -1589,6 +1589,8 @@ defmodule SymphonyElixir.CoreTest do
 
     assert remaining_ms <= max_remaining_ms
   end
+
+  defp orchestrator_state(pid), do: :sys.get_state(pid, 15_000)
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
   defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
