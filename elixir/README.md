@@ -32,7 +32,7 @@ private target repository or in operator-managed runtime storage.
 During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
 skills can make raw Linear GraphQL calls.
 
-If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
+If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, `Canceled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 
 If Codex reports that operator input or an unsupported approval is required, Symphony keeps the
@@ -55,9 +55,12 @@ still-active Linear issue can become a dispatch candidate again after restart.
 5. Customize the copied `WORKFLOW.md` file for your project.
    - To get your project's slug, right-click the project and copy its URL. The slug is part of the
      URL.
-   - When creating a workflow based on this repo, note that it depends on non-standard Linear
-     issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
-     Team Settings → Workflow in Linear.
+   - Configure your Linear team workflow so Symphony can move issues through the current state
+     model. The expected active states are `Todo` and `In Progress`; the human-review handoff
+     state is `In Review`; terminal states are `Done`, `Closed`, `Cancelled`, `Canceled`, and
+     `Duplicate`. You can customize states in Team Settings → Workflow in Linear.
+   - Older examples may mention `Rework`, `Human Review`, or `Merging`; those are legacy
+     workflow names and are not required for the current `In Review` handoff.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites
