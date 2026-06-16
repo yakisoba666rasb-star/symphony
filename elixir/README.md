@@ -302,6 +302,36 @@ The live test creates a temporary Linear project and issue, writes a temporary `
 a real agent turn, verifies the workspace side effect, requires Codex to comment on and close the
 Linear issue, then marks the project completed so the run remains visible in Linear.
 
+## Zero-touch acceptance CI
+
+The repository also ships a GitHub Actions workflow named `zero-touch-acceptance` for probing the
+live GitHub issue -> Linear -> dispatch -> PR -> In Review path. It can be started manually from
+the Actions tab and also runs on the configured cron schedule.
+
+Configure these repository secrets before expecting the workflow to run the live probe:
+
+- `LINEAR_API_KEY`: Linear personal API key used to poll the live Symphony issues.
+- `SYMPHONY_ACCEPTANCE_GITHUB_TOKEN` (optional): GitHub token used by `gh issue create`. If unset,
+  the workflow uses its `GITHUB_TOKEN` with `issues: write` permission.
+
+Configure these workflow inputs when manually dispatching, or repository variables for scheduled
+runs:
+
+- `SYMPHONY_ACCEPTANCE_REPOSITORY`: GitHub repository slug where the disposable acceptance issue is
+  filed. Defaults to the current repository.
+- `SYMPHONY_ACCEPTANCE_TODO_LABEL`: GitHub label that the live Symphony intake promotes to Linear.
+  Defaults to `symphony-auto`.
+- `SYMPHONY_ACCEPTANCE_LINEAR_TEAM_KEY`: Linear team key observed by the live Symphony runtime.
+  Defaults to `LAB`.
+
+If any required secret, input, or variable is missing, the scheduled run exits successfully with a
+clear skip reason in the GitHub Step Summary instead of failing with an opaque live-test error. When
+configuration is present, the workflow generates a temporary CI `WORKFLOW.md` and runs:
+
+```bash
+mix symphony.acceptance --up-to in_review
+```
+
 ## FAQ
 
 ### Why Elixir?
