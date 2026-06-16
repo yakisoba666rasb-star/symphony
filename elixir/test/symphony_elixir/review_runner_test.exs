@@ -236,6 +236,36 @@ defmodule SymphonyElixir.ReviewRunnerTest do
     end
   end
 
+  test "fails closed when stale verdict cannot be removed before reviewer turn" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-review-runner-stale-cleanup-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(test_root)
+
+    verdict_path = Path.join(test_root, ".symphony-review-verdict.json")
+    File.mkdir_p!(verdict_path)
+
+    previous_test_pid = Application.get_env(:symphony_elixir, :test_pid)
+
+    try do
+      Application.put_env(:symphony_elixir, :test_pid, self())
+
+      assert {:error, {:review_verdict_initial_cleanup_failed, reason}} =
+               ReviewRunner.run_loop(
+                 test_root,
+                 %Issue{identifier: "LAB-455", title: "Runtime loop"},
+                 %{"number" => 455, "url" => "https://github.example/pull/455"},
+                 app_server_module: FakeReviewLoopAppServer,
+                 review_verdict_path: verdict_path
+               )
+
+      assert is_atom(reason)
+      refute_received {:codex_turn, _prompt}
+      refute_received {:rework_turn, _prompt}
+    after
+      restore_app_env(:test_pid, previous_test_pid)
+      File.rm_rf(test_root)
+    end
+  end
+
   test "fails closed when reviewer writes invalid JSON" do
     test_root = Path.join(System.tmp_dir!(), "symphony-review-runner-invalid-json-#{System.unique_integer([:positive])}")
     File.mkdir_p!(test_root)

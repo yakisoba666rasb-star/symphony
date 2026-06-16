@@ -2981,6 +2981,64 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "remote workspace remove rejects unsafe paths before hooks or deletion" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-remove-safety-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_root = "~/.symphony-remote-workspaces"
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        worker_ssh_hosts: ["worker-01:2200"],
+        hook_before_remove: "echo before-remove"
+      )
+
+      unsafe_workspaces = [
+        "",
+        workspace_root,
+        "/tmp/outside-workspace-root",
+        "~/.symphony-remote-workspaces/../outside-workspace-root",
+        "~/.symphony-remote-workspaces/bad\nname",
+        "~/.symphony-remote-workspaces/bad" <> <<0>> <> "name"
+      ]
+
+      Enum.each(unsafe_workspaces, fn unsafe_workspace ->
+        assert {:error, _reason, ""} = Workspace.remove(unsafe_workspace, "worker-01:2200")
+      end)
+
+      refute File.exists?(trace_file)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "remote workspace lifecycle uses ssh host aliases from worker config" do
     test_root =
       Path.join(

@@ -1301,7 +1301,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
 
     running_entry = %{
       pid: self(),
@@ -1320,7 +1320,7 @@ defmodule SymphonyElixir.CoreTest do
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = orchestrator_state(pid)
 
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
@@ -1344,7 +1344,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
 
     running_entry = %{
       pid: self(),
@@ -1364,7 +1364,7 @@ defmodule SymphonyElixir.CoreTest do
 
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = orchestrator_state(pid)
 
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
@@ -1392,7 +1392,7 @@ defmodule SymphonyElixir.CoreTest do
         end
       end)
 
-      initial_state = :sys.get_state(pid)
+      initial_state = orchestrator_state(pid)
 
       running_entry = %{
         pid: self(),
@@ -1412,7 +1412,7 @@ defmodule SymphonyElixir.CoreTest do
 
       send(pid, {:DOWN, ref, :process, self(), :boom})
       Process.sleep(50)
-      state = :sys.get_state(pid)
+      state = orchestrator_state(pid)
 
       assert_receive {:tracker_comment, ^issue_id, comment_body}
       assert comment_body =~ "agent failure retry limit reached (1)"
@@ -1440,7 +1440,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
 
     running_entry = %{
       pid: self(),
@@ -1459,7 +1459,7 @@ defmodule SymphonyElixir.CoreTest do
 
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = orchestrator_state(pid)
 
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
@@ -1478,7 +1478,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
     current_retry_token = make_ref()
     stale_retry_token = make_ref()
 
@@ -1504,7 +1504,7 @@ defmodule SymphonyElixir.CoreTest do
              retry_token: ^current_retry_token,
              identifier: "MT-561",
              error: "agent exited: :boom"
-           } = :sys.get_state(pid).retry_attempts[issue_id]
+           } = orchestrator_state(pid).retry_attempts[issue_id]
   end
 
   test "manual refresh coalesces repeated requests and ignores superseded ticks" do
@@ -1589,6 +1589,8 @@ defmodule SymphonyElixir.CoreTest do
 
     assert remaining_ms <= max_remaining_ms
   end
+
+  defp orchestrator_state(pid), do: :sys.get_state(pid, 15_000)
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
   defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
@@ -2639,6 +2641,198 @@ defmodule SymphonyElixir.CoreTest do
       assert File.read!(trace_file) =~ "RUN"
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner checks remote dirty resume on the worker before skipping before_run hook" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-remote-dirty-resume-before-run-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_path = "/remote/workspaces/MT-REMOTE-DIRTY-BEFORE"
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+
+      case "$*" in
+        *"allow_dirty_existing_workspace"*)
+          printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '0' '#{workspace_path}'
+          exit 0
+          ;;
+        *"git status --porcelain"*)
+          printf ' M README.md\\n'
+          exit 0
+          ;;
+        *"before-run-called"*)
+          printf 'BEFORE_RUN\\n' >> "$trace_file"
+          exit 99
+          ;;
+        *"fake-remote-codex app-server"*)
+          count=0
+          while IFS= read -r line; do
+            count=$((count + 1))
+            case "$count" in
+              1)
+                printf '%s\\n' '{"id":1,"result":{}}'
+                ;;
+              2)
+                printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-remote-dirty-resume"}}}'
+                ;;
+              3)
+                printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-remote-dirty-resume-1"}}}'
+                ;;
+              4)
+                printf '%s\\n' '{"method":"turn/completed"}'
+                exit 0
+                ;;
+            esac
+          done
+          ;;
+      esac
+
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "/remote/workspaces",
+        worker_ssh_hosts: ["worker-01:2200"],
+        hook_before_run: "touch before-run-called && exit 99",
+        codex_command: "fake-remote-codex app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-remote-dirty-resume-before-run",
+        identifier: "MT-REMOTE-DIRTY-BEFORE",
+        title: "Remote dirty resume skips before run",
+        description: "Existing remote dirty workspace should resume without before_run",
+        state: "In Progress"
+      }
+
+      assert :ok = AgentRunner.run(issue, nil, allow_dirty_existing_workspace: true)
+
+      trace = File.read!(trace_file)
+      assert trace =~ "git status --porcelain"
+      assert trace =~ "fake-remote-codex app-server"
+      refute trace =~ "BEFORE_RUN"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner treats remote dirty resume status failures as dirty before_run skips" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-remote-dirty-resume-status-failure-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_path = "/remote/workspaces/MT-REMOTE-DIRTY-FAILSAFE"
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+
+      case "$*" in
+        *"allow_dirty_existing_workspace"*)
+          printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '0' '#{workspace_path}'
+          exit 0
+          ;;
+        *"git status --porcelain"*)
+          printf 'fatal: not a git repository\\n'
+          exit 128
+          ;;
+        *"before-run-called"*)
+          printf 'BEFORE_RUN\\n' >> "$trace_file"
+          exit 99
+          ;;
+        *"fake-remote-codex app-server"*)
+          count=0
+          while IFS= read -r line; do
+            count=$((count + 1))
+            case "$count" in
+              1)
+                printf '%s\\n' '{"id":1,"result":{}}'
+                ;;
+              2)
+                printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-remote-dirty-failsafe"}}}'
+                ;;
+              3)
+                printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-remote-dirty-failsafe-1"}}}'
+                ;;
+              4)
+                printf '%s\\n' '{"method":"turn/completed"}'
+                exit 0
+                ;;
+            esac
+          done
+          ;;
+      esac
+
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "/remote/workspaces",
+        worker_ssh_hosts: ["worker-01:2200"],
+        hook_before_run: "touch before-run-called && exit 99",
+        codex_command: "fake-remote-codex app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-remote-dirty-resume-failsafe",
+        identifier: "MT-REMOTE-DIRTY-FAILSAFE",
+        title: "Remote dirty resume fails safe",
+        description: "Remote status failure should skip before_run",
+        state: "In Progress"
+      }
+
+      assert :ok = AgentRunner.run(issue, nil, allow_dirty_existing_workspace: true)
+
+      trace = File.read!(trace_file)
+      assert trace =~ "git status --porcelain"
+      assert trace =~ "fake-remote-codex app-server"
+      refute trace =~ "BEFORE_RUN"
+    after
       File.rm_rf(test_root)
     end
   end
