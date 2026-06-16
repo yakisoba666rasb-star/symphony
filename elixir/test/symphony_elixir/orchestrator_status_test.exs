@@ -4508,6 +4508,53 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert Map.has_key?(updated_state.running, issue_id)
   end
 
+  test "review rework opt-in dispatches handoff-completed issue for changes requested PR" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      review_rework_enabled: true,
+      review_rework_max_rounds: 2
+    )
+
+    Application.put_env(:symphony_elixir, :github_review_status, FakeGitHubReviewChangesRequested)
+    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
+    Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-review-rework-completed"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-REWORK-COMPLETED",
+      title: "Rework requested after handoff",
+      state: "In Review",
+      attachment_urls: ["https://github.com/acme/repo/pull/77"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 10,
+      completed: MapSet.new([issue_id])
+    }
+
+    updated_state = Orchestrator.reconcile_review_rework_requests_for_test(state)
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "In Progress"}, 500
+    assert_receive {:memory_tracker_comment, ^issue_id, comment}, 500
+    assert comment =~ "GitHub changes requested"
+    assert comment =~ "Please fix the failing retry path."
+
+    assert_receive {:agent_runner_called, %{id: ^issue_id, state: "In Progress"}, opts}, 500
+    assert opts[:allow_dirty_existing_workspace] == true
+    assert opts[:extra_prompt] =~ "GitHub review rework request"
+    assert opts[:extra_prompt] =~ "Please fix the failing retry path."
+
+    assert %{^issue_id => %{rounds: 1, last_review_id: "review-77"}} = updated_state.review_rework_rounds
+    assert Map.has_key?(updated_state.running, issue_id)
+    assert MapSet.member?(updated_state.completed, issue_id)
+  end
+
   test "review rework opt-in ignores PRs without changes requested decision" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
