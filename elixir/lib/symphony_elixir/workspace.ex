@@ -330,21 +330,95 @@ defmodule SymphonyElixir.Workspace do
   def cleanup_dirty_workspaces(opts \\ []) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
     settings = Config.settings!()
-    root = Config.local_workspace_root!(settings)
     retention_days = settings.workspace.dirty_workspace_retention_days
 
     with true <- retention_days > 0,
-         {:ok, entries} <- File.ls(root) do
-      cutoff = DateTime.add(now, -retention_days, :day)
-
-      entries
-      |> Enum.map(&Path.join(root, &1))
-      |> Enum.reduce({[], []}, &remove_or_keep_dirty_workspace(&1, cutoff, &2))
-      |> then(fn {removed, kept} -> {:ok, %{removed: Enum.reverse(removed), kept: Enum.reverse(kept)}} end)
+         {:ok, result} <- cleanup_local_dirty_workspaces(settings, now, retention_days) do
+      cleanup_remote_dirty_workspaces(settings, now, retention_days)
+      {:ok, result}
     else
       false -> {:ok, %{removed: [], kept: []}}
-      {:error, :enoent} -> {:ok, %{removed: [], kept: []}}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp cleanup_local_dirty_workspaces(settings, now, retention_days) do
+    root = Config.local_workspace_root!(settings)
+
+    case File.ls(root) do
+      {:ok, entries} ->
+        cutoff = DateTime.add(now, -retention_days, :day)
+
+        entries
+        |> Enum.map(&Path.join(root, &1))
+        |> Enum.reduce({[], []}, &remove_or_keep_dirty_workspace(&1, cutoff, &2))
+        |> then(fn {removed, kept} -> {:ok, %{removed: Enum.reverse(removed), kept: Enum.reverse(kept)}} end)
+
+      {:error, :enoent} ->
+        {:ok, %{removed: [], kept: []}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp cleanup_remote_dirty_workspaces(settings, now, retention_days) do
+    cutoff =
+      now
+      |> DateTime.add(-retention_days, :day)
+      |> Calendar.strftime("%Y%m%d-%H%M%S")
+
+    Enum.each(settings.worker.ssh_hosts, fn worker_host ->
+      cleanup_remote_dirty_workspaces(
+        settings.workspace.root,
+        worker_host,
+        cutoff,
+        settings.hooks.timeout_ms
+      )
+    end)
+  end
+
+  defp cleanup_remote_dirty_workspaces(root, worker_host, cutoff, timeout_ms) do
+    case validate_remote_path_characters(root) do
+      :ok ->
+        script =
+          [
+            "set -eu",
+            remote_shell_assign("root", root),
+            remote_shell_assign("cutoff", cutoff),
+            "if [ ! -d \"$root\" ]; then",
+            "  exit 0",
+            "fi",
+            "shopt -s nullglob",
+            "for dirty_workspace in \"$root\"/*.dirty-*; do",
+            "  [ -d \"$dirty_workspace\" ] || continue",
+            "  dirty_workspace_name=\"$(basename \"$dirty_workspace\")\"",
+            "  if [[ \"$dirty_workspace_name\" =~ \\.dirty-([0-9]{8}-[0-9]{6})(-[0-9]+)?$ ]] && [[ \"${BASH_REMATCH[1]}\" < \"$cutoff\" ]]; then",
+            "    rm -rf -- \"$dirty_workspace\"",
+            "  fi",
+            "done"
+          ]
+          |> Enum.join("\n")
+
+        case run_remote_command(worker_host, script, timeout_ms) do
+          {:ok, {_output, 0}} ->
+            :ok
+
+          {:ok, {output, status}} ->
+            Logger.warning("Failed to clean remote dirty workspaces worker_host=#{worker_host} status=#{status} output=#{inspect(sanitize_hook_output_for_log(output))}")
+
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("Failed to clean remote dirty workspaces worker_host=#{worker_host} reason=#{sanitize_reason_for_log(reason)}")
+
+            :ok
+        end
+
+      {:error, reason} ->
+        Logger.warning("Skipping remote dirty workspace cleanup worker_host=#{worker_host} reason=#{sanitize_reason_for_log(reason)}")
+
+        :ok
     end
   end
 

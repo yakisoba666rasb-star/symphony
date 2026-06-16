@@ -1563,6 +1563,63 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace cleanup removes expired remote dirty quarantine directories on worker hosts" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-dirty-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      local_workspace_root = Path.join(test_root, "local-workspaces")
+
+      File.mkdir_p!(test_root)
+      File.mkdir_p!(local_workspace_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: local_workspace_root,
+        dirty_workspace_retention_days: 7,
+        worker_ssh_hosts: ["worker-01:2200", "worker-02"]
+      )
+
+      now = ~U[2026-05-26 00:00:00Z]
+
+      assert {:ok, %{removed: [], kept: []}} = Workspace.cleanup_dirty_workspaces(now: now)
+
+      trace = File.read!(trace_file)
+      assert trace =~ "-p 2200 -- worker-01 bash -lc"
+      assert trace =~ "-- worker-02 bash -lc"
+      assert trace =~ local_workspace_root
+      assert trace =~ "20260519-000000"
+      assert trace =~ ~s(for dirty_workspace in "$root"/*.dirty-*; do)
+      assert trace =~ ~s([[ "${BASH_REMATCH[1]}" < "$cutoff" ]])
+      assert trace =~ ~s(rm -rf -- "$dirty_workspace")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace cleanup handles missing workspace root" do
     missing_root =
       Path.join(
