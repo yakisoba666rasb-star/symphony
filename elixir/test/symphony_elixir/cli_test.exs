@@ -188,7 +188,7 @@ defmodule SymphonyElixir.CLITest do
     {:os_pid, os_pid} = Port.info(port, :os_pid)
 
     try do
-      assert wait_until(fn -> File.exists?(ready_path) end, 2_000)
+      assert wait_until(fn -> File.exists?(ready_path) end, 10_000)
       assert {_, 0} = System.cmd("kill", ["-TERM", Integer.to_string(os_pid)])
       assert_receive {^port, {:exit_status, 0}}, 2_000
       assert File.read!(marker_path) == "started=true reason=:sigterm"

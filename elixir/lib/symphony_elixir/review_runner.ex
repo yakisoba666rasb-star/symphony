@@ -60,19 +60,20 @@ defmodule SymphonyElixir.ReviewRunner do
 
   defp run_reviewer_turn(workspace_path, issue, pr, loop_index, opts) do
     verdict_path = verdict_path(workspace_path, loop_index, opts)
-    File.rm(verdict_path)
 
-    prompt = reviewer_prompt(issue, pr, loop_index, verdict_path)
+    with :ok <- remove_existing_verdict_file(verdict_path) do
+      prompt = reviewer_prompt(issue, pr, loop_index, verdict_path)
 
-    result =
-      case run_codex_turn(workspace_path, prompt, issue, :reviewer, opts) do
-        :ok -> read_verdict(verdict_path)
+      result =
+        case run_codex_turn(workspace_path, prompt, issue, :reviewer, opts) do
+          :ok -> read_verdict(verdict_path)
+          {:error, _reason} = error -> error
+        end
+
+      case remove_verdict_file(verdict_path) do
+        :ok -> result
         {:error, _reason} = error -> error
       end
-
-    case remove_verdict_file(verdict_path) do
-      :ok -> result
-      {:error, _reason} = error -> error
     end
   end
 
@@ -144,6 +145,14 @@ defmodule SymphonyElixir.ReviewRunner do
       :ok -> :ok
       {:error, :enoent} -> :ok
       {:error, reason} -> {:error, {:review_verdict_cleanup_failed, reason}}
+    end
+  end
+
+  defp remove_existing_verdict_file(verdict_path) do
+    case File.rm(verdict_path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, {:review_verdict_initial_cleanup_failed, reason}}
     end
   end
 

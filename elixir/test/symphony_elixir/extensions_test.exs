@@ -1122,6 +1122,50 @@ defmodule SymphonyElixir.ExtensionsTest do
            }
   end
 
+  test "observability API rejects blank configured bearer tokens" do
+    snapshot = static_snapshot()
+    orchestrator_name = Module.concat(__MODULE__, :BlankTokenProtectedApiOrchestrator)
+
+    start_supervised!({StaticOrchestrator, name: orchestrator_name, snapshot: snapshot})
+
+    start_test_endpoint(
+      orchestrator: orchestrator_name,
+      observability_token: "",
+      snapshot_timeout_ms: 50
+    )
+
+    conn =
+      build_conn()
+      |> Map.put(:remote_ip, {203, 0, 113, 10})
+      |> Plug.Conn.put_req_header("authorization", "Bearer ")
+      |> get("/api/v1/state")
+
+    assert conn.status == 403
+    assert Jason.decode!(conn.resp_body)["error"]["code"] == "forbidden"
+  end
+
+  test "observability API rejects whitespace configured bearer tokens" do
+    snapshot = static_snapshot()
+    orchestrator_name = Module.concat(__MODULE__, :WhitespaceTokenProtectedApiOrchestrator)
+
+    start_supervised!({StaticOrchestrator, name: orchestrator_name, snapshot: snapshot})
+
+    start_test_endpoint(
+      orchestrator: orchestrator_name,
+      observability_token: "   ",
+      snapshot_timeout_ms: 50
+    )
+
+    conn =
+      build_conn()
+      |> Map.put(:remote_ip, {203, 0, 113, 10})
+      |> Plug.Conn.put_req_header("authorization", "Bearer    ")
+      |> get("/api/v1/state")
+
+    assert conn.status == 403
+    assert Jason.decode!(conn.resp_body)["error"]["code"] == "forbidden"
+  end
+
   test "observability dashboard requires local access or bearer token" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ProtectedDashboardOrchestrator)
