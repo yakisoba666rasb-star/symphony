@@ -1881,7 +1881,6 @@ defmodule SymphonyElixir.Orchestrator do
     !Map.has_key?(state.running, issue_id) and
       !Map.has_key?(state.blocked, issue_id) and
       !pending_review_handoff_for_issue?(state, issue_id) and
-      !MapSet.member?(state.completed, issue_id) and
       is_binary(review_rework_pr_url(issue))
   end
 
