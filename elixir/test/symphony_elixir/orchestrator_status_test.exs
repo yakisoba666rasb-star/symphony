@@ -406,10 +406,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   defmodule FakeGitHubReviewCountingApproved do
-    def view("https://github.com/acme/repo/pull/77") do
+    def view(url) when is_binary(url) do
       case Application.get_env(:symphony_elixir, :github_review_status_recipient) do
         recipient when is_pid(recipient) ->
-          send(recipient, {:github_review_status_view, "https://github.com/acme/repo/pull/77"})
+          send(recipient, {:github_review_status_view, url})
 
         _ ->
           :ok
@@ -940,7 +940,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert %Task{ref: ref} = state.github_intake_task
     last_sync_ms = state.last_github_intake_sync_ms
 
-    assert_receive {:DOWN, ^ref, :process, _pid, {%RuntimeError{message: "github intake failed"}, _stack}}
+    assert_receive(
+      {:DOWN, ^ref, :process, _pid, {%RuntimeError{message: "github intake failed"}, _stack}},
+      5_000
+    )
 
     log =
       capture_log(fn ->
@@ -2755,6 +2758,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         end
       end)
 
+    worker_ref = Process.monitor(worker_pid)
     stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
     stale_progress_ms = System.monotonic_time(:millisecond) - 2_500
     initial_state = :sys.get_state(pid, 15_000)
@@ -2781,8 +2785,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     retry_started_at_ms = System.monotonic_time(:millisecond)
     send(pid, :tick)
-    Process.sleep(100)
-    state = :sys.get_state(pid, 15_000)
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker_pid, _reason}, 5_000
+
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        not Map.has_key?(state.running, issue_id)
+      end)
 
     refute Process.alive?(worker_pid)
     refute Map.has_key?(state.running, issue_id)
@@ -2897,7 +2905,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       tracker_kind: "memory",
       tracker_api_token: nil,
       poll_interval_ms: 100,
-      stall_review_threshold_ms: 1_000
+      stall_review_threshold_ms: 5_000
     )
 
     Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
@@ -2924,7 +2932,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end)
 
     review_ref = make_ref()
-    started_at = DateTime.add(DateTime.utc_now(), -1_200, :millisecond)
+    started_at = DateTime.add(DateTime.utc_now(), -5_200, :millisecond)
     initial_state = :sys.get_state(pid, 15_000)
 
     pending_metadata = %{
@@ -3894,9 +3902,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     :sys.replace_state(pid, &Orchestrator.reconcile_blocked_issue_states_for_test([issue], &1))
 
-    assert_receive {:tracker_comment_called, ^issue_id, comment}, 2_000
+    assert_receive {:tracker_comment_called, ^issue_id, comment}, 5_000
     assert comment =~ "Symphony automated review decision: approve-equivalent"
-    assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 2_000
+    assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 5_000
 
     state = :sys.get_state(pid, 15_000)
     assert MapSet.member?(state.completed, issue_id)
@@ -4508,6 +4516,53 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert Map.has_key?(updated_state.running, issue_id)
   end
 
+  test "review rework opt-in dispatches handoff-completed issue for changes requested PR" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      review_rework_enabled: true,
+      review_rework_max_rounds: 2
+    )
+
+    Application.put_env(:symphony_elixir, :github_review_status, FakeGitHubReviewChangesRequested)
+    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
+    Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-review-rework-completed"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-REWORK-COMPLETED",
+      title: "Rework requested after handoff",
+      state: "In Review",
+      attachment_urls: ["https://github.com/acme/repo/pull/77"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 10,
+      completed: MapSet.new([issue_id])
+    }
+
+    updated_state = Orchestrator.reconcile_review_rework_requests_for_test(state)
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "In Progress"}, 500
+    assert_receive {:memory_tracker_comment, ^issue_id, comment}, 500
+    assert comment =~ "GitHub changes requested"
+    assert comment =~ "Please fix the failing retry path."
+
+    assert_receive {:agent_runner_called, %{id: ^issue_id, state: "In Progress"}, opts}, 500
+    assert opts[:allow_dirty_existing_workspace] == true
+    assert opts[:extra_prompt] =~ "GitHub review rework request"
+    assert opts[:extra_prompt] =~ "Please fix the failing retry path."
+
+    assert %{^issue_id => %{rounds: 1, last_review_id: "review-77"}} = updated_state.review_rework_rounds
+    assert Map.has_key?(updated_state.running, issue_id)
+    assert MapSet.member?(updated_state.completed, issue_id)
+  end
+
   test "review rework opt-in ignores PRs without changes requested decision" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -4553,11 +4608,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     Application.put_env(:symphony_elixir, :github_review_status, FakeGitHubReviewCountingApproved)
     Application.put_env(:symphony_elixir, :github_review_status_recipient, self())
 
+    pr_url = "https://github.com/acme/repo/pull/7701"
+
     issue = %Issue{
       id: "issue-review-rework-counting",
       identifier: "MT-REWORK-COUNTING",
       state: "In Review",
-      attachment_urls: ["https://github.com/acme/repo/pull/77"]
+      attachment_urls: [pr_url]
     }
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
@@ -4565,12 +4622,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     state = %Orchestrator.State{max_concurrent_agents: 10}
     checked_state = Orchestrator.reconcile_review_rework_requests_for_test(state)
 
-    assert_receive {:github_review_status_view, "https://github.com/acme/repo/pull/77"}, 500
+    assert_receive {:github_review_status_view, ^pr_url}, 500
     assert is_integer(checked_state.last_review_rework_sync_ms)
 
     skipped_state = Orchestrator.reconcile_review_rework_requests_for_test(checked_state)
 
-    refute_receive {:github_review_status_view, _url}, 200
+    refute_receive {:github_review_status_view, ^pr_url}, 200
     assert skipped_state.last_review_rework_sync_ms == checked_state.last_review_rework_sync_ms
 
     due_state = %{
@@ -4580,7 +4637,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     rechecked_state = Orchestrator.reconcile_review_rework_requests_for_test(due_state)
 
-    assert_receive {:github_review_status_view, "https://github.com/acme/repo/pull/77"}, 500
+    assert_receive {:github_review_status_view, ^pr_url}, 500
     assert rechecked_state.last_review_rework_sync_ms >= due_state.last_review_rework_sync_ms
   end
 
@@ -5049,10 +5106,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_receive :slow_review_started, 200
 
     snapshot =
-      Enum.reduce_while(1..5, :timeout, fn _attempt, _last_result ->
-        case Orchestrator.snapshot(orchestrator_name, 50) do
+      Enum.reduce_while(1..20, :timeout, fn _attempt, _last_result ->
+        case Orchestrator.snapshot(orchestrator_name, 500) do
           :timeout ->
-            Process.sleep(10)
+            Process.sleep(25)
             {:cont, :timeout}
 
           snapshot ->

@@ -1,0 +1,147 @@
+name: zero-touch-acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: GitHub repository slug to file the acceptance issue in.
+        required: false
+        default: yakisoba666rasb-star/symphony
+      todo_label:
+        description: GitHub label promoted by Symphony GitHub intake.
+        required: false
+        default: symphony-auto
+      linear_team_key:
+        description: Linear team key observed by the live Symphony runtime.
+        required: false
+        default: LAB
+  schedule:
+    - cron: "17 19 * * *"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: zero-touch-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: elixir
+
+    env:
+      ACCEPTANCE_REPOSITORY: ${{ inputs.repository || vars.SYMPHONY_ACCEPTANCE_REPOSITORY || github.repository }}
+      ACCEPTANCE_TODO_LABEL: ${{ inputs.todo_label || vars.SYMPHONY_ACCEPTANCE_TODO_LABEL || 'symphony-auto' }}
+      ACCEPTANCE_LINEAR_TEAM_KEY: ${{ inputs.linear_team_key || vars.SYMPHONY_ACCEPTANCE_LINEAR_TEAM_KEY || 'LAB' }}
+      GH_TOKEN: ${{ secrets.SYMPHONY_ACCEPTANCE_GITHUB_TOKEN || github.token }}
+      LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Check acceptance configuration
+        id: preflight
+        run: |
+          missing=0
+
+          require_env() {
+            name="$1"
+            label="$2"
+
+            if [ -z "${!name}" ]; then
+              printf 'Missing %s\n' "$label" >> "$GITHUB_STEP_SUMMARY"
+              missing=1
+            fi
+          }
+
+          {
+            printf '## zero-touch acceptance preflight\n\n'
+            printf '- repository: `%s`\n' "${ACCEPTANCE_REPOSITORY:-unset}"
+            printf '- todo label: `%s`\n' "${ACCEPTANCE_TODO_LABEL:-unset}"
+            printf '- Linear team key: `%s`\n\n' "${ACCEPTANCE_LINEAR_TEAM_KEY:-unset}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          require_env LINEAR_API_KEY 'secret `LINEAR_API_KEY`'
+          require_env GH_TOKEN 'secret `SYMPHONY_ACCEPTANCE_GITHUB_TOKEN` or the workflow `GITHUB_TOKEN`'
+          require_env ACCEPTANCE_REPOSITORY 'workflow input `repository` or variable `SYMPHONY_ACCEPTANCE_REPOSITORY`'
+          require_env ACCEPTANCE_TODO_LABEL 'workflow input `todo_label` or variable `SYMPHONY_ACCEPTANCE_TODO_LABEL`'
+          require_env ACCEPTANCE_LINEAR_TEAM_KEY 'workflow input `linear_team_key` or variable `SYMPHONY_ACCEPTANCE_LINEAR_TEAM_KEY`'
+
+          if [ "$missing" -eq 1 ]; then
+            {
+              printf '\nSkipping live acceptance because required configuration is unavailable. '
+              printf 'Add the missing secret/input/variable and rerun this workflow.\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+            printf 'run_acceptance=false\n' >> "$GITHUB_OUTPUT"
+          else
+            printf '\nAll required configuration is present; running live acceptance.\n' >> "$GITHUB_STEP_SUMMARY"
+            printf 'run_acceptance=true\n' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up mise tools
+        if: steps.preflight.outputs.run_acceptance == 'true'
+        uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+        with:
+          install: true
+          cache: true
+          working_directory: elixir
+
+      - name: Cache deps and build
+        if: steps.preflight.outputs.run_acceptance == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            elixir/deps
+            elixir/_build
+          key: ${{ runner.os }}-acceptance-mix-${{ hashFiles('elixir/mix.lock', 'elixir/mix.exs', 'elixir/mise.toml', '.github/workflows/zero-touch-acceptance.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-acceptance-mix-
+            ${{ runner.os }}-mix-
+
+      - name: Prepare acceptance workflow config
+        if: steps.preflight.outputs.run_acceptance == 'true'
+        run: |
+          cat > WORKFLOW.md <<EOF
+          ---
+          tracker:
+            kind: linear
+            api_key: \$LINEAR_API_KEY
+            team_key: ${ACCEPTANCE_LINEAR_TEAM_KEY}
+            all_projects: true
+            active_states:
+              - Todo
+              - In Progress
+            review_state: In Review
+            terminal_states:
+              - Done
+              - Closed
+              - Cancelled
+              - Canceled
+              - Duplicate
+          github_intake:
+            enabled: true
+            state: Backlog
+            todo_labels:
+              - ${ACCEPTANCE_TODO_LABEL}
+          repository:
+            default: ${ACCEPTANCE_REPOSITORY}
+            clone_protocol: https
+          ---
+
+          Zero-touch acceptance CI configuration.
+          EOF
+
+      - name: Run zero-touch acceptance
+        if: steps.preflight.outputs.run_acceptance == 'true'
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+          mix symphony.acceptance --up-to in_review
