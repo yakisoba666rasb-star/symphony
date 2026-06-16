@@ -308,6 +308,44 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule FakeGitHubPrLookupAmbiguousLinkedPr do
+    def lookup_merged_issue_pull_request("octo/repo", issue_identifier, issue_url, branch_name) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:merged_issue_pr_lookup_called, issue_identifier, issue_url, branch_name})
+
+        _ ->
+          :ok
+      end
+
+      {:ok, nil}
+    end
+
+    def lookup_open_issue_pull_request("octo/repo", issue_identifier, issue_url, branch_name, attachment_urls) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:open_issue_pr_lookup_called, issue_identifier, issue_url, branch_name, attachment_urls})
+
+        _ ->
+          :ok
+      end
+
+      {:ok, nil}
+    end
+
+    def lookup_merged_linked_pull_request("octo/repo", attachment_urls) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:merged_pr_lookup_called, attachment_urls})
+
+        _ ->
+          :ok
+      end
+
+      {:error, {:ambiguous_linked_pull_requests, attachment_urls}}
+    end
+  end
+
   defmodule FakeGitHubIssueCloser do
     def close_if_open(repo, issue_url, comment) do
       case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
@@ -709,6 +747,52 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            project_name: "repo",
            description: "Repo: https://github.com/octo/repo",
            attachment_urls: ["https://github.com/octo/repo/pull/87"]
+         }
+       ]}
+    end
+
+    def fetch_candidate_issues, do: {:ok, []}
+
+    def update_issue_state(issue_id, state_name) do
+      case Application.get_env(:symphony_elixir, :tracker_state_update_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:tracker_state_update_called, issue_id, state_name})
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
+  end
+
+  defmodule FakeTrackerDoneSyncAmbiguousLinkedIssue do
+    alias SymphonyElixir.Linear.Issue
+
+    def fetch_issues_by_states(state_names) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:post_merge_fetch_states, state_names})
+
+        _ ->
+          :ok
+      end
+
+      {:ok,
+       [
+         %Issue{
+           id: "issue-lab-467",
+           identifier: "LAB-467",
+           title: "Meta issue with sample merged PR attachments",
+           state: "In Progress",
+           url: "https://linear.app/example/issue/LAB-467/meta",
+           branch_name: "lab-467-implementation",
+           project_name: "repo",
+           description: "Repo: https://github.com/octo/repo",
+           attachment_urls: [
+             "https://github.com/octo/repo/pull/166",
+             "https://github.com/octo/repo/pull/154"
+           ]
          }
        ]}
     end
@@ -2627,6 +2711,102 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute MapSet.member?(state.completed, "issue-lab-396")
   end
 
+  test "Done sync ignores ambiguous linked PR attachments when branch issue evidence does not match" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      poll_interval_ms: 50
+    )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_github_issue = Application.get_env(:symphony_elixir, :github_issue)
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+
+    previous_tracker_state_update_recipient =
+      Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
+
+    previous_tracker_comment_recipient =
+      Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_github_issue) do
+        Application.delete_env(:symphony_elixir, :github_issue)
+      else
+        Application.put_env(:symphony_elixir, :github_issue, previous_github_issue)
+      end
+
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+
+      if is_nil(previous_tracker_state_update_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_state_update_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_state_update_recipient,
+          previous_tracker_state_update_recipient
+        )
+      end
+
+      if is_nil(previous_tracker_comment_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_comment_recipient,
+          previous_tracker_comment_recipient
+        )
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupAmbiguousLinkedPr)
+    Application.put_env(:symphony_elixir, :github_issue, FakeGitHubIssueCloser)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerDoneSyncAmbiguousLinkedIssue)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :AmbiguousLinkedPrDoneSyncOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    send(pid, :run_poll_cycle)
+    Process.sleep(50)
+    state = :sys.get_state(pid, 15_000)
+
+    assert_receive {:merged_issue_pr_lookup_called, "LAB-467", "https://linear.app/example/issue/LAB-467/meta", "lab-467-implementation"},
+                   200
+
+    assert_receive {:open_issue_pr_lookup_called, "LAB-467", "https://linear.app/example/issue/LAB-467/meta", "lab-467-implementation", []},
+                   200
+
+    assert_receive {:merged_pr_lookup_called,
+                    [
+                      "https://github.com/octo/repo/pull/166",
+                      "https://github.com/octo/repo/pull/154"
+                    ]},
+                   200
+
+    refute_receive {:tracker_state_update_called, "issue-lab-467", "Done"}, 200
+    refute_receive {:github_issue_close_called, "octo/repo", _source_issue_url, _close_comment}, 100
+
+    refute Map.has_key?(state.retry_attempts, "issue-lab-467")
+    refute Map.has_key?(state.blocked, "issue-lab-467")
+    refute MapSet.member?(state.completed, "issue-lab-467")
+  end
+
   test "Done sync failures use retry policy cap and reset when PR evidence changes" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -3930,6 +4110,137 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert MapSet.member?(state.completed, issue_id)
     refute MapSet.member?(state.claimed, issue_id)
     refute Map.has_key?(state.blocked, issue_id)
+  end
+
+  test "orchestrator recovers Done sync terminal block when an open implementation PR is discoverable" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_review_runner = Application.get_env(:symphony_elixir, :review_runner)
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+
+    previous_tracker_state_update_recipient =
+      Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
+
+    previous_tracker_comment_recipient =
+      Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_review_runner) do
+        Application.delete_env(:symphony_elixir, :review_runner)
+      else
+        Application.put_env(:symphony_elixir, :review_runner, previous_review_runner)
+      end
+
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+
+      if is_nil(previous_tracker_state_update_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_state_update_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_state_update_recipient,
+          previous_tracker_state_update_recipient
+        )
+      end
+
+      if is_nil(previous_tracker_comment_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_comment_recipient,
+          previous_tracker_comment_recipient
+        )
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupOpenIssuePr)
+    Application.put_env(:symphony_elixir, :review_runner, FakeReviewRunnerApproved)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-done-sync-terminal-open-pr-recover"
+    issue_url = "https://linear.app/example/issue/LAB-467/merged-pr-done-sync"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "LAB-467",
+      title: "Merged PR Done sync issue",
+      state: "In Progress",
+      url: issue_url,
+      branch_name: "lab-467-merged-pr-done-sync",
+      description: "Repo: octo/repo",
+      attachment_urls: [
+        "https://github.com/octo/repo/pull/166",
+        "https://github.com/octo/repo/pull/154"
+      ]
+    }
+
+    blocked_entry = %{
+      issue_id: issue_id,
+      identifier: issue.identifier,
+      issue: issue,
+      worker_host: nil,
+      workspace_path: nil,
+      session_id: nil,
+      error:
+        "merged PR Done sync retry limit reached (5) after attempt 6; blocking issue: " <>
+          "failed to inspect linked PR attachment: {:ambiguous_linked_pull_requests, [...]",
+      policy_terminal_context: :done_sync,
+      blocked_at: DateTime.utc_now(),
+      last_codex_message: nil,
+      last_codex_event: nil,
+      last_codex_timestamp: nil
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :DoneSyncBlockedOpenPrRecoverOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid, 15_000)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:blocked, %{issue_id => blocked_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    :sys.replace_state(pid, &Orchestrator.reconcile_blocked_issue_states_for_test([issue], &1))
+
+    assert_receive {:open_issue_pr_lookup_called, "octo/repo", "LAB-467", ^issue_url, "lab-467-merged-pr-done-sync",
+                    [
+                      "https://github.com/octo/repo/pull/166",
+                      "https://github.com/octo/repo/pull/154"
+                    ]},
+                   1_000
+
+    assert_receive {:tracker_comment_called, ^issue_id, comment}, 5_000
+    assert comment =~ "Symphony automated review decision: approve-equivalent"
+    assert comment =~ "https://github.com/octo/repo/pull/83"
+    assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 5_000
+
+    state = :sys.get_state(pid, 15_000)
+    assert MapSet.member?(state.completed, issue_id)
+    refute MapSet.member?(state.claimed, issue_id)
+    refute Map.has_key?(state.blocked, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
   end
 
   test "orchestrator accepts blocked review handoff moved directly to In Review when PR is discoverable" do
