@@ -15,7 +15,8 @@ GitHub issue filed
   -> repository + Linear Project auto-resolved
   -> dispatch -> agent implements -> self-review / rework loop
   -> ready PR detected -> Linear In Review
-  -> human merges PR
+  -> human moves approved issues to Approved to Land
+  -> Symphony lands approved PRs in order
   -> Linear Done + source GitHub issue closed
 ```
 
@@ -42,7 +43,7 @@ before changing promotion behavior.
 | 3 | Project-route dispatch to non-default repos | Done (#86) |
 | 4 | Implement + self-review / rework loop, bounded retries | Done (#83, LAB-391; verified end-to-end 2026-06-10) |
 | 5 | Ready PR detection -> In Review handoff | Done (#84, #85, #89) |
-| 6 | Merged PR -> Linear Done | Done (#63, #77, #78) |
+| 6 | Merged PR -> Linear Done | Done (#63, #77, #78). Batch landing approval is drafted in [Approved to Land](approved_to_land.md). |
 | 7 | Done -> close source GitHub issue | Done (#78 + `Code.ensure_loaded?` fix) |
 
 ## Failure-Resilience Model
@@ -199,12 +200,12 @@ Design:
   runtime persistence; restart-safe).
 - **KPIs**:
   - zero-touch completion rate: loops finished with no human state moves
-    (Linear `issueHistory` actor check) other than the merge.
+    (Linear `issueHistory` actor check) other than `Approved to Land`.
   - per-leg latency from the evidence comments.
   - human unblock interventions per week (existing Phase 3 KPI).
 - **Acceptance run**: file one labeled GitHub issue (W5) in a registered
   repo and verify it reaches Done + source-closed with merge as the only
-  human action; record the evidence comment as the proof artifact.
+  human approval action; record the evidence comment as the proof artifact.
 
 ## Config Summary (new keys)
 
@@ -215,6 +216,12 @@ github_intake:
   todo_labels: []            # W5
 done_sync:
   interval_ms: 120000        # W3
+landing:
+  enabled: false
+  approval_state: Approved to Land
+  in_progress_state: Landing
+  blocked_state: Blocked
+  interval_ms: 120000
 stall:
   enabled: true              # W4
   threshold_ms: 900000

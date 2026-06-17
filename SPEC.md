@@ -576,6 +576,11 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
+- `landing.enabled`: boolean, default `false`
+- `landing.approval_state`: string, default `"Approved to Land"`
+- `landing.in_progress_state`: string, default `"Landing"`
+- `landing.blocked_state`: string, default `"Blocked"`
+- `landing.interval_ms`: integer, default `120000`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
@@ -1221,6 +1226,26 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
   `Human Review`) rather than tracker terminal state `Done`.
 - If the `linear_graphql` client-side tool extension is implemented, it is still part of the agent
   toolchain rather than orchestrator business logic.
+
+The Approved to Land extension is an explicit exception to this baseline boundary: the runtime
+landing worker owns the approved merge/close execution and the Linear audit comments/state
+transitions needed to make that execution observable.
+
+### 11.6 Approved to Land Extension
+
+Implementations MAY support a Linear-approved landing queue. When enabled:
+
+- `landing.approval_state` is the only Linear status that grants batch landing authority.
+- `landing.approval_state` MUST NOT be included in `tracker.active_states` for implementation
+  dispatch.
+- The runtime MUST create a dry-run plan before landing any approved issue.
+- The runtime MUST revalidate GitHub and Linear state before each merge, close, or conflict repair.
+- The runtime MUST move actively processed issues to `landing.in_progress_state`.
+- The runtime MUST move unresolved, stale, ambiguous, or unsafe items to `landing.blocked_state`
+  with an explanatory Linear comment.
+- Implementation agents MAY repair conflicts on a PR branch, but MUST NOT perform the final merge
+  or terminal close action themselves.
+- Completed merges MUST be backed by GitHub merged-PR evidence before moving Linear to `Done`.
 
 ## 12. Prompt Construction and Context Assembly
 
