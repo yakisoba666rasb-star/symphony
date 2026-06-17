@@ -140,6 +140,7 @@ defmodule SymphonyElixir.CoreTest do
     assert message =~ "tracker.active_states"
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
       tracker_api_token: "token",
       tracker_project_slug: nil
     )
@@ -147,6 +148,7 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, :missing_linear_project_slug} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
       tracker_api_token: "token",
       tracker_project_slug: nil,
       tracker_team_key: nil,
@@ -156,6 +158,7 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, :missing_linear_team_key} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
       tracker_api_token: "token",
       tracker_project_slug: nil,
       tracker_team_key: "LAB",
@@ -255,6 +258,7 @@ defmodule SymphonyElixir.CoreTest do
     System.put_env("LINEAR_API_KEY", env_api_key)
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
       tracker_api_token: nil,
       tracker_project_slug: "project",
       codex_command: "/bin/sh app-server"

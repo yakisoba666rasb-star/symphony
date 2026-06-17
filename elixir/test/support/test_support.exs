@@ -31,10 +31,14 @@ defmodule SymphonyElixir.TestSupport do
             "symphony-elixir-workflow-#{System.unique_integer([:positive])}"
           )
 
+        previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+        System.delete_env("LINEAR_API_KEY")
+
         File.mkdir_p!(workflow_root)
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
+        Application.put_env(:symphony_elixir, :tracker_module, SymphonyElixir.Tracker.Memory)
         Application.ensure_all_started(:symphony_elixir)
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
         stop_default_http_server()
@@ -50,6 +54,7 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :github_review_status_recipient)
           Application.delete_env(:symphony_elixir, :agent_runner)
           Application.delete_env(:symphony_elixir, :agent_runner_recipient)
+          restore_env("LINEAR_API_KEY", previous_linear_api_key)
           File.rm_rf(workflow_root)
         end)
 

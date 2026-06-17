@@ -5,6 +5,17 @@ defmodule SymphonyElixirWeb.Presenter do
 
   alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
 
+  @issue_entry_order [:running, :reviewing, :retry, :blocked, :unroutable]
+  @issue_status_order [
+    running: "running",
+    reviewing: "reviewing",
+    retry: "retrying",
+    blocked: "blocked",
+    unroutable: "unroutable"
+  ]
+  @workspace_entry_order [:running, :reviewing, :retry, :blocked]
+  @recent_event_entry_order [:running, :blocked]
+
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
     generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
@@ -18,13 +29,15 @@ defmodule SymphonyElixirWeb.Presenter do
             reviewing: length(Map.get(snapshot, :reviewing, [])),
             landing: length(Map.get(snapshot, :landing, [])),
             retrying: length(snapshot.retrying),
-            blocked: length(Map.get(snapshot, :blocked, []))
+            blocked: length(Map.get(snapshot, :blocked, [])),
+            unroutable: length(Map.get(snapshot, :unroutable, []))
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           reviewing: Enum.map(Map.get(snapshot, :reviewing, []), &reviewing_entry_payload/1),
           landing: Enum.map(Map.get(snapshot, :landing, []), &landing_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
+          unroutable: Enum.map(Map.get(snapshot, :unroutable, []), &unroutable_entry_payload/1),
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits
         }
@@ -41,15 +54,12 @@ defmodule SymphonyElixirWeb.Presenter do
   def issue_payload(issue_identifier, orchestrator, snapshot_timeout_ms) when is_binary(issue_identifier) do
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
-        running = Enum.find(snapshot.running, &(&1.identifier == issue_identifier))
-        reviewing = Enum.find(Map.get(snapshot, :reviewing, []), &(&1.identifier == issue_identifier))
-        retry = Enum.find(snapshot.retrying, &(&1.identifier == issue_identifier))
-        blocked = Enum.find(Map.get(snapshot, :blocked, []), &(&1.identifier == issue_identifier))
+        entries = issue_entries(snapshot, issue_identifier)
 
-        if is_nil(running) and is_nil(reviewing) and is_nil(retry) and is_nil(blocked) do
+        if issue_entries_empty?(entries) do
           {:error, :issue_not_found}
         else
-          {:ok, issue_payload_body(issue_identifier, running, reviewing, retry, blocked)}
+          {:ok, issue_payload_body(issue_identifier, entries)}
         end
 
       _ ->
@@ -68,47 +78,81 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  defp issue_payload_body(issue_identifier, running, reviewing, retry, blocked) do
+  defp issue_entries(snapshot, issue_identifier) do
+    %{
+      running: Enum.find(snapshot.running, &(&1.identifier == issue_identifier)),
+      reviewing: Enum.find(Map.get(snapshot, :reviewing, []), &(&1.identifier == issue_identifier)),
+      retry: Enum.find(snapshot.retrying, &(&1.identifier == issue_identifier)),
+      blocked: Enum.find(Map.get(snapshot, :blocked, []), &(&1.identifier == issue_identifier)),
+      unroutable: Enum.find(Map.get(snapshot, :unroutable, []), &(&1.identifier == issue_identifier))
+    }
+  end
+
+  defp issue_entries_empty?(entries) do
+    entries
+    |> Map.values()
+    |> Enum.all?(&is_nil/1)
+  end
+
+  defp issue_payload_body(issue_identifier, entries) do
     %{
       issue_identifier: issue_identifier,
-      issue_id: issue_id_from_entries(running, reviewing, retry, blocked),
-      status: issue_status(running, reviewing, retry, blocked),
+      issue_id: issue_id_from_entries(entries),
+      status: issue_status(entries),
       workspace: %{
-        path: workspace_path(issue_identifier, running, reviewing, retry, blocked),
-        host: workspace_host(running, reviewing, retry, blocked)
+        path: workspace_path(issue_identifier, entries),
+        host: workspace_host(entries)
       },
-      attempts: %{
-        restart_count: restart_count(retry),
-        current_retry_attempt: retry_attempt(retry)
-      },
-      running: running && running_issue_payload(running),
-      reviewing: reviewing && reviewing_issue_payload(reviewing),
-      retry: retry && retry_issue_payload(retry),
-      blocked: blocked && blocked_issue_payload(blocked),
+      attempts: attempts_payload(entries),
+      running: entry_payload(entries, :running, &running_issue_payload/1),
+      reviewing: entry_payload(entries, :reviewing, &reviewing_issue_payload/1),
+      retry: entry_payload(entries, :retry, &retry_issue_payload/1),
+      blocked: entry_payload(entries, :blocked, &blocked_issue_payload/1),
+      unroutable: entry_payload(entries, :unroutable, &unroutable_issue_payload/1),
       logs: %{
         codex_session_logs: []
       },
-      recent_events: recent_events_payload(running || blocked),
-      last_error: (blocked && blocked.error) || (retry && retry.error),
+      recent_events: recent_events_payload(recent_event_entry(entries)),
+      last_error: last_error(entries),
       tracked: %{}
     }
   end
 
-  defp issue_id_from_entries(running, reviewing, retry, blocked),
-    do:
-      (running && running.issue_id) ||
-        (reviewing && reviewing.issue_id) ||
-        (retry && retry.issue_id) ||
-        (blocked && blocked.issue_id)
+  defp issue_id_from_entries(entries) do
+    entries
+    |> ordered_issue_entries()
+    |> Enum.find_value(&entry_issue_id/1)
+  end
+
+  defp ordered_issue_entries(entries), do: Enum.map(@issue_entry_order, &Map.get(entries, &1))
+  defp entry_issue_id(nil), do: nil
+  defp entry_issue_id(entry), do: Map.get(entry, :issue_id)
+
+  defp attempts_payload(entries) do
+    retry = Map.get(entries, :retry)
+
+    %{
+      restart_count: restart_count(retry),
+      current_retry_attempt: retry_attempt(retry)
+    }
+  end
 
   defp restart_count(retry), do: max(retry_attempt(retry) - 1, 0)
   defp retry_attempt(nil), do: 0
   defp retry_attempt(retry), do: retry.attempt || 0
 
-  defp issue_status(running, _reviewing, _retry, _blocked) when not is_nil(running), do: "running"
-  defp issue_status(nil, reviewing, _retry, _blocked) when not is_nil(reviewing), do: "reviewing"
-  defp issue_status(nil, nil, retry, _blocked) when not is_nil(retry), do: "retrying"
-  defp issue_status(nil, nil, nil, _blocked), do: "blocked"
+  defp issue_status(entries) do
+    Enum.find_value(@issue_status_order, fn {key, status} ->
+      if Map.get(entries, key), do: status
+    end)
+  end
+
+  defp entry_payload(entries, key, mapper) do
+    case Map.get(entries, key) do
+      nil -> nil
+      entry -> mapper.(entry)
+    end
+  end
 
   defp running_entry_payload(entry) do
     %{
@@ -194,6 +238,21 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
+  defp unroutable_entry_payload(entry) do
+    %{
+      issue_id: entry.issue_id,
+      issue_identifier: entry.identifier,
+      title: Map.get(entry, :title),
+      state: Map.get(entry, :state),
+      project_name: Map.get(entry, :project_name),
+      project_slug: Map.get(entry, :project_slug),
+      reason: Map.get(entry, :reason),
+      message: Map.get(entry, :message),
+      details: Map.get(entry, :details, %{}),
+      detected_at: iso8601(Map.get(entry, :detected_at))
+    }
+  end
+
   defp running_issue_payload(running) do
     %{
       worker_host: Map.get(running, :worker_host),
@@ -248,20 +307,32 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp workspace_path(issue_identifier, running, reviewing, retry, blocked) do
-    (running && Map.get(running, :workspace_path)) ||
-      (reviewing && Map.get(reviewing, :workspace_path)) ||
-      (retry && Map.get(retry, :workspace_path)) ||
-      (blocked && Map.get(blocked, :workspace_path)) ||
+  defp unroutable_issue_payload(unroutable), do: unroutable_entry_payload(unroutable)
+
+  defp workspace_path(issue_identifier, entries) do
+    first_entry_value(entries, @workspace_entry_order, :workspace_path) ||
       Path.join(Config.settings!().workspace.root, issue_identifier)
   end
 
-  defp workspace_host(running, reviewing, retry, blocked) do
-    (running && Map.get(running, :worker_host)) ||
-      (reviewing && Map.get(reviewing, :worker_host)) ||
-      (retry && Map.get(retry, :worker_host)) ||
-      (blocked && Map.get(blocked, :worker_host))
+  defp workspace_host(entries), do: first_entry_value(entries, @workspace_entry_order, :worker_host)
+
+  defp recent_event_entry(entries), do: first_entry(entries, @recent_event_entry_order)
+
+  defp last_error(entries) do
+    first_entry_value(entries, [:blocked, :retry], :error) ||
+      first_entry_value(entries, [:unroutable], :message)
   end
+
+  defp first_entry(entries, keys), do: Enum.find_value(keys, &Map.get(entries, &1))
+
+  defp first_entry_value(entries, keys, field) do
+    keys
+    |> Enum.map(&Map.get(entries, &1))
+    |> Enum.find_value(&entry_value(&1, field))
+  end
+
+  defp entry_value(nil, _field), do: nil
+  defp entry_value(entry, field), do: Map.get(entry, field)
 
   defp recent_events_payload(nil), do: []
 

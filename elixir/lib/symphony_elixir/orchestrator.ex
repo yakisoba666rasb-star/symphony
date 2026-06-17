@@ -54,6 +54,7 @@ defmodule SymphonyElixir.Orchestrator do
       completed: MapSet.new(),
       claimed: MapSet.new(),
       blocked: %{},
+      unroutable: [],
       retry_attempts: %{},
       pending_review_handoffs: %{},
       review_rework_rounds: %{},
@@ -1064,8 +1065,8 @@ defmodule SymphonyElixir.Orchestrator do
          state <- maybe_sync_github_issue_intake(state),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
          issues <- auto_assign_missing_projects(issues),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+         state <- record_unroutable_issues(state, issues) do
+      if available_slots(state) > 0, do: choose_issues(issues, state), else: state
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
@@ -1103,9 +1104,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
-        state
-
-      false ->
         state
     end
   end
@@ -2291,6 +2289,14 @@ defmodule SymphonyElixir.Orchestrator do
   @spec should_dispatch_issue_for_test(Issue.t(), term()) :: boolean()
   def should_dispatch_issue_for_test(%Issue{} = issue, %State{} = state) do
     should_dispatch_issue?(issue, state, active_state_set(), terminal_state_set())
+  end
+
+  @doc false
+  @spec unroutable_issue_entries_for_test([Issue.t()], State.t()) :: [map()]
+  def unroutable_issue_entries_for_test(issues, %State{} = state) when is_list(issues) do
+    state
+    |> record_unroutable_issues(issues)
+    |> Map.fetch!(:unroutable)
   end
 
   @doc false
@@ -3585,6 +3591,115 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
+  defp record_unroutable_issues(%State{} = state, issues) when is_list(issues) do
+    settings = Config.settings!()
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+    detected_at = DateTime.utc_now()
+    previous_by_issue_id = Map.new(state.unroutable, &{Map.get(&1, :issue_id), &1})
+
+    unroutable =
+      issues
+      |> sort_issues_for_dispatch()
+      |> Enum.flat_map(fn issue ->
+        unroutable_issue_entry(
+          issue,
+          state,
+          settings,
+          active_states,
+          terminal_states,
+          detected_at,
+          previous_by_issue_id
+        )
+      end)
+
+    %{state | unroutable: unroutable}
+  end
+
+  defp record_unroutable_issues(state, _issues), do: state
+
+  defp unroutable_issue_entry(
+         %Issue{
+           id: id,
+           identifier: identifier,
+           title: title,
+           state: state_name
+         } = issue,
+         %State{} = state,
+         settings,
+         active_states,
+         terminal_states,
+         detected_at,
+         previous_by_issue_id
+       )
+       when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
+    if unroutable_candidate_issue?(issue, state, active_states, terminal_states) do
+      build_unroutable_issue_entry(issue, settings, detected_at, previous_by_issue_id)
+    else
+      []
+    end
+  end
+
+  defp unroutable_issue_entry(
+         _issue,
+         _state,
+         _settings,
+         _active_states,
+         _terminal_states,
+         _detected_at,
+         _previous_by_issue_id
+       ),
+       do: []
+
+  defp unroutable_candidate_issue?(
+         %Issue{state: state_name} = issue,
+         %State{} = state,
+         active_states,
+         terminal_states
+       ) do
+    issue_routable_to_worker?(issue) and
+      active_issue_state?(state_name, active_states) and
+      !terminal_issue_state?(state_name, terminal_states) and
+      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      !tracked_issue?(state, issue.id)
+  end
+
+  defp build_unroutable_issue_entry(%Issue{} = issue, settings, detected_at, previous_by_issue_id) do
+    case repository_route_status(issue, settings) do
+      :ok ->
+        []
+
+      {:error, reason, details} ->
+        [unroutable_issue_payload(issue, reason, details, detected_at, previous_by_issue_id)]
+    end
+  end
+
+  defp unroutable_issue_payload(%Issue{} = issue, reason, details, detected_at, previous_by_issue_id) do
+    %{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      state: issue.state,
+      project_name: issue.project_name,
+      project_slug: issue.project_slug,
+      reason: Atom.to_string(reason),
+      message: repository_route_status_message(reason, details),
+      details: details,
+      detected_at: previous_detected_at(previous_by_issue_id, issue.id, detected_at)
+    }
+  end
+
+  defp tracked_issue?(%State{} = state, issue_id) do
+    MapSet.member?(state.claimed, issue_id) or Map.has_key?(state.running, issue_id) or
+      Map.has_key?(state.blocked, issue_id)
+  end
+
+  defp previous_detected_at(previous_by_issue_id, issue_id, fallback) when is_map(previous_by_issue_id) do
+    previous_by_issue_id
+    |> Map.get(issue_id, %{})
+    |> Map.get(:detected_at, fallback)
+  end
+
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
     Enum.sort_by(issues, fn
       %Issue{} = issue ->
@@ -3665,72 +3780,86 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_routable_to_repository?(%Issue{} = issue) do
     settings = Config.settings!()
 
-    if settings.tracker.all_projects do
-      issue_matches_all_projects_repository_route?(issue, settings)
-    else
-      true
+    case repository_route_status(issue, settings) do
+      :ok ->
+        true
+
+      {:error, reason, details} ->
+        log_repository_route_skip(issue, reason, details)
+        false
     end
   end
 
-  defp issue_matches_all_projects_repository_route?(%Issue{} = issue, settings) do
-    if RepositoryResolver.repository_hint?(issue),
-      do: issue_matches_repository_hint_route?(issue, settings),
-      else: issue_matches_unique_project_route?(issue, settings)
+  defp repository_route_status(%Issue{} = issue, settings) do
+    if settings.tracker.all_projects do
+      all_projects_repository_route_status(issue, settings)
+    else
+      :ok
+    end
   end
 
-  defp issue_matches_repository_hint_route?(%Issue{} = issue, settings) do
+  defp all_projects_repository_route_status(%Issue{} = issue, settings) do
+    if RepositoryResolver.repository_hint?(issue),
+      do: repository_hint_route_status(issue, settings),
+      else: unique_project_route_status(issue, settings)
+  end
+
+  defp repository_hint_route_status(%Issue{} = issue, settings) do
     case RepositoryResolver.resolve(issue, settings) do
       {:ok, %{slug: repo_slug, name: repo_name}}
       when is_binary(repo_slug) and is_binary(repo_name) ->
-        resolved_repository_route_matches?(issue, repo_slug, repo_name, settings)
+        if linear_project_matches_repository?(issue, repo_slug, repo_name, settings) do
+          :ok
+        else
+          {:error, :repository_project_mismatch, %{repo_slug: repo_slug}}
+        end
 
       {:error, reason} ->
-        Logger.debug("Skipping dispatch; repository route failed for #{issue_context(issue)}: #{inspect(reason)}")
-        false
+        {:error, :repository_hint_error, %{error: inspect(reason)}}
 
       _invalid ->
-        false
+        {:error, :repository_hint_error, %{error: "invalid repository resolver response"}}
     end
   end
 
-  defp issue_matches_unique_project_route?(%Issue{} = issue, settings) do
+  defp unique_project_route_status(%Issue{} = issue, settings) do
     case RepositoryResolver.project_route_slug(issue, settings) do
       {:ok, _repo_slug} ->
-        true
+        :ok
 
       :none ->
-        Logger.debug(
-          "Skipping dispatch; Linear project does not match any repository route for #{issue_context(issue)} " <>
-            "project_name=#{inspect(issue.project_name)} project_slug=#{inspect(issue.project_slug)}"
-        )
-
-        false
+        {:error, :missing_project_route, %{}}
 
       {:error, {:ambiguous_repository_project_routes, repo_slugs}} ->
-        Logger.debug(
-          "Skipping dispatch; Linear project matches multiple repository routes for #{issue_context(issue)} " <>
-            "repos=#{inspect(repo_slugs)} " <>
-            "project_name=#{inspect(issue.project_name)} project_slug=#{inspect(issue.project_slug)}"
-        )
-
-        false
+        {:error, :ambiguous_project_route, %{repo_slugs: repo_slugs}}
     end
   end
 
-  defp resolved_repository_route_matches?(%Issue{} = issue, repo_slug, repo_name, settings) do
-    if linear_project_matches_repository?(issue, repo_slug, repo_name, settings) do
-      true
-    else
-      log_repository_route_reject(issue, repo_slug)
-      false
-    end
-  end
-
-  defp log_repository_route_reject(%Issue{} = issue, repo_slug) do
+  defp log_repository_route_skip(%Issue{} = issue, reason, details) do
     Logger.debug(
-      "Skipping dispatch; Linear project does not match repository route for #{issue_context(issue)} " <>
-        "repo=#{repo_slug} project_name=#{inspect(issue.project_name)} project_slug=#{inspect(issue.project_slug)}"
+      "Skipping dispatch; #{repository_route_status_message(reason, details)} for #{issue_context(issue)} " <>
+        "project_name=#{inspect(issue.project_name)} project_slug=#{inspect(issue.project_slug)}"
     )
+  end
+
+  defp repository_route_status_message(:missing_project_route, _details) do
+    "Linear project is not mapped to a repository; add repository.project_routes or a trusted GitHub repo URL"
+  end
+
+  defp repository_route_status_message(:ambiguous_project_route, %{repo_slugs: repo_slugs}) do
+    "Linear project matches multiple repository routes: #{Enum.join(repo_slugs, ", ")}"
+  end
+
+  defp repository_route_status_message(:repository_project_mismatch, %{repo_slug: repo_slug}) do
+    "repository hint resolves to #{repo_slug}, but the Linear project does not match that repository route"
+  end
+
+  defp repository_route_status_message(:repository_hint_error, %{error: error}) do
+    "repository hint could not be resolved: #{error}"
+  end
+
+  defp repository_route_status_message(reason, details) do
+    "repository route check failed: #{inspect(reason)} #{inspect(details)}"
   end
 
   defp linear_project_matches_repository?(%Issue{} = issue, repo_slug, repo_name, settings)
@@ -4666,6 +4795,7 @@ defmodule SymphonyElixir.Orchestrator do
        landing: state.landing_queue || [],
        retrying: retrying,
        blocked: blocked,
+       unroutable: state.unroutable,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{

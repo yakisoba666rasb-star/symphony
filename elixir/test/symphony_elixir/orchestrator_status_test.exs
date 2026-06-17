@@ -2186,6 +2186,65 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert next_poll_in_ms <= 50
   end
 
+  test "orchestrator snapshot keeps unroutable issues when agent slots are full" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_team_key: "LAB",
+      tracker_project_slug: nil,
+      tracker_all_projects: true,
+      poll_interval_ms: 5_000,
+      repository_default: "yakisoba666rasb-star/symphony",
+      repository_project_routes: %{"yakisoba666rasb-star/symphony" => ["Symphony"]}
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    orchestrator_name = Module.concat(__MODULE__, :UnroutableNoSlotsOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      %{state | max_concurrent_agents: 0, running: %{}, claimed: MapSet.new(), blocked: %{}, unroutable: []}
+    end)
+
+    issue = %Issue{
+      id: "issue-no-route-no-slots",
+      identifier: "LAB-NO-ROUTE",
+      title: "Missing route should stay visible",
+      state: "Todo",
+      project_name: "auto_template",
+      project_slug: "899e25e6ce02"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    send(pid, :run_poll_cycle)
+
+    assert %{
+             running: [],
+             unroutable: [
+               %{
+                 identifier: "LAB-NO-ROUTE",
+                 reason: "missing_project_route",
+                 project_name: "auto_template"
+               }
+             ]
+           } =
+             wait_for_snapshot(
+               pid,
+               fn
+                 %{unroutable: [%{identifier: "LAB-NO-ROUTE"}]} -> true
+                 _ -> false
+               end,
+               1_000
+             )
+  end
+
   test "orchestrator hands off existing open PR before dispatching a new worker" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -6051,8 +6110,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
-    Process.sleep(50)
-    state = :sys.get_state(pid, 15_000)
+
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        error = get_in(state.blocked, [issue_id, :error])
+        is_binary(error) and error =~ "review handoff retry limit reached (1)"
+      end)
 
     refute_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 100
     assert_receive {:tracker_comment_called, ^issue_id, comment}, 200
@@ -7328,6 +7391,34 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     plain = Regex.replace(~r/\e\[[0-9;]*m/, rendered, "")
 
     assert plain =~ ~r/MT-777.*\r?\n│\s*\r?\n├─ Backoff queue/s
+  end
+
+  test "status dashboard renders unroutable issue routing reasons" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         unroutable: [
+           %{
+             issue_id: "issue-route",
+             identifier: "LAB-474",
+             project_name: "auto_template",
+             reason: "missing_project_route",
+             message: "Linear project is not mapped to a repository"
+           }
+         ],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
+    plain = Regex.replace(~r/\e\[[0-9;]*m/, rendered, "")
+
+    assert plain =~ "Routing attention"
+    assert plain =~ "LAB-474"
+    assert plain =~ "project=auto_template"
+    assert plain =~ "Linear project is not mapped to a repository"
   end
 
   test "status dashboard renders an unstyled closing corner when the retry queue is empty" do
