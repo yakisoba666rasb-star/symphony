@@ -315,6 +315,7 @@ defmodule SymphonyElixir.StatusDashboard do
            %{
              running: running,
              retrying: retrying,
+             unroutable: Map.get(snapshot, :unroutable, []),
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
@@ -334,6 +335,7 @@ defmodule SymphonyElixir.StatusDashboard do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
         rate_limits = Map.get(snapshot, :rate_limits)
+        unroutable = Map.get(snapshot, :unroutable, [])
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
         codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
@@ -345,6 +347,15 @@ defmodule SymphonyElixir.StatusDashboard do
         running_event_width = running_event_width(terminal_columns_override)
         running_rows = format_running_rows(running, running_event_width)
         running_to_backoff_spacer = if(running == [], do: [], else: ["│"])
+        routing_rows = format_unroutable_rows(unroutable)
+
+        routing_section =
+          if unroutable == [] do
+            []
+          else
+            ["│", colorize("├─ Routing attention", @ansi_bold), "│"] ++ routing_rows
+          end
+
         backoff_rows = format_retry_rows(retrying)
 
         ([
@@ -372,6 +383,7 @@ defmodule SymphonyElixir.StatusDashboard do
          ] ++
            running_rows ++
            running_to_backoff_spacer ++
+           routing_section ++
            [colorize("├─ Backoff queue", @ansi_bold), "│"] ++
            backoff_rows ++
            [closing_border()])
@@ -569,6 +581,7 @@ defmodule SymphonyElixir.StatusDashboard do
            %{
              running: running,
              retrying: retrying,
+             unroutable: Map.get(snapshot, :unroutable, []),
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
@@ -663,6 +676,27 @@ defmodule SymphonyElixir.StatusDashboard do
       |> Enum.map_join(", ", &format_retry_summary/1)
       |> String.split(", ")
     end
+  end
+
+  defp format_unroutable_rows(unroutable) do
+    unroutable
+    |> Enum.sort_by(&(&1.identifier || &1.issue_id || ""))
+    |> Enum.map(&format_unroutable_summary/1)
+  end
+
+  defp format_unroutable_summary(entry) do
+    identifier = entry.identifier || entry.issue_id || "unknown"
+    project = Map.get(entry, :project_name) || Map.get(entry, :project_slug) || "no project"
+    reason = Map.get(entry, :message) || Map.get(entry, :reason) || "repository route missing"
+
+    "│  " <>
+      colorize("!", @ansi_orange) <>
+      " " <>
+      colorize(identifier, @ansi_red) <>
+      colorize(" project=", @ansi_dim) <>
+      colorize(to_string(project), @ansi_cyan) <>
+      colorize(" reason=", @ansi_dim) <>
+      colorize(truncate_plain(reason, 96), @ansi_yellow)
   end
 
   defp format_retry_summary(retry_entry) do

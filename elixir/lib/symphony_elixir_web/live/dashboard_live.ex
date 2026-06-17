@@ -104,6 +104,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
+            <p class="metric-label">Routing missing</p>
+            <p class="metric-value numeric"><%= @payload.counts.unroutable %></p>
+            <p class="metric-detail">Active issues skipped because no safe repository route was found.</p>
+          </article>
+
+          <article class="metric-card">
             <p class="metric-label">Total tokens</p>
             <p class="metric-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
             <p class="metric-detail numeric">
@@ -116,6 +122,63 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
             <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
           </article>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Routing attention</h2>
+              <p class="section-copy">Active issues not dispatched because their repository route is missing or ambiguous.</p>
+            </div>
+          </div>
+
+          <%= if @payload.unroutable == [] do %>
+            <p class="empty-state">No routing issues.</p>
+          <% else %>
+            <div class="table-wrap">
+              <table class="data-table" style="min-width: 860px;">
+                <thead>
+                  <tr>
+                    <th>Issue</th>
+                    <th>State</th>
+                    <th>Project</th>
+                    <th>Reason</th>
+                    <th>Detected</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr :for={entry <- @payload.unroutable}>
+                    <td>
+                      <div class="issue-stack">
+                        <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                      </div>
+                    </td>
+                    <td>
+                      <span class={state_badge_class(entry.state || "Unroutable")}>
+                        <%= entry.state || "Unroutable" %>
+                      </span>
+                    </td>
+                    <td>
+                      <div class="detail-stack">
+                        <span><%= entry.project_name || "n/a" %></span>
+                        <span class="muted"><%= entry.project_slug || "n/a" %></span>
+                      </div>
+                    </td>
+                    <td>
+                      <div class="detail-stack">
+                        <span class="event-text" title={entry.message || entry.reason || "n/a"}>
+                          <%= entry.message || entry.reason || "n/a" %>
+                        </span>
+                        <span class="muted"><%= entry.reason || "n/a" %></span>
+                      </div>
+                    </td>
+                    <td class="mono"><%= entry.detected_at || "n/a" %></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          <% end %>
         </section>
 
         <section class="section-card">
