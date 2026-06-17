@@ -6,6 +6,7 @@ It uses the runtime engine repository itself as the deployment source of truth.
 ## Target State
 
 - Runtime engine repo: `yakisoba666rasb-star/symphony`
+- Runtime deploy checkout: `/home/ryo/src/symphony`, clean `main` only
 - Runtime workflow: `/home/ryo/src/symphony/ops/ryo/WORKFLOW.md`
 - Runtime workspace root: `/home/ryo/workspaces/symphony`
 - Runtime Linear project: `Symphony`
@@ -41,6 +42,7 @@ sudo cp /home/ryo/src/symphony/ops/ryo/systemd/symphony-engine.service.d/overrid
   /etc/systemd/system/symphony-engine.service.d/override.conf
 sudo systemctl daemon-reload
 /home/ryo/src/symphony/ops/ryo/install-logrotate.sh
+/home/ryo/src/symphony/ops/ryo/check-deploy-checkout.sh /home/ryo/src/symphony
 /home/ryo/src/symphony/ops/ryo/preflight.sh /home/ryo/src/symphony/ops/ryo/WORKFLOW.md
 sudo systemctl restart symphony-engine.service
 curl -fsS http://127.0.0.1:4000/api/v1/state
@@ -57,6 +59,38 @@ is not installed, `/var/log/symphony-ryo/engine.log` and
 
 `preflight.sh` validates that `/var/log/symphony-ryo` exists and is writable by
 the `ryo` runtime user before it validates the workflow configuration.
+
+`check-deploy-checkout.sh` is the non-mutating guard used by systemd before the
+engine starts. During service startup it requires `/home/ryo/src/symphony` to be
+the repository root, on `main`, and clean. The systemd unit intentionally runs
+it with `SYMPHONY_DEPLOY_CHECK_REMOTE_REF=0` so a host reboot or crash restart
+does not fail only because another worktree has fetched a newer `origin/main`.
+
+The deployment script below runs the same guard with the default remote-ref
+check enabled, after fetching and fast-forwarding `main`. That keeps explicit
+deployments tied to `origin/main` without making service self-recovery depend on
+network or remote-tracking-ref freshness.
+
+## Deploy Updates
+
+Use `deploy-main.sh` for normal runtime updates:
+
+```bash
+/home/ryo/src/symphony/ops/ryo/deploy-main.sh
+```
+
+The script refuses to update a dirty deploy checkout. If `/home/ryo/src/symphony`
+contains local edits, move them to a worktree, commit them, or stash them before
+deployment. After the checkout is clean, the script fetches `origin`, fast-forward
+pulls `main`, validates the checkout guard, builds the escript, runs preflight,
+restarts `symphony-engine.service`, and waits for `/api/v1/state`.
+
+Do PR work and conflict resolution in a separate worktree, not in
+`/home/ryo/src/symphony`:
+
+```bash
+git -C /home/ryo/src/symphony worktree add /tmp/symphony-feature -b codex/example origin/main
+```
 
 ## Optional auto-template Integration
 
