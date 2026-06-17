@@ -176,6 +176,18 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
              GitHubPrLookup.lookup_by_head("octo/repo", "feature/fail", deps)
   end
 
+  test "runtime command runner returns timeout instead of blocking indefinitely" do
+    command = System.find_executable("sh")
+    assert is_binary(command)
+
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, {:command_timeout, 50}} =
+             GitHubPrLookup.run_system_cmd(command, ["-c", "sleep 2"], timeout_ms: 50)
+
+    assert System.monotonic_time(:millisecond) - started_at < 1_000
+  end
+
   test "returns error when gh command exits with a non-zero status" do
     deps = %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,
