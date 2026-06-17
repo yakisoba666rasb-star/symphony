@@ -15,10 +15,13 @@ GitHub issue filed
   -> repository + Linear Project auto-resolved
   -> dispatch -> agent implements -> self-review / rework loop
   -> ready PR detected -> Linear In Review
-  -> human moves approved issues to Approved to Land
-  -> Symphony lands approved PRs in order
+  -> human merges PR
   -> Linear Done + source GitHub issue closed
 ```
+
+The planned [Approved to Land](approved_to_land.md) extension changes the human
+action from manually merging each PR to moving approved Linear issues into
+`Approved to Land`; Symphony then lands the approved PRs in order.
 
 Ownership model:
 
@@ -200,13 +203,14 @@ Design:
   runtime persistence; restart-safe).
 - **KPIs**:
   - zero-touch completion rate: loops finished with no human state moves
-    (Linear `issueHistory` actor check) other than `Approved to Land`.
+    (Linear `issueHistory` actor check) other than the merge. When the
+    Approved to Land extension ships, this exception becomes the
+    `Approved to Land` transition.
   - per-leg latency from the evidence comments.
   - human unblock interventions per week (existing Phase 3 KPI).
 - **Acceptance run**: file one labeled GitHub issue (W5) in a registered
-  repo and verify it reaches Done + source-closed with the `Approved to Land`
-  approval as the only human action; record the evidence comment as the proof
-  artifact.
+  repo and verify it reaches Done + source-closed with merge as the only
+  human action; record the evidence comment as the proof artifact.
 
 ## Config Summary (new keys)
 
