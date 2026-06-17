@@ -718,9 +718,20 @@ defmodule SymphonyElixir.Workspace do
     basename = Path.basename(path)
 
     with true <- File.dir?(path),
-         [date, time] <- Regex.run(~r/\.dirty-(\d{8})-(\d{6})$/, basename, capture: :all_but_first),
+         [date, time] <- Regex.run(~r/\.dirty-(\d{8})-(\d{6})(?:-\d+)?$/, basename, capture: :all_but_first),
          {:ok, naive} <- NaiveDateTime.from_iso8601(dirty_timestamp_iso8601(date, time)) do
       {:ok, DateTime.from_naive!(naive, "Etc/UTC")}
+    else
+      _ -> dirty_reason_log_timestamp(path, basename)
+    end
+  end
+
+  defp dirty_reason_log_timestamp(path, basename) do
+    with true <- String.ends_with?(basename, ".dirty-reason.log"),
+         true <- File.regular?(path),
+         {:ok, %{mtime: mtime}} <- File.stat(path, time: :posix),
+         {:ok, timestamp} <- DateTime.from_unix(mtime) do
+      {:ok, timestamp}
     else
       _ -> :error
     end

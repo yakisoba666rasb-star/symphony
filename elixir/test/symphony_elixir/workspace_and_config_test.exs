@@ -1524,7 +1524,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
-  test "workspace cleanup removes only expired dirty quarantine directories" do
+  test "workspace cleanup removes only expired dirty quarantine artifacts" do
     workspace_root =
       Path.join(
         System.tmp_dir!(),
@@ -1533,15 +1533,31 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     try do
       expired_dirty = Path.join(workspace_root, "MT-OLD.dirty-20260501-000000")
+      expired_suffixed_dirty = Path.join(workspace_root, "MT-OLD-SUFFIX.dirty-20260501-000000-37")
+      expired_remote_suffixed_dirty = Path.join(workspace_root, "MT-OLD-REMOTE.dirty-20260501-000000-12345")
       fresh_dirty = Path.join(workspace_root, "MT-NEW.dirty-20260525-000000")
+      fresh_suffixed_dirty = Path.join(workspace_root, "MT-NEW-SUFFIX.dirty-20260525-000000-37")
+      expired_reason_log = Path.join(workspace_root, "MT-OLD.dirty-reason.log")
+      fresh_reason_log = Path.join(workspace_root, "MT-NEW.dirty-reason.log")
       normal_workspace = Path.join(workspace_root, "MT-NORMAL")
 
       File.mkdir_p!(expired_dirty)
+      File.mkdir_p!(expired_suffixed_dirty)
+      File.mkdir_p!(expired_remote_suffixed_dirty)
       File.mkdir_p!(fresh_dirty)
+      File.mkdir_p!(fresh_suffixed_dirty)
       File.mkdir_p!(normal_workspace)
       File.write!(Path.join(expired_dirty, "marker.txt"), "remove")
+      File.write!(Path.join(expired_suffixed_dirty, "marker.txt"), "remove")
+      File.write!(Path.join(expired_remote_suffixed_dirty, "marker.txt"), "remove")
       File.write!(Path.join(fresh_dirty, "marker.txt"), "keep")
+      File.write!(Path.join(fresh_suffixed_dirty, "marker.txt"), "keep")
       File.write!(Path.join(normal_workspace, "marker.txt"), "keep")
+      File.write!(expired_reason_log, "remove")
+      File.write!(fresh_reason_log, "keep")
+
+      File.touch!(expired_reason_log, DateTime.to_unix(~U[2026-05-01 00:00:00Z]))
+      File.touch!(fresh_reason_log, DateTime.to_unix(~U[2026-05-25 00:00:00Z]))
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
@@ -1550,13 +1566,28 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       now = ~U[2026-05-26 00:00:00Z]
 
-      assert {:ok, %{removed: [^expired_dirty], kept: kept}} =
+      assert {:ok, %{removed: removed, kept: kept}} =
                Workspace.cleanup_dirty_workspaces(now: now)
 
+      assert Enum.sort(removed) ==
+               Enum.sort([
+                 expired_dirty,
+                 expired_suffixed_dirty,
+                 expired_remote_suffixed_dirty,
+                 expired_reason_log
+               ])
+
       refute File.exists?(expired_dirty)
+      refute File.exists?(expired_suffixed_dirty)
+      refute File.exists?(expired_remote_suffixed_dirty)
+      refute File.exists?(expired_reason_log)
       assert File.exists?(fresh_dirty)
+      assert File.exists?(fresh_suffixed_dirty)
+      assert File.exists?(fresh_reason_log)
       assert File.exists?(normal_workspace)
       assert fresh_dirty in kept
+      assert fresh_suffixed_dirty in kept
+      assert fresh_reason_log in kept
       refute normal_workspace in kept
     after
       File.rm_rf(workspace_root)
