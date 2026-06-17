@@ -375,38 +375,43 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp cleanup_remote_dirty_workspaces(settings, now, retention_days) do
-    cutoff =
-      now
-      |> DateTime.add(-retention_days, :day)
-      |> Calendar.strftime("%Y%m%d-%H%M%S")
+    cutoff = DateTime.add(now, -retention_days, :day)
+    cutoff_timestamp = Calendar.strftime(cutoff, "%Y%m%d-%H%M%S")
+    cutoff_epoch = DateTime.to_unix(cutoff)
 
     Enum.each(settings.worker.ssh_hosts, fn worker_host ->
       cleanup_remote_dirty_workspaces(
         settings.workspace.root,
         worker_host,
-        cutoff,
+        cutoff_timestamp,
+        cutoff_epoch,
         settings.hooks.timeout_ms
       )
     end)
   end
 
-  defp cleanup_remote_dirty_workspaces(root, worker_host, cutoff, timeout_ms) do
+  defp cleanup_remote_dirty_workspaces(root, worker_host, cutoff_timestamp, cutoff_epoch, timeout_ms) do
     case validate_remote_path_characters(root) do
       :ok ->
         script =
           [
             "set -eu",
             remote_shell_assign("root", root),
-            remote_shell_assign("cutoff", cutoff),
+            remote_shell_assign("cutoff", cutoff_timestamp),
+            remote_shell_assign("cutoff_epoch", Integer.to_string(cutoff_epoch)),
             "if [ ! -d \"$root\" ]; then",
             "  exit 0",
             "fi",
             "shopt -s nullglob",
             "for dirty_workspace in \"$root\"/*.dirty-*; do",
-            "  [ -d \"$dirty_workspace\" ] || continue",
             "  dirty_workspace_name=\"$(basename \"$dirty_workspace\")\"",
-            "  if [[ \"$dirty_workspace_name\" =~ \\.dirty-([0-9]{8}-[0-9]{6})(-[0-9]+)?$ ]] && [[ \"${BASH_REMATCH[1]}\" < \"$cutoff\" ]]; then",
+            "  if [ -d \"$dirty_workspace\" ] && [[ \"$dirty_workspace_name\" =~ \\.dirty-([0-9]{8}-[0-9]{6})(-[0-9]+)?$ ]] && [[ \"${BASH_REMATCH[1]}\" < \"$cutoff\" ]]; then",
             "    rm -rf -- \"$dirty_workspace\"",
+            "  elif [ -f \"$dirty_workspace\" ] && [[ \"$dirty_workspace_name\" == *.dirty-reason.log ]]; then",
+            "    dirty_reason_log_mtime=\"$(stat -c %Y \"$dirty_workspace\" 2>/dev/null || true)\"",
+            "    if [ -n \"$dirty_reason_log_mtime\" ] && [ \"$dirty_reason_log_mtime\" -lt \"$cutoff_epoch\" ]; then",
+            "      rm -rf -- \"$dirty_workspace\"",
+            "    fi",
             "  fi",
             "done"
           ]

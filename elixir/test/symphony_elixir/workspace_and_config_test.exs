@@ -1651,7 +1651,89 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert trace =~ "20260519-000000"
       assert trace =~ ~s(for dirty_workspace in "$root"/*.dirty-*; do)
       assert trace =~ ~s([[ "${BASH_REMATCH[1]}" < "$cutoff" ]])
+      assert trace =~ ~s([[ "$dirty_workspace_name" == *.dirty-reason.log ]])
+      assert trace =~ ~s(stat -c %Y "$dirty_workspace")
+      assert trace =~ ~s([ "$dirty_reason_log_mtime" -lt "$cutoff_epoch" ])
       assert trace =~ ~s(rm -rf -- "$dirty_workspace")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace cleanup removes expired remote dirty reason logs by mtime" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-dirty-reason-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+    previous_remote_root = System.get_env("SYMP_TEST_REMOTE_ROOT")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+      restore_env("SYMP_TEST_REMOTE_ROOT", previous_remote_root)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      remote_workspace_root = Path.join(test_root, "remote-workspaces")
+      expired_reason_log = Path.join(remote_workspace_root, "MT-OLD.dirty-reason.log")
+      fresh_reason_log = Path.join(remote_workspace_root, "MT-NEW.dirty-reason.log")
+      expired_dirty = Path.join(remote_workspace_root, "MT-OLD.dirty-20260501-000000")
+      fresh_dirty = Path.join(remote_workspace_root, "MT-NEW.dirty-20260525-000000")
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("SYMP_TEST_REMOTE_ROOT", remote_workspace_root)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      remote_root="${SYMP_TEST_REMOTE_ROOT:?}"
+      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+
+      mkdir -p "$remote_root/MT-OLD.dirty-20260501-000000"
+      mkdir -p "$remote_root/MT-NEW.dirty-20260525-000000"
+      : > "$remote_root/MT-OLD.dirty-reason.log"
+      : > "$remote_root/MT-NEW.dirty-reason.log"
+      touch -t 202605010000 "$remote_root/MT-OLD.dirty-reason.log"
+      touch -t 202605250000 "$remote_root/MT-NEW.dirty-reason.log"
+
+      last_arg=
+      for arg do
+        last_arg="$arg"
+      done
+
+      sh -c "$last_arg" >> "$trace_file" 2>&1
+      exit $?
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: remote_workspace_root,
+        dirty_workspace_retention_days: 7,
+        worker_ssh_hosts: ["worker-01"]
+      )
+
+      now = ~U[2026-05-26 00:00:00Z]
+
+      assert {:ok, %{removed: [], kept: []}} = Workspace.cleanup_dirty_workspaces(now: now)
+
+      refute File.exists?(expired_reason_log)
+      assert File.exists?(fresh_reason_log)
+      refute File.exists?(expired_dirty)
+      assert File.exists?(fresh_dirty)
+
+      trace = File.read!(trace_file)
+      assert trace =~ "-- worker-01 bash -lc"
+      assert trace =~ ~s([[ "$dirty_workspace_name" == *.dirty-reason.log ]])
+      assert trace =~ ~s([ "$dirty_reason_log_mtime" -lt "$cutoff_epoch" ])
     after
       File.rm_rf(test_root)
     end
