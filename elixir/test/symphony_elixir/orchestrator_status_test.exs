@@ -32,6 +32,87 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     def adapter, do: FakeLinearIntakeAdapter
   end
 
+  defmodule FakeLandingTracker do
+    def fetch_issues_by_states(states) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:landing_fetch_states, states})
+
+        _ ->
+          :ok
+      end
+
+      {:ok, Application.get_env(:symphony_elixir, :landing_planner_issues, [])}
+    end
+
+    def create_comment(issue_id, body) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:landing_comment, issue_id, body})
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
+
+    def update_issue_state(issue_id, state_name) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:landing_state_update, issue_id, state_name})
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
+  end
+
+  defmodule FakeLandingWorker do
+    def execute(settings, _tracker, queue) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:landing_worker_execute, settings.landing.execute_enabled, length(queue)})
+
+        _ ->
+          :ok
+      end
+
+      %{
+        enabled: settings.landing.enabled and settings.landing.execute_enabled,
+        attempted: 0,
+        merged: 0,
+        blocked: 0,
+        skipped: 0,
+        errors: 0
+      }
+    end
+  end
+
+  defmodule FakeLandingPrLookup do
+    def lookup_open_issue_pull_request(repo, issue_identifier, _issue_url, branch_name, _attachment_urls) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:landing_pr_lookup, repo, issue_identifier, branch_name})
+
+        _ ->
+          :ok
+      end
+
+      {:ok,
+       %{
+         "number" => 600,
+         "url" => "https://github.com/octo/repo/pull/600",
+         "headRefName" => branch_name,
+         "isDraft" => false,
+         "mergeStateStatus" => "CLEAN",
+         "state" => "OPEN"
+       }}
+    end
+  end
+
   defmodule FakeGitHubPrLookupFound do
     def lookup_workspace_head(_workspace_path, _branch_name), do: {:ok, %{"number" => 123, "url" => "https://example.org/pull/123"}}
   end
@@ -1057,6 +1138,74 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end)
 
     assert log =~ "GitHub issue intake sync task exited before completion"
+  end
+
+  test "Approved to Land dry-run planning runs immediately and respects interval throttle" do
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_worker = Application.get_env(:symphony_elixir, :landing_worker)
+    previous_comment_recipient = Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+    previous_landing_issues = Application.get_env(:symphony_elixir, :landing_planner_issues)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup),
+        do: Application.delete_env(:symphony_elixir, :github_pr_lookup),
+        else: Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+
+      if is_nil(previous_tracker),
+        do: Application.delete_env(:symphony_elixir, :tracker_module),
+        else: Application.put_env(:symphony_elixir, :tracker_module, previous_tracker)
+
+      if is_nil(previous_worker),
+        do: Application.delete_env(:symphony_elixir, :landing_worker),
+        else: Application.put_env(:symphony_elixir, :landing_worker, previous_worker)
+
+      if is_nil(previous_comment_recipient),
+        do: Application.delete_env(:symphony_elixir, :tracker_comment_recipient),
+        else: Application.put_env(:symphony_elixir, :tracker_comment_recipient, previous_comment_recipient)
+
+      if is_nil(previous_landing_issues),
+        do: Application.delete_env(:symphony_elixir, :landing_planner_issues),
+        else: Application.put_env(:symphony_elixir, :landing_planner_issues, previous_landing_issues)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true,
+      poll_interval_ms: 50,
+      landing_interval_ms: 1_000,
+      repository_default: "octo/repo"
+    )
+
+    issue = %Issue{
+      id: "issue-landing",
+      identifier: "LAB-LAND",
+      title: "Ready to land",
+      state: "Approved to Land",
+      branch_name: "lab-land"
+    }
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeLandingPrLookup)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeLandingTracker)
+    Application.put_env(:symphony_elixir, :landing_worker, FakeLandingWorker)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+    Application.put_env(:symphony_elixir, :landing_planner_issues, [issue])
+
+    state = Orchestrator.plan_approved_landings_for_test(%Orchestrator.State{})
+    assert is_integer(state.last_landing_plan_ms)
+    assert [%{issue_identifier: "LAB-LAND", queue_position: 1, planned_action: "merge", blocker: "none"}] = state.landing_queue
+    assert_receive {:landing_fetch_states, ["Approved to Land"]}
+    assert_receive {:landing_pr_lookup, "octo/repo", "LAB-LAND", "lab-land"}
+    assert_receive {:landing_comment, "issue-landing", body}
+    assert body =~ "Symphony Approved to Land dry-run plan"
+    assert_receive {:landing_worker_execute, true, 1}
+
+    _state = Orchestrator.plan_approved_landings_for_test(state)
+    refute_receive {:landing_fetch_states, _states}, 100
+
+    due_state = %{state | last_landing_plan_ms: System.monotonic_time(:millisecond) - 1_001}
+    _state = Orchestrator.plan_approved_landings_for_test(due_state)
+    assert_receive {:landing_fetch_states, ["Approved to Land"]}, 200
   end
 
   test "Done sync runs immediately and respects interval throttle" do

@@ -122,6 +122,15 @@ defmodule SymphonyElixir.TestSupport do
           github_intake_retry_ttl_ms: 3_600_000,
           github_intake_limit: 100,
           done_sync_interval_ms: 120_000,
+          landing_enabled: false,
+          landing_approval_state: "Approved to Land",
+          landing_in_progress_state: "Landing",
+          landing_blocked_state: "Blocked",
+          landing_interval_ms: 120_000,
+          landing_execute_enabled: false,
+          landing_merge_method: "squash",
+          landing_max_per_run: 1,
+          landing_command_timeout_ms: 120_000,
           review_rework_interval_ms: 120_000,
           stall_enabled: true,
           stall_threshold_ms: 900_000,
@@ -192,6 +201,15 @@ defmodule SymphonyElixir.TestSupport do
     github_intake_retry_ttl_ms = Keyword.get(config, :github_intake_retry_ttl_ms)
     github_intake_limit = Keyword.get(config, :github_intake_limit)
     done_sync_interval_ms = Keyword.get(config, :done_sync_interval_ms)
+    landing_enabled = Keyword.get(config, :landing_enabled)
+    landing_approval_state = Keyword.get(config, :landing_approval_state)
+    landing_in_progress_state = Keyword.get(config, :landing_in_progress_state)
+    landing_blocked_state = Keyword.get(config, :landing_blocked_state)
+    landing_interval_ms = Keyword.get(config, :landing_interval_ms)
+    landing_execute_enabled = Keyword.get(config, :landing_execute_enabled)
+    landing_merge_method = Keyword.get(config, :landing_merge_method)
+    landing_max_per_run = Keyword.get(config, :landing_max_per_run)
+    landing_command_timeout_ms = Keyword.get(config, :landing_command_timeout_ms)
     stall_enabled = Keyword.get(config, :stall_enabled)
     stall_threshold_ms = Keyword.get(config, :stall_threshold_ms)
     stall_review_threshold_ms = Keyword.get(config, :stall_review_threshold_ms)
@@ -268,6 +286,17 @@ defmodule SymphonyElixir.TestSupport do
           github_intake_limit
         ),
         done_sync_yaml(done_sync_interval_ms),
+        landing_yaml(%{
+          enabled: landing_enabled,
+          approval_state: landing_approval_state,
+          in_progress_state: landing_in_progress_state,
+          blocked_state: landing_blocked_state,
+          interval_ms: landing_interval_ms,
+          execute_enabled: landing_execute_enabled,
+          merge_method: landing_merge_method,
+          max_per_run: landing_max_per_run,
+          command_timeout_ms: landing_command_timeout_ms
+        }),
         stall_yaml(stall_enabled, stall_threshold_ms, stall_review_threshold_ms),
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
@@ -342,6 +371,35 @@ defmodule SymphonyElixir.TestSupport do
       "  interval_ms: #{yaml_value(interval_ms)}",
       "  retry_ttl_ms: #{yaml_value(retry_ttl_ms)}",
       "  limit: #{yaml_value(limit)}"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp landing_yaml(%{
+         enabled: false,
+         approval_state: "Approved to Land",
+         in_progress_state: "Landing",
+         blocked_state: "Blocked",
+         interval_ms: 120_000,
+         execute_enabled: false,
+         merge_method: "squash",
+         max_per_run: 1,
+         command_timeout_ms: 120_000
+       }),
+       do: nil
+
+  defp landing_yaml(config) do
+    [
+      "landing:",
+      "  enabled: #{yaml_value(config.enabled)}",
+      "  execute_enabled: #{yaml_value(config.execute_enabled)}",
+      "  approval_state: #{yaml_value(config.approval_state)}",
+      "  in_progress_state: #{yaml_value(config.in_progress_state)}",
+      "  blocked_state: #{yaml_value(config.blocked_state)}",
+      "  interval_ms: #{yaml_value(config.interval_ms)}",
+      "  merge_method: #{yaml_value(config.merge_method)}",
+      "  max_per_run: #{yaml_value(config.max_per_run)}",
+      "  command_timeout_ms: #{yaml_value(config.command_timeout_ms)}"
     ]
     |> Enum.join("\n")
   end

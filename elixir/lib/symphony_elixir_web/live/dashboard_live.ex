@@ -92,6 +92,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
+            <p class="metric-label">Approved to Land</p>
+            <p class="metric-value numeric"><%= @payload.counts.landing %></p>
+            <p class="metric-detail">Human-approved PRs waiting in the landing dry-run queue.</p>
+          </article>
+
+          <article class="metric-card">
             <p class="metric-label">Retrying</p>
             <p class="metric-value numeric"><%= @payload.counts.retrying %></p>
             <p class="metric-detail">Issues waiting for the next retry window.</p>
@@ -169,6 +175,70 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <% end %>
                     </td>
                     <td class="numeric"><%= format_runtime_seconds(runtime_seconds_from_started_at(entry.started_at, @now)) %></td>
+                    <td>
+                      <%= if entry.pr_url && entry.pr_url != "unknown" do %>
+                        <a class="issue-link" href={entry.pr_url}>Open PR</a>
+                      <% else %>
+                        <span class="muted">n/a</span>
+                      <% end %>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          <% end %>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Approved to Land queue</h2>
+              <p class="section-copy">Landing order, PR readiness, and blockers used by the guarded merge worker.</p>
+            </div>
+          </div>
+
+          <%= if @payload.landing == [] do %>
+            <p class="empty-state">No issues are approved to land.</p>
+          <% else %>
+            <div class="table-wrap">
+              <table class="data-table" style="min-width: 980px;">
+                <thead>
+                  <tr>
+                    <th>Order</th>
+                    <th>Issue</th>
+                    <th>Action</th>
+                    <th>Repository</th>
+                    <th>PR state</th>
+                    <th>Mergeability</th>
+                    <th>Blocker</th>
+                    <th>PR</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr :for={entry <- @payload.landing}>
+                    <td class="numeric">
+                      <%= entry.queue_position || "n/a" %>/<%= entry.queue_total || "n/a" %>
+                    </td>
+                    <td>
+                      <div class="issue-stack">
+                        <span class="issue-id"><%= entry.issue_identifier || "unknown" %></span>
+                        <span class="muted event-meta"><%= entry.title || "n/a" %></span>
+                      </div>
+                    </td>
+                    <td>
+                      <span class={state_badge_class(entry.planned_action || entry.status || "unknown")}>
+                        <%= entry.planned_action || "unknown" %>
+                      </span>
+                    </td>
+                    <td class="mono"><%= entry.repository || "unknown" %></td>
+                    <td><%= entry.pr_state || "unknown" %></td>
+                    <td><%= entry.mergeability || "unknown" %></td>
+                    <td>
+                      <span
+                        class="event-text"
+                        title={entry.blocker || "unknown"}
+                      ><%= entry.blocker || "unknown" %></span>
+                    </td>
                     <td>
                       <%= if entry.pr_url && entry.pr_url != "unknown" do %>
                         <a class="issue-link" href={entry.pr_url}>Open PR</a>
@@ -469,6 +539,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
     cond do
       String.contains?(normalized, ["progress", "running", "active"]) -> "#{base} state-badge-active"
+      String.contains?(normalized, ["approved", "merge", "ready"]) -> "#{base} state-badge-active"
       String.contains?(normalized, ["blocked", "error", "failed"]) -> "#{base} state-badge-danger"
       String.contains?(normalized, ["todo", "queued", "pending", "retry"]) -> "#{base} state-badge-warning"
       true -> base

@@ -18,10 +18,14 @@ tracker:
     - Duplicate
 landing:
   enabled: false
+  execute_enabled: false
   approval_state: Approved to Land
   in_progress_state: Landing
   blocked_state: Blocked
   interval_ms: 120000
+  merge_method: squash
+  max_per_run: 1
+  command_timeout_ms: 120000
 polling:
   interval_ms: 30000
 github_intake:

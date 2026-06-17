@@ -16,11 +16,13 @@ defmodule SymphonyElixirWeb.Presenter do
           counts: %{
             running: length(snapshot.running),
             reviewing: length(Map.get(snapshot, :reviewing, [])),
+            landing: length(Map.get(snapshot, :landing, [])),
             retrying: length(snapshot.retrying),
             blocked: length(Map.get(snapshot, :blocked, []))
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           reviewing: Enum.map(Map.get(snapshot, :reviewing, []), &reviewing_entry_payload/1),
+          landing: Enum.map(Map.get(snapshot, :landing, []), &landing_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
           codex_totals: snapshot.codex_totals,
@@ -151,6 +153,28 @@ defmodule SymphonyElixirWeb.Presenter do
       started_at: iso8601(entry.started_at),
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path)
+    }
+  end
+
+  defp landing_entry_payload(entry) do
+    %{
+      issue_id: Map.get(entry, :issue_id),
+      issue_identifier: Map.get(entry, :issue_identifier),
+      title: Map.get(entry, :title),
+      queue_position: Map.get(entry, :queue_position),
+      queue_total: Map.get(entry, :queue_total),
+      planned_action: Map.get(entry, :planned_action),
+      status: Map.get(entry, :status),
+      repository: Map.get(entry, :repository),
+      pr_url: Map.get(entry, :pr_url),
+      pr_state: Map.get(entry, :pr_state),
+      draft: Map.get(entry, :draft),
+      mergeability: Map.get(entry, :mergeability),
+      head_branch: Map.get(entry, :head_branch),
+      head_sha: Map.get(entry, :head_sha),
+      blocker: Map.get(entry, :blocker),
+      dry_run_comment_exists: Map.get(entry, :dry_run_comment_exists),
+      plan_id: Map.get(entry, :plan_id)
     }
   end
 

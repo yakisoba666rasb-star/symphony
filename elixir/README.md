@@ -59,8 +59,9 @@ still-active Linear issue can become a dispatch candidate again after restart.
      model. The expected active states are `Todo` and `In Progress`; the human-review handoff
      state is `In Review`; terminal states are `Done`, `Closed`, `Cancelled`, `Canceled`, and
      `Duplicate`. You can customize states in Team Settings → Workflow in Linear.
-   - For batch landing, add `Approved to Land` as the human approval state and `Landing` as the
-     runtime execution state. See [Approved to Land](docs/approved_to_land.md) for the draft design.
+   - For batch landing, add `Approved to Land` as the human approval state and `Landing`
+     as the runtime execution state. Keep `landing.execute_enabled` off until the
+     dry-run queue display is verified. See [Approved to Land](docs/approved_to_land.md).
    - Older examples may mention `Rework`, `Human Review`, or `Merging`; those are legacy
      workflow names and are not required for the current `In Review` handoff.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
@@ -116,7 +117,7 @@ Related operator and design references:
   for GitHub issue intake and label-gated promotion.
 - [Zero-Touch GitHub Issue Loop](docs/zero_touch_loop.md): GitHub issue -> Linear -> PR -> Done
   lifecycle and current leg status.
-- [Approved to Land](docs/approved_to_land.md): draft design for Linear-approved batch landing.
+- [Approved to Land](docs/approved_to_land.md): guarded planner and execution MVP for Linear-approved batch landing.
 - [Observability and Review-Loop Hardening Plan](docs/observability_hardening_plan.md): stall
   detection, log surfaces, acceptance runner, and changes-requested rework behavior.
 - [Logging Best Practices](docs/logging.md): required log context fields and message conventions.

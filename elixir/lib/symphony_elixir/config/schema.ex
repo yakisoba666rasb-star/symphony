@@ -181,20 +181,42 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:enabled, :boolean, default: false)
+      field(:execute_enabled, :boolean, default: false)
       field(:approval_state, :string, default: "Approved to Land")
       field(:in_progress_state, :string, default: "Landing")
       field(:blocked_state, :string, default: "Blocked")
       field(:interval_ms, :integer, default: 120_000)
+      field(:merge_method, :string, default: "squash")
+      field(:max_per_run, :integer, default: 1)
+      field(:command_timeout_ms, :integer, default: 120_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:enabled, :approval_state, :in_progress_state, :blocked_state, :interval_ms], empty_values: [])
+      |> cast(
+        attrs,
+        [
+          :enabled,
+          :execute_enabled,
+          :approval_state,
+          :in_progress_state,
+          :blocked_state,
+          :interval_ms,
+          :merge_method,
+          :max_per_run,
+          :command_timeout_ms
+        ],
+        empty_values: []
+      )
       |> update_change(:approval_state, &String.trim/1)
       |> update_change(:in_progress_state, &String.trim/1)
       |> update_change(:blocked_state, &String.trim/1)
+      |> update_change(:merge_method, &String.trim/1)
       |> validate_number(:interval_ms, greater_than: 0)
+      |> validate_number(:max_per_run, greater_than: 0)
+      |> validate_number(:command_timeout_ms, greater_than: 0)
+      |> validate_inclusion(:merge_method, ["squash", "merge", "rebase"])
       |> validate_change(:approval_state, &validate_state_name/2)
       |> validate_change(:in_progress_state, &validate_state_name/2)
       |> validate_change(:blocked_state, &validate_state_name/2)
