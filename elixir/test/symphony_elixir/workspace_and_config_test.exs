@@ -824,6 +824,44 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute Orchestrator.should_dispatch_issue_for_test(mismatched_project_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(wrong_project_runtime_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(runtime_project_worker_issue, state)
+
+    assert [
+             %{
+               identifier: "LAB-370",
+               reason: "repository_project_mismatch",
+               project_name: "Symphony"
+             },
+             %{
+               identifier: "LAB-372",
+               reason: "repository_project_mismatch",
+               project_name: nil
+             },
+             %{
+               identifier: "LAB-386",
+               reason: "repository_project_mismatch",
+               project_name: "Wrong Project"
+             },
+             %{
+               identifier: "LAB-388",
+               reason: "repository_project_mismatch",
+               project_name: "symphony"
+             }
+           ] =
+             Orchestrator.unroutable_issue_entries_for_test(
+               [
+                 remote_issue,
+                 synced_project_issue,
+                 mismatched_project_issue,
+                 runtime_project_issue,
+                 wrong_project_runtime_issue,
+                 worker_project_worker_issue,
+                 runtime_project_worker_issue,
+                 unprojected_remote_issue,
+                 no_hint_issue,
+                 no_hint_worker_project_issue
+               ],
+               state
+             )
   end
 
   test "all-projects dispatch rejects ambiguous project routes without GitHub hint" do
@@ -850,6 +888,64 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     refute Orchestrator.should_dispatch_issue_for_test(no_hint_issue, state)
+
+    assert [
+             %{
+               identifier: "LAB-394",
+               reason: "ambiguous_project_route",
+               details: %{repo_slugs: ["example-org/worker-app", "yakisoba666rasb-star/symphony"]}
+             }
+           ] = Orchestrator.unroutable_issue_entries_for_test([no_hint_issue], state)
+  end
+
+  test "all-projects dispatch exposes missing project route without dispatching" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_team_key: "LAB",
+      tracker_project_slug: nil,
+      tracker_all_projects: true,
+      repository_default: "yakisoba666rasb-star/symphony",
+      repository_project_routes: %{"yakisoba666rasb-star/symphony" => ["Symphony"]}
+    )
+
+    previous_detected_at = ~U[2026-06-17 09:00:00Z]
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      max_concurrent_agents: 3,
+      unroutable: [
+        %{
+          issue_id: "issue-474",
+          detected_at: previous_detected_at
+        }
+      ]
+    }
+
+    issue = %Issue{
+      id: "issue-474",
+      identifier: "LAB-474",
+      title: "save_dispatch_defaults should write atomically",
+      state: "Todo",
+      project_name: "auto_template",
+      project_slug: "899e25e6ce02"
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+    assert [
+             %{
+               identifier: "LAB-474",
+               state: "Todo",
+               project_name: "auto_template",
+               project_slug: "899e25e6ce02",
+               reason: "missing_project_route",
+               message: message,
+               detected_at: ^previous_detected_at
+             }
+           ] = Orchestrator.unroutable_issue_entries_for_test([issue], state)
+
+    assert message =~ "repository.project_routes"
   end
 
   test "auto-assigns missing Linear project from resolved repository unique project match" do

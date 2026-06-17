@@ -762,7 +762,13 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "reviewing" => 1, "retrying" => 1, "blocked" => 1},
+             "counts" => %{
+               "running" => 1,
+               "reviewing" => 1,
+               "retrying" => 1,
+               "blocked" => 1,
+               "unroutable" => 1
+             },
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -817,6 +823,20 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "last_event_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("last_event_at")
                }
              ],
+             "unroutable" => [
+               %{
+                 "issue_id" => "issue-unroutable",
+                 "issue_identifier" => "MT-ROUTE",
+                 "title" => "Missing project route",
+                 "state" => "Todo",
+                 "project_name" => "Unknown Project",
+                 "project_slug" => "unknown-project",
+                 "reason" => "missing_project_route",
+                 "message" => "Linear project is not mapped to a repository",
+                 "details" => %{},
+                 "detected_at" => state_payload["unroutable"] |> List.first() |> Map.fetch!("detected_at")
+               }
+             ],
              "codex_totals" => %{
                "input_tokens" => 4,
                "output_tokens" => 8,
@@ -853,6 +873,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "reviewing" => nil,
              "retry" => nil,
              "blocked" => nil,
+             "unroutable" => nil,
              "logs" => %{"codex_session_logs" => []},
              "recent_events" => [],
              "last_error" => nil,
@@ -886,6 +907,18 @@ defmodule SymphonyElixir.ExtensionsTest do
                "session_id" => "thread-blocked",
                "state" => "In Progress",
                "error" => "codex turn requires operator input"
+             }
+           } = json_response(conn, 200)
+
+    conn = get(build_conn(), "/api/v1/MT-ROUTE")
+
+    assert %{
+             "status" => "unroutable",
+             "issue_id" => "issue-unroutable",
+             "last_error" => "Linear project is not mapped to a repository",
+             "unroutable" => %{
+               "reason" => "missing_project_route",
+               "project_name" => "Unknown Project"
              }
            } = json_response(conn, 200)
 
@@ -1118,7 +1151,8 @@ defmodule SymphonyElixir.ExtensionsTest do
              "running" => 1,
              "reviewing" => 1,
              "retrying" => 1,
-             "blocked" => 1
+             "blocked" => 1,
+             "unroutable" => 1
            }
   end
 
@@ -1235,7 +1269,8 @@ defmodule SymphonyElixir.ExtensionsTest do
              "running" => 1,
              "reviewing" => 1,
              "retrying" => 1,
-             "blocked" => 1
+             "blocked" => 1,
+             "unroutable" => 1
            }
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
@@ -1338,6 +1373,20 @@ defmodule SymphonyElixir.ExtensionsTest do
             timestamp: DateTime.utc_now()
           },
           last_codex_timestamp: DateTime.utc_now()
+        }
+      ],
+      unroutable: [
+        %{
+          issue_id: "issue-unroutable",
+          identifier: "MT-ROUTE",
+          title: "Missing project route",
+          state: "Todo",
+          project_name: "Unknown Project",
+          project_slug: "unknown-project",
+          reason: "missing_project_route",
+          message: "Linear project is not mapped to a repository",
+          details: %{},
+          detected_at: DateTime.utc_now()
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
