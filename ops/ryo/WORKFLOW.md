@@ -16,6 +16,12 @@ tracker:
     - Cancelled
     - Canceled
     - Duplicate
+landing:
+  enabled: false
+  approval_state: Approved to Land
+  in_progress_state: Landing
+  blocked_state: Blocked
+  interval_ms: 120000
 polling:
   interval_ms: 30000
 github_intake:
@@ -179,6 +185,12 @@ or a human moves it.
 - `In Review`: this project's name for the official human-review handoff. The
   PR is ready for a human decision. Do not continue unless the issue moves back
   to `In Progress`.
+- `Approved to Land`: a human-approved landing state for the runtime landing
+  queue. This is not an implementation state; agents must not continue work
+  just because an issue enters this state.
+- `Landing`: the runtime is merging, closing, or repairing an approved queue
+  item. Agents must not merge directly from this state.
+- `Blocked`: the runtime needs human attention before landing can continue.
 - `Done`, `Closed`, `Cancelled`, `Canceled`, `Duplicate`: terminal.
 
 ## Superpowers planning gate

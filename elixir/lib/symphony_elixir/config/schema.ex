@@ -173,6 +173,40 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Landing do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:approval_state, :string, default: "Approved to Land")
+      field(:in_progress_state, :string, default: "Landing")
+      field(:blocked_state, :string, default: "Blocked")
+      field(:interval_ms, :integer, default: 120_000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :approval_state, :in_progress_state, :blocked_state, :interval_ms], empty_values: [])
+      |> update_change(:approval_state, &String.trim/1)
+      |> update_change(:in_progress_state, &String.trim/1)
+      |> update_change(:blocked_state, &String.trim/1)
+      |> validate_number(:interval_ms, greater_than: 0)
+      |> validate_change(:approval_state, &validate_state_name/2)
+      |> validate_change(:in_progress_state, &validate_state_name/2)
+      |> validate_change(:blocked_state, &validate_state_name/2)
+    end
+
+    defp validate_state_name(field, value) when is_binary(value) do
+      if String.trim(value) == "", do: [{field, "must not be blank"}], else: []
+    end
+
+    defp validate_state_name(field, _value), do: [{field, "must not be blank"}]
+  end
+
   defmodule Stall do
     @moduledoc false
     use Ecto.Schema
@@ -650,6 +684,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:github_intake, GitHubIntake, on_replace: :update, defaults_to_struct: true)
     embeds_one(:done_sync, DoneSync, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:landing, Landing, on_replace: :update, defaults_to_struct: true)
     embeds_one(:stall, Stall, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:repository, Repository, on_replace: :update, defaults_to_struct: true)
@@ -728,7 +763,9 @@ defmodule SymphonyElixir.Config.Schema do
 
   @spec normalize_issue_state(String.t()) :: String.t()
   def normalize_issue_state(state_name) when is_binary(state_name) do
-    String.downcase(state_name)
+    state_name
+    |> String.trim()
+    |> String.downcase()
   end
 
   @doc false
@@ -767,6 +804,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:github_intake, with: &GitHubIntake.changeset/2)
     |> cast_embed(:done_sync, with: &DoneSync.changeset/2)
+    |> cast_embed(:landing, with: &Landing.changeset/2)
     |> cast_embed(:stall, with: &Stall.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:repository, with: &Repository.changeset/2)
@@ -779,36 +817,39 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
-    |> validate_done_sync_interval()
-    |> validate_review_rework_interval()
+    |> validate_interval_at_least_polling(:done_sync)
+    |> validate_interval_at_least_polling(:landing)
+    |> validate_interval_at_least_polling(:review_rework)
+    |> validate_landing_approval_state()
     |> validate_stall_review_threshold()
   end
 
-  defp validate_done_sync_interval(changeset) do
+  defp validate_interval_at_least_polling(changeset, field) when is_atom(field) do
     polling = get_field(changeset, :polling)
-    done_sync = get_field(changeset, :done_sync)
+    settings = get_field(changeset, field)
 
     polling_interval_ms = if polling, do: polling.interval_ms
-    done_sync_interval_ms = if done_sync, do: done_sync.interval_ms
+    interval_ms = if settings, do: Map.get(settings, :interval_ms)
 
-    if is_integer(polling_interval_ms) and is_integer(done_sync_interval_ms) and
-         done_sync_interval_ms < polling_interval_ms do
-      add_error(changeset, :done_sync, "interval_ms must be greater than or equal to polling.interval_ms")
+    if is_integer(polling_interval_ms) and is_integer(interval_ms) and interval_ms < polling_interval_ms do
+      add_error(changeset, field, "interval_ms must be greater than or equal to polling.interval_ms")
     else
       changeset
     end
   end
 
-  defp validate_review_rework_interval(changeset) do
-    polling = get_field(changeset, :polling)
-    review_rework = get_field(changeset, :review_rework)
+  defp validate_landing_approval_state(changeset) do
+    tracker = get_field(changeset, :tracker)
+    landing = get_field(changeset, :landing)
 
-    polling_interval_ms = if polling, do: polling.interval_ms
-    review_rework_interval_ms = if review_rework, do: review_rework.interval_ms
+    active_states =
+      tracker
+      |> Map.get(:active_states, [])
+      |> Enum.map(&normalize_issue_state/1)
+      |> MapSet.new()
 
-    if is_integer(polling_interval_ms) and is_integer(review_rework_interval_ms) and
-         review_rework_interval_ms < polling_interval_ms do
-      add_error(changeset, :review_rework, "interval_ms must be greater than or equal to polling.interval_ms")
+    if landing && landing.enabled && MapSet.member?(active_states, normalize_issue_state(landing.approval_state)) do
+      add_error(changeset, :landing, "approval_state must not be included in tracker.active_states when landing.enabled is true")
     else
       changeset
     end

@@ -347,6 +347,78 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert message =~ "interval_ms must be greater than or equal to polling.interval_ms"
   end
 
+  test "workflow config supports Approved to Land landing settings" do
+    assert {:ok, settings} = Schema.parse(%{})
+    assert settings.landing.enabled == false
+    assert settings.landing.approval_state == "Approved to Land"
+    assert settings.landing.in_progress_state == "Landing"
+    assert settings.landing.blocked_state == "Blocked"
+    assert settings.landing.interval_ms == 120_000
+
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "polling" => %{"interval_ms" => 30_000},
+               "landing" => %{
+                 "enabled" => true,
+                 "approval_state" => " Approved to Land ",
+                 "in_progress_state" => " Landing ",
+                 "blocked_state" => " Needs Human ",
+                 "interval_ms" => 180_000
+               }
+             })
+
+    assert settings.landing.enabled == true
+    assert settings.landing.approval_state == "Approved to Land"
+    assert settings.landing.in_progress_state == "Landing"
+    assert settings.landing.blocked_state == "Needs Human"
+    assert settings.landing.interval_ms == 180_000
+  end
+
+  test "workflow config rejects enabled landing approval state in active dispatch states" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "tracker" => %{"active_states" => ["Todo", "Approved to Land"]},
+               "landing" => %{"enabled" => false, "approval_state" => "Approved to Land"}
+             })
+
+    assert settings.landing.enabled == false
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "tracker" => %{"active_states" => ["Todo", " Approved to Land "]},
+               "landing" => %{"enabled" => true, "approval_state" => "Approved to Land"}
+             })
+
+    assert message =~ "landing"
+    assert message =~ "approval_state must not be included in tracker.active_states"
+  end
+
+  test "workflow config rejects invalid Approved to Land landing settings" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "polling" => %{"interval_ms" => 30_000},
+               "landing" => %{
+                 "approval_state" => " ",
+                 "in_progress_state" => "",
+                 "blocked_state" => "\t"
+               }
+             })
+
+    assert message =~ "landing"
+    assert message =~ "approval_state"
+    assert message =~ "in_progress_state"
+    assert message =~ "blocked_state"
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "polling" => %{"interval_ms" => 30_000},
+               "landing" => %{"interval_ms" => 29_999}
+             })
+
+    assert message =~ "landing"
+    assert message =~ "interval_ms must be greater than or equal to polling.interval_ms"
+  end
+
   test "workflow config defaults Linear terminal states explicitly" do
     assert {:ok, settings} = Schema.parse(%{})
 

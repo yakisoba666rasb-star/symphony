@@ -13,6 +13,12 @@ tracker:
     - Cancelled
     - Canceled
     - Duplicate
+landing:
+  enabled: false
+  approval_state: Approved to Land
+  in_progress_state: Landing
+  blocked_state: Blocked
+  interval_ms: 120000
 polling:
   interval_ms: 30000
 workspace:
@@ -93,6 +99,9 @@ repository or in operator-managed runtime storage.
 9. Report whether the workspace is ready for runtime publication.
 10. Leave final merge or closure to a human unless the workflow explicitly says
     otherwise.
+11. If batch landing is enabled, treat `Approved to Land` as the human approval
+    state for the runtime landing queue. Do not merge or close PRs directly from
+    an implementation agent session.
 
 ## Completion Report
 
