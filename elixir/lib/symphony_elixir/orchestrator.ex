@@ -12,6 +12,8 @@ defmodule SymphonyElixir.Orchestrator do
     GitHubIssue,
     GitHubReviewStatus,
     HermesDelegation,
+    LandingPlanner,
+    LandingWorker,
     RepositoryResolver,
     RepositoryRoutes,
     RetryPolicy,
@@ -60,6 +62,8 @@ defmodule SymphonyElixir.Orchestrator do
       github_intake_task: nil,
       last_github_intake_sync_ms: nil,
       last_done_sync_ms: nil,
+      last_landing_plan_ms: nil,
+      landing_queue: [],
       last_review_rework_sync_ms: nil,
       codex_totals: nil,
       codex_rate_limits: nil
@@ -556,6 +560,10 @@ defmodule SymphonyElixir.Orchestrator do
     Application.get_env(:symphony_elixir, :github_issue, GitHubIssue)
   end
 
+  defp landing_worker_module do
+    Application.get_env(:symphony_elixir, :landing_worker, LandingWorker)
+  end
+
   defp github_issue_intake_adapter do
     tracker = tracker_module()
 
@@ -1050,6 +1058,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> reconcile_blocked_issues()
       |> reconcile_active_open_pr_handoffs()
       |> reconcile_review_rework_requests()
+      |> maybe_plan_approved_landings()
       |> maybe_sync_merged_linked_pull_requests_to_done()
 
     with :ok <- Config.validate!(),
@@ -1218,6 +1227,46 @@ defmodule SymphonyElixir.Orchestrator do
        when is_integer(last_sync_ms) do
     System.monotonic_time(:millisecond) - last_sync_ms >= settings.done_sync.interval_ms
   end
+
+  defp maybe_plan_approved_landings(%State{} = state) do
+    settings = Config.settings!()
+
+    if landing_plan_due?(state, settings) do
+      result = LandingPlanner.reconcile(settings, tracker_module(), github_pr_lookup_module())
+      execution_result = landing_worker_module().execute(settings, tracker_module(), result.queue)
+
+      if result.inspected > 0 or result.errors > 0 do
+        Logger.info(
+          "Approved to Land dry-run planning completed " <>
+            "inspected=#{result.inspected} commented=#{result.commented} " <>
+            "skipped=#{result.skipped} errors=#{result.errors}"
+        )
+      end
+
+      if execution_result.enabled and (execution_result.attempted > 0 or execution_result.errors > 0) do
+        Logger.info(
+          "Approved to Land execution completed " <>
+            "attempted=#{execution_result.attempted} merged=#{execution_result.merged} " <>
+            "blocked=#{execution_result.blocked} skipped=#{execution_result.skipped} errors=#{execution_result.errors}"
+        )
+      end
+
+      %{state | last_landing_plan_ms: System.monotonic_time(:millisecond), landing_queue: result.queue}
+    else
+      state
+    end
+  end
+
+  defp landing_plan_due?(_state, %{landing: %{enabled: false}}), do: false
+  defp landing_plan_due?(%State{last_landing_plan_ms: nil}, %{landing: %{enabled: true}}), do: true
+
+  defp landing_plan_due?(%State{last_landing_plan_ms: last_plan_ms}, settings)
+       when is_integer(last_plan_ms) do
+    settings.landing.enabled and
+      System.monotonic_time(:millisecond) - last_plan_ms >= settings.landing.interval_ms
+  end
+
+  defp landing_plan_due?(_state, _settings), do: false
 
   defp review_rework_sync_due?(%State{last_review_rework_sync_ms: nil}, _settings), do: true
 
@@ -2288,6 +2337,12 @@ defmodule SymphonyElixir.Orchestrator do
   @spec sync_merged_linked_pull_requests_to_done_for_test(State.t()) :: State.t()
   def sync_merged_linked_pull_requests_to_done_for_test(%State{} = state) do
     maybe_sync_merged_linked_pull_requests_to_done(state)
+  end
+
+  @doc false
+  @spec plan_approved_landings_for_test(State.t()) :: State.t()
+  def plan_approved_landings_for_test(%State{} = state) do
+    maybe_plan_approved_landings(state)
   end
 
   @doc false
@@ -4737,6 +4792,7 @@ defmodule SymphonyElixir.Orchestrator do
      %{
        running: running,
        reviewing: reviewing,
+       landing: state.landing_queue || [],
        retrying: retrying,
        blocked: blocked,
        unroutable: state.unroutable,

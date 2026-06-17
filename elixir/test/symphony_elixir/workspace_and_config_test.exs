@@ -354,24 +354,36 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert settings.landing.in_progress_state == "Landing"
     assert settings.landing.blocked_state == "Blocked"
     assert settings.landing.interval_ms == 120_000
+    assert settings.landing.execute_enabled == false
+    assert settings.landing.merge_method == "squash"
+    assert settings.landing.max_per_run == 1
+    assert settings.landing.command_timeout_ms == 120_000
 
     assert {:ok, settings} =
              Schema.parse(%{
                "polling" => %{"interval_ms" => 30_000},
                "landing" => %{
                  "enabled" => true,
+                 "execute_enabled" => true,
                  "approval_state" => " Approved to Land ",
                  "in_progress_state" => " Landing ",
                  "blocked_state" => " Needs Human ",
-                 "interval_ms" => 180_000
+                 "interval_ms" => 180_000,
+                 "merge_method" => " rebase ",
+                 "max_per_run" => 3,
+                 "command_timeout_ms" => 240_000
                }
              })
 
     assert settings.landing.enabled == true
+    assert settings.landing.execute_enabled == true
     assert settings.landing.approval_state == "Approved to Land"
     assert settings.landing.in_progress_state == "Landing"
     assert settings.landing.blocked_state == "Needs Human"
     assert settings.landing.interval_ms == 180_000
+    assert settings.landing.merge_method == "rebase"
+    assert settings.landing.max_per_run == 3
+    assert settings.landing.command_timeout_ms == 240_000
   end
 
   test "workflow config rejects enabled landing approval state in active dispatch states" do
@@ -417,6 +429,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert message =~ "landing"
     assert message =~ "interval_ms must be greater than or equal to polling.interval_ms"
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "landing" => %{"merge_method" => "fast-forward", "max_per_run" => 0, "command_timeout_ms" => 0}
+             })
+
+    assert message =~ "landing"
+    assert message =~ "merge_method"
+    assert message =~ "max_per_run"
+    assert message =~ "command_timeout_ms"
   end
 
   test "workflow config defaults Linear terminal states explicitly" do

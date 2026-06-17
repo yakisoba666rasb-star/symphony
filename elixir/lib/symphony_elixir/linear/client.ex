@@ -37,6 +37,13 @@ defmodule SymphonyElixir.Linear.Client do
             url
           }
         }
+        comments(first: $relationFirst) {
+          nodes {
+            id
+            body
+            createdAt
+          }
+        }
         inverseRelations(first: $relationFirst) {
           nodes {
             type
@@ -503,6 +510,7 @@ defmodule SymphonyElixir.Linear.Client do
       assignee_id: assignee_field(assignee, "id"),
       attachment_urls: extract_attachment_urls(issue),
       blocked_by: extract_blockers(issue),
+      comments: extract_comments(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
       created_at: parse_datetime(issue["createdAt"]),
@@ -517,6 +525,12 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp project_field(%{} = project, field) when is_binary(field), do: project[field]
   defp project_field(_project, _field), do: nil
+
+  defp extract_comments(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
+    Enum.filter(comments, &is_map/1)
+  end
+
+  defp extract_comments(_issue), do: []
 
   defp assigned_to_worker?(_assignee, nil), do: true
 

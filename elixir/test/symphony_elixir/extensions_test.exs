@@ -765,6 +765,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "counts" => %{
                "running" => 1,
                "reviewing" => 1,
+               "landing" => 1,
                "retrying" => 1,
                "blocked" => 1,
                "unroutable" => 1
@@ -795,6 +796,27 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "started_at" => state_payload["reviewing"] |> List.first() |> Map.fetch!("started_at"),
                  "worker_host" => "dm-dev3",
                  "workspace_path" => "/workspaces/MT-REVIEW"
+               }
+             ],
+             "landing" => [
+               %{
+                 "issue_id" => "issue-land",
+                 "issue_identifier" => "MT-LAND",
+                 "title" => "Land this",
+                 "queue_position" => 1,
+                 "queue_total" => 1,
+                 "planned_action" => "merge",
+                 "status" => "ready",
+                 "repository" => "octo/repo",
+                 "pr_url" => "https://github.com/octo/repo/pull/55",
+                 "pr_state" => "OPEN",
+                 "draft" => "false",
+                 "mergeability" => "CLEAN",
+                 "head_branch" => "mt-land",
+                 "head_sha" => "abc123",
+                 "blocker" => "none",
+                 "dry_run_comment_exists" => true,
+                 "plan_id" => "land-dry-run-test"
                }
              ],
              "retrying" => [
@@ -1150,6 +1172,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert Jason.decode!(authorized_conn.resp_body)["counts"] == %{
              "running" => 1,
              "reviewing" => 1,
+             "landing" => 1,
              "retrying" => 1,
              "blocked" => 1,
              "unroutable" => 1
@@ -1268,6 +1291,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert response.body["counts"] == %{
              "running" => 1,
              "reviewing" => 1,
+             "landing" => 1,
              "retrying" => 1,
              "blocked" => 1,
              "unroutable" => 1
@@ -1354,6 +1378,27 @@ defmodule SymphonyElixir.ExtensionsTest do
           started_at: DateTime.utc_now(),
           worker_host: "dm-dev3",
           workspace_path: "/workspaces/MT-REVIEW"
+        }
+      ],
+      landing: [
+        %{
+          issue_id: "issue-land",
+          issue_identifier: "MT-LAND",
+          title: "Land this",
+          queue_position: 1,
+          queue_total: 1,
+          planned_action: "merge",
+          status: "ready",
+          repository: "octo/repo",
+          pr_url: "https://github.com/octo/repo/pull/55",
+          pr_state: "OPEN",
+          draft: "false",
+          mergeability: "CLEAN",
+          head_branch: "mt-land",
+          head_sha: "abc123",
+          blocker: "none",
+          dry_run_comment_exists: true,
+          plan_id: "land-dry-run-test"
         }
       ],
       blocked: [

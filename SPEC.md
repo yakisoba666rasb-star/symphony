@@ -577,10 +577,14 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `landing.enabled`: boolean, default `false`
+- `landing.execute_enabled`: boolean, default `false`
 - `landing.approval_state`: string, default `"Approved to Land"`
 - `landing.in_progress_state`: string, default `"Landing"`
 - `landing.blocked_state`: string, default `"Blocked"`
 - `landing.interval_ms`: integer, default `120000`
+- `landing.merge_method`: string, one of `"squash"`, `"merge"`, or `"rebase"`, default `"squash"`
+- `landing.max_per_run`: integer, default `1`
+- `landing.command_timeout_ms`: integer, default `120000`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
@@ -1239,13 +1243,20 @@ Implementations MAY support a Linear-approved landing queue. When enabled:
 - `landing.approval_state` MUST NOT be included in `tracker.active_states` for implementation
   dispatch.
 - The runtime MUST create a dry-run plan before landing any approved issue.
+- The runtime MUST NOT execute merges unless `landing.execute_enabled` is true.
+- A plan-only MVP MAY stop after writing that dry-run plan and leave merge or
+  close execution to the human operator.
 - The runtime MUST revalidate GitHub and Linear state before each merge, close, or conflict repair.
 - The runtime MUST move actively processed issues to `landing.in_progress_state`.
+- Merge execution MUST verify that the PR head branch and head SHA still match the dry-run plan.
 - The runtime MUST move unresolved, stale, ambiguous, or unsafe items to `landing.blocked_state`
   with an explanatory Linear comment.
+- If execution fails after moving an issue to `landing.in_progress_state` but before merge
+  completion is confirmed, the runtime MUST move the issue to `landing.blocked_state`.
 - Implementation agents MAY repair conflicts on a PR branch, but MUST NOT perform the final merge
   or terminal close action themselves.
-- Completed merges MUST be backed by GitHub merged-PR evidence before moving Linear to `Done`.
+- Completed merges MUST be backed by GitHub merged-PR evidence before moving Linear to `Done`;
+  Done sync SHOULD own the final `Done` transition.
 
 ## 12. Prompt Construction and Context Assembly
 
