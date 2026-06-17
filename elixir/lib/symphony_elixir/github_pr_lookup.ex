@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.GitHubPrLookup do
   @moduledoc "Lookup GitHub pull requests by repository, head branch, and linked issue metadata."
 
+  alias SymphonyElixir.GitHubCommand
+
   @type pr_map() :: %{String.t() => term()}
 
   @type command_result ::
@@ -11,8 +13,6 @@ defmodule SymphonyElixir.GitHubPrLookup do
           required(:run_command) => (String.t(), [String.t()], keyword() -> command_result()),
           optional(:find_git_bin) => (-> String.t() | nil)
         }
-
-  @default_command_timeout_ms 30_000
 
   @spec lookup_by_head(String.t(), String.t(), deps()) :: {:ok, nil | pr_map()} | {:error, term()}
   def lookup_by_head(repo, head_branch, deps \\ runtime_deps())
@@ -135,52 +135,8 @@ defmodule SymphonyElixir.GitHubPrLookup do
   @doc false
   @spec run_system_cmd(String.t(), [String.t()], keyword()) :: command_result()
   def run_system_cmd(cmd, args, opts) do
-    {timeout_ms, cmd_opts} = Keyword.pop(opts, :timeout_ms, @default_command_timeout_ms)
-    run_system_cmd_with_timeout(cmd, args, cmd_opts, normalize_timeout_ms(timeout_ms))
+    GitHubCommand.run_system_cmd(cmd, args, opts)
   end
-
-  defp run_system_cmd_with_timeout(cmd, args, opts, timeout_ms) do
-    parent = self()
-    ref = make_ref()
-
-    {pid, monitor_ref} =
-      spawn_monitor(fn ->
-        send(parent, {ref, do_run_system_cmd(cmd, args, opts)})
-      end)
-
-    receive do
-      {^ref, result} ->
-        Process.demonitor(monitor_ref, [:flush])
-        result
-
-      {:DOWN, ^monitor_ref, :process, ^pid, reason} ->
-        {:error, {:command_crashed, reason}}
-    after
-      timeout_ms ->
-        Process.exit(pid, :kill)
-
-        receive do
-          {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
-        after
-          0 -> :ok
-        end
-
-        {:error, {:command_timeout, timeout_ms}}
-    end
-  end
-
-  defp do_run_system_cmd(cmd, args, opts) do
-    {:ok, System.cmd(cmd, args, opts)}
-  rescue
-    exception -> {:error, {:command_exception, exception.__struct__, Exception.message(exception)}}
-  catch
-    :exit, reason -> {:error, {:command_exit, reason}}
-  end
-
-  defp normalize_timeout_ms(timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0,
-    do: timeout_ms
-
-  defp normalize_timeout_ms(_timeout_ms), do: @default_command_timeout_ms
 
   defp normalize_command_result({output, status}) when is_binary(output) and is_integer(status),
     do: {:ok, {output, status}}

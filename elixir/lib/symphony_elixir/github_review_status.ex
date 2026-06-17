@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.GitHubReviewStatus do
   @moduledoc "Reads human review status for a GitHub pull request."
 
+  alias SymphonyElixir.GitHubCommand
+
   @type status :: %{
           decision: String.t() | nil,
           state: String.t() | nil,
@@ -53,7 +55,7 @@ defmodule SymphonyElixir.GitHubReviewStatus do
   end
 
   defp run_system_cmd(cmd, args, opts) do
-    {:ok, System.cmd(cmd, args, opts)}
+    GitHubCommand.run_system_cmd(cmd, args, opts)
   end
 
   defp find_gh_binary(deps) do
