@@ -10,12 +10,14 @@ It uses the runtime engine repository itself as the deployment source of truth.
 - Runtime workspace root: `/home/ryo/workspaces/symphony`
 - Runtime Linear project: `Symphony`
 - Runtime repository route: `yakisoba666rasb-star/symphony` -> `Symphony`
-- Dynamic repository owners: `yakisoba666rasb-star`, `ryo1111-qqq`
+- Runtime repository route: `kasotuosawari-design/auto_template` -> `auto_template`
+- Dynamic repository owners: `yakisoba666rasb-star`, `ryo1111-qqq`, `kasotuosawari-design`
 
 `repository.allowed_owners` permits Linear Project metadata to register repositories for trusted
 GitHub owners. `repository.project_routes` remains the explicit override map:
 
 - `yakisoba666rasb-star/symphony` must be in Linear project `Symphony`.
+- `kasotuosawari-design/auto_template` must be in Linear project `auto_template`.
 - Repositories whose Linear project description or links contain an allowlisted GitHub URL are
   discovered without restarting the engine.
 - Static project routes win when a repository also appears in Linear Project metadata.

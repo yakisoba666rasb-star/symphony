@@ -38,10 +38,15 @@ repository:
   allowed_owners:
     - yakisoba666rasb-star
     - ryo1111-qqq
+    - kasotuosawari-design
   project_routes:
     yakisoba666rasb-star/symphony:
       - Symphony
       - afe8a6524892
+    kasotuosawari-design/auto_template:
+      - auto_template
+      - auto-template
+      - 899e25e6ce02
   validation:
     profiles:
       yakisoba666rasb-star/symphony: |
