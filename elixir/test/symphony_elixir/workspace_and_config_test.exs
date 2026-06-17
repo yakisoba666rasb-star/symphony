@@ -360,9 +360,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                "polling" => %{"interval_ms" => 30_000},
                "landing" => %{
                  "enabled" => true,
-                 "approval_state" => "Approved to Land",
-                 "in_progress_state" => "Landing",
-                 "blocked_state" => "Needs Human",
+                 "approval_state" => " Approved to Land ",
+                 "in_progress_state" => " Landing ",
+                 "blocked_state" => " Needs Human ",
                  "interval_ms" => 180_000
                }
              })
@@ -372,6 +372,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert settings.landing.in_progress_state == "Landing"
     assert settings.landing.blocked_state == "Needs Human"
     assert settings.landing.interval_ms == 180_000
+  end
+
+  test "workflow config rejects enabled landing approval state in active dispatch states" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "tracker" => %{"active_states" => ["Todo", "Approved to Land"]},
+               "landing" => %{"enabled" => false, "approval_state" => "Approved to Land"}
+             })
+
+    assert settings.landing.enabled == false
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "tracker" => %{"active_states" => ["Todo", " Approved to Land "]},
+               "landing" => %{"enabled" => true, "approval_state" => "Approved to Land"}
+             })
+
+    assert message =~ "landing"
+    assert message =~ "approval_state must not be included in tracker.active_states"
   end
 
   test "workflow config rejects invalid Approved to Land landing settings" do

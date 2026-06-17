@@ -204,8 +204,9 @@ Design:
   - per-leg latency from the evidence comments.
   - human unblock interventions per week (existing Phase 3 KPI).
 - **Acceptance run**: file one labeled GitHub issue (W5) in a registered
-  repo and verify it reaches Done + source-closed with merge as the only
-  human approval action; record the evidence comment as the proof artifact.
+  repo and verify it reaches Done + source-closed with the `Approved to Land`
+  approval as the only human action; record the evidence comment as the proof
+  artifact.
 
 ## Config Summary (new keys)
 
