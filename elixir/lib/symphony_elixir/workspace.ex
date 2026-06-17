@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Workspace do
   alias SymphonyElixir.{Config, PathSafety, RepositoryResolver, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
-  @remote_dirty_workspace_marker "__SYMPHONY_DIRTY_WORKSPACE__"
+  @remote_workspace_quarantine_marker "__SYMPHONY_WORKSPACE_QUARANTINE__"
   @ignored_dirty_status_pathspecs [
     ":!.symphony-review-verdict.json",
     ":!.symphony-review-verdict-*.json"
@@ -16,21 +16,22 @@ defmodule SymphonyElixir.Workspace do
   @type worker_host :: String.t() | nil
 
   @spec create_for_issue(map() | String.t() | nil, worker_host(), keyword()) ::
-          {:ok, Path.t()} | {:error, term()}
+          {:ok, Path.t()} | {:ok, Path.t(), map()} | {:error, term()}
   def create_for_issue(issue_or_identifier, worker_host \\ nil, opts \\ []) do
     issue_context = issue_context(issue_or_identifier)
     allow_dirty_existing_workspace? = Keyword.get(opts, :allow_dirty_existing_workspace, false)
+    return_metadata? = Keyword.get(opts, :return_metadata, false)
 
     try do
       safe_id = safe_identifier(issue_context.issue_identifier)
 
       with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
            :ok <- validate_workspace_path(workspace, worker_host),
-           {:ok, workspace, created?} <-
+           {:ok, workspace, created?, metadata} <-
              ensure_workspace(workspace, worker_host, allow_dirty_existing_workspace?) do
         case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
           :ok ->
-            {:ok, workspace}
+            workspace_created(workspace, metadata, return_metadata?)
 
           {:error, reason} = error ->
             cleanup_created_workspace_after_create_failure(workspace, worker_host, created?, reason)
@@ -47,7 +48,7 @@ defmodule SymphonyElixir.Workspace do
   defp ensure_workspace(workspace, nil, allow_dirty_existing_workspace?) do
     cond do
       File.dir?(workspace) and allow_dirty_existing_workspace? ->
-        {:ok, workspace, false}
+        {:ok, workspace, false, %{}}
 
       File.dir?(workspace) ->
         ensure_reusable_workspace(workspace)
@@ -70,6 +71,8 @@ defmodule SymphonyElixir.Workspace do
         "set -eu",
         remote_shell_assign("workspace", workspace),
         remote_shell_assign("allow_dirty_existing_workspace", allow_dirty_flag),
+        "quarantine_workspace=\"\"",
+        "dirty_status_for_marker=\"\"",
         "if [ -d \"$workspace\" ]; then",
         "  created=0",
         "  cd \"$workspace\"",
@@ -90,6 +93,7 @@ defmodule SymphonyElixir.Workspace do
         "        printf '\\n%s\\n' 'Git diff --stat:'",
         "        git diff --stat || true",
         "      } > \"$workspace.dirty-reason.log\"",
+        "      dirty_status_for_marker=$(printf '%s' \"$dirty_status\" | sed ':a;N;$!ba;s/\\n/\\\\n/g')",
         "      cd \"$(dirname \"$workspace\")\"",
         "      mv \"$workspace\" \"$quarantine_workspace\"",
         "      mkdir -p \"$workspace\"",
@@ -106,7 +110,11 @@ defmodule SymphonyElixir.Workspace do
         "  created=1",
         "fi",
         "cd \"$workspace\"",
-        "printf '%s\\t%s\\t%s\\n' '#{@remote_workspace_marker}' \"$created\" \"$(pwd -P)\""
+        "workspace_path=$(pwd -P)",
+        "printf '%s\\t%s\\t%s\\n' '#{@remote_workspace_marker}' \"$created\" \"$workspace_path\"",
+        "if [ -n \"$quarantine_workspace\" ]; then",
+        "  printf '%s\\t%s\\t%s\\t%s\\n' '#{@remote_workspace_quarantine_marker}' \"$workspace_path\" \"$quarantine_workspace\" \"$dirty_status_for_marker\"",
+        "fi"
       ]
       |> Enum.reject(&(&1 == ""))
       |> Enum.join("\n")
@@ -116,13 +124,7 @@ defmodule SymphonyElixir.Workspace do
         parse_remote_workspace_output(output)
 
       {:ok, {output, status}} ->
-        case parse_remote_dirty_workspace_output(output) do
-          {:ok, workspace, dirty_status} ->
-            {:error, {:dirty_workspace, workspace, dirty_status}}
-
-          :error ->
-            {:error, {:workspace_prepare_failed, worker_host, status, output}}
-        end
+        {:error, {:workspace_prepare_failed, worker_host, status, output}}
 
       {:error, reason} ->
         {:error, reason}
@@ -132,8 +134,11 @@ defmodule SymphonyElixir.Workspace do
   defp create_workspace(workspace) do
     File.rm_rf!(workspace)
     File.mkdir_p!(workspace)
-    {:ok, workspace, true}
+    {:ok, workspace, true, %{}}
   end
+
+  defp workspace_created(workspace, metadata, true), do: {:ok, workspace, metadata}
+  defp workspace_created(workspace, _metadata, false), do: {:ok, workspace}
 
   defp cleanup_created_workspace_after_create_failure(_workspace, _worker_host, false, _reason), do: :ok
 
@@ -176,18 +181,25 @@ defmodule SymphonyElixir.Workspace do
     if File.dir?(Path.join(workspace, ".git")) do
       case System.cmd("git", ["-C", workspace, "status", "--porcelain", "--"] ++ @ignored_dirty_status_pathspecs, stderr_to_stdout: true) do
         {"", 0} ->
-          {:ok, workspace, false}
+          {:ok, workspace, false, %{}}
 
         {output, 0} ->
           {:ok, quarantine_workspace} = quarantine_dirty_workspace(workspace, output)
           Logger.warning("Quarantined dirty workspace workspace=#{workspace} quarantine=#{quarantine_workspace}")
-          create_workspace(workspace)
+          {:ok, workspace, created?, metadata} = create_workspace(workspace)
+
+          {:ok, workspace, created?,
+           Map.put(metadata, :quarantined_workspace, %{
+             workspace: workspace,
+             quarantine: quarantine_workspace,
+             dirty_status: output
+           })}
 
         {output, status} ->
           {:error, {:workspace_git_status_failed, workspace, status, output}}
       end
     else
-      {:ok, workspace, false}
+      {:ok, workspace, false, %{}}
     end
   end
 
@@ -750,21 +762,6 @@ defmodule SymphonyElixir.Workspace do
     |> Enum.join("\n")
   end
 
-  defp parse_remote_dirty_workspace_output(output) do
-    output
-    |> IO.iodata_to_binary()
-    |> String.split("\n", trim: true)
-    |> Enum.find_value(:error, fn line ->
-      case String.split(line, "\t", parts: 3) do
-        [@remote_dirty_workspace_marker, path, dirty_status] when path != "" ->
-          {:ok, path, String.replace(dirty_status, "\\n", "\n")}
-
-        _ ->
-          nil
-      end
-    end)
-  end
-
   defp parse_remote_workspace_output(output) do
     lines = String.split(IO.iodata_to_binary(output), "\n", trim: true)
 
@@ -781,10 +778,33 @@ defmodule SymphonyElixir.Workspace do
 
     case payload do
       {created?, workspace} when is_boolean(created?) and is_binary(workspace) ->
-        {:ok, workspace, created?}
+        {:ok, workspace, created?, remote_workspace_metadata(lines, workspace)}
 
       _ ->
         {:error, {:workspace_prepare_failed, :invalid_output, output}}
+    end
+  end
+
+  defp remote_workspace_metadata(lines, workspace) do
+    quarantine =
+      Enum.find_value(lines, fn line ->
+        case String.split(line, "\t", parts: 4) do
+          [@remote_workspace_quarantine_marker, ^workspace, quarantine, dirty_status]
+          when quarantine != "" ->
+            %{
+              workspace: workspace,
+              quarantine: quarantine,
+              dirty_status: String.replace(dirty_status, "\\n", "\n")
+            }
+
+          _ ->
+            nil
+        end
+      end)
+
+    case quarantine do
+      nil -> %{}
+      quarantine -> %{quarantined_workspace: quarantine}
     end
   end
 

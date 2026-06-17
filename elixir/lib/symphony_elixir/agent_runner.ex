@@ -29,10 +29,6 @@ defmodule SymphonyElixir.AgentRunner do
         Logger.warning("Agent run stopped unfinished for #{issue_context(issue)}: #{inspect(reason)}")
         exit(reason)
 
-      {:error, {:dirty_workspace, _workspace, _status} = reason} ->
-        Logger.warning("Agent run blocked by dirty workspace for #{issue_context(issue)}: #{inspect(reason)}")
-        exit(reason)
-
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
@@ -44,14 +40,14 @@ defmodule SymphonyElixir.AgentRunner do
 
     workspace_opts =
       if Keyword.get(opts, :allow_dirty_existing_workspace, false) do
-        [allow_dirty_existing_workspace: true]
+        [allow_dirty_existing_workspace: true, return_metadata: true]
       else
-        []
+        [return_metadata: true]
       end
 
     case Workspace.create_for_issue(issue, worker_host, workspace_opts) do
-      {:ok, workspace} ->
-        send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
+      {:ok, workspace, workspace_metadata} ->
+        send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace, workspace_metadata)
         dirty_resume? = Keyword.get(workspace_opts, :allow_dirty_existing_workspace, false) and workspace_has_changes?(workspace, worker_host)
 
         try do
@@ -90,21 +86,29 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_codex_update(_recipient, _issue, _message), do: :ok
 
-  defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, worker_host, workspace)
-       when is_binary(issue_id) and is_pid(recipient) and is_binary(workspace) do
-    send(
-      recipient,
+  defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, worker_host, workspace, metadata)
+       when is_binary(issue_id) and is_pid(recipient) and is_binary(workspace) and is_map(metadata) do
+    message =
       {:worker_runtime_info, issue_id,
        %{
          worker_host: worker_host,
          workspace_path: workspace
        }}
-    )
+      |> put_worker_runtime_quarantine(metadata)
+
+    send(recipient, message)
 
     :ok
   end
 
-  defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
+  defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace, _metadata), do: :ok
+
+  defp put_worker_runtime_quarantine(message, %{quarantined_workspace: quarantine})
+       when is_map(quarantine) do
+    put_in(message, [Access.elem(2), :workspace_quarantine], quarantine)
+  end
+
+  defp put_worker_runtime_quarantine(message, _metadata), do: message
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)

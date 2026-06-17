@@ -6689,14 +6689,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert comment =~ "agent.max_turns continuation limit reached (1); blocking active issue"
   end
 
-  test "orchestrator blocks dirty workspace exits instead of retrying" do
+  test "orchestrator comments when workspace preparation quarantines dirty state" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", tracker_api_token: nil)
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-    issue_id = "issue-dirty-workspace-block"
-    issue = %Issue{id: issue_id, identifier: "MT-DIRTY-BLOCK", state: "In Progress"}
+    issue_id = "issue-dirty-workspace-quarantine"
+    issue = %Issue{id: issue_id, identifier: "MT-DIRTY-QUARANTINE", state: "In Progress"}
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
-    orchestrator_name = Module.concat(__MODULE__, :DirtyWorkspaceBlockOrchestrator)
+    orchestrator_name = Module.concat(__MODULE__, :DirtyWorkspaceQuarantineOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
@@ -6711,10 +6711,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     running_entry = %{
       pid: self(),
       ref: ref,
-      identifier: "MT-DIRTY-BLOCK",
+      identifier: "MT-DIRTY-QUARANTINE",
       issue: issue,
-      workspace_path: "/tmp/mt-dirty-block",
-      session_id: "thread-dirty-workspace",
+      workspace_path: nil,
+      session_id: "thread-dirty-workspace-quarantine",
       last_codex_message: nil,
       last_codex_timestamp: nil,
       last_codex_event: nil,
@@ -6729,25 +6729,32 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
-      {:DOWN, ref, :process, self(), {:dirty_workspace, "/tmp/mt-dirty-block", "?? docs/operations/LAB-269-smoke.md\n"}}
+      {:worker_runtime_info, issue_id,
+       %{
+         worker_host: nil,
+         workspace_path: "/tmp/mt-dirty-fresh",
+         workspace_quarantine: %{
+           workspace: "/tmp/mt-dirty-fresh",
+           quarantine: "/tmp/mt-dirty-fresh.dirty-20260617-010203",
+           dirty_status: " M README.md\n?? docs/operations/LAB-269-smoke.md\n"
+         }
+       }}
     )
 
     Process.sleep(50)
     state = :sys.get_state(pid, 15_000)
 
-    refute Map.has_key?(state.running, issue_id)
+    assert %{workspace_path: "/tmp/mt-dirty-fresh"} = state.running[issue_id]
     refute Map.has_key?(state.retry_attempts, issue_id)
     refute MapSet.member?(state.completed, issue_id)
     assert MapSet.member?(state.claimed, issue_id)
-
-    assert %{
-             identifier: "MT-DIRTY-BLOCK",
-             error: "dirty workspace detected at /tmp/mt-dirty-block: ?? docs/operations/LAB-269-smoke.md"
-           } = state.blocked[issue_id]
+    refute Map.has_key?(state.blocked, issue_id)
 
     assert_receive {:memory_tracker_comment, ^issue_id, comment}
-    assert comment =~ "Symphony blocked MT-DIRTY-BLOCK"
-    assert comment =~ "dirty workspace detected at /tmp/mt-dirty-block"
+    assert comment =~ "Symphony quarantined a dirty workspace before rerunning MT-DIRTY-QUARANTINE"
+    assert comment =~ "Workspace: /tmp/mt-dirty-fresh"
+    assert comment =~ "Quarantine: /tmp/mt-dirty-fresh.dirty-20260617-010203"
+    assert comment =~ "README.md"
     assert comment =~ "docs/operations/LAB-269-smoke.md"
   end
 
