@@ -3,7 +3,7 @@ defmodule SymphonyElixir.GitHubIssue do
 
   require Logger
 
-  alias SymphonyElixir.{Config, RepositoryRoutes}
+  alias SymphonyElixir.{Config, GitHubCommand, RepositoryRoutes}
 
   @type command_result ::
           {String.t(), integer()} | {:ok, {String.t(), integer()}} | {:error, term()}
@@ -543,7 +543,7 @@ defmodule SymphonyElixir.GitHubIssue do
     }
   end
 
-  defp run_system_cmd(cmd, args, opts), do: {:ok, System.cmd(cmd, args, opts)}
+  defp run_system_cmd(cmd, args, opts), do: GitHubCommand.run_system_cmd(cmd, args, opts)
 
   defp find_gh_binary(deps) do
     case deps.find_gh_bin.() do

@@ -8,7 +8,7 @@ defmodule SymphonyElixir.GitHubPrPublisher do
   compatibility paths only.
   """
 
-  alias SymphonyElixir.GitHubPrLookup
+  alias SymphonyElixir.{GitHubCommand, GitHubPrLookup}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.RepositoryResolver
 
@@ -64,7 +64,7 @@ defmodule SymphonyElixir.GitHubPrPublisher do
     }
   end
 
-  defp run_system_cmd(cmd, args, opts), do: {:ok, System.cmd(cmd, args, opts)}
+  defp run_system_cmd(cmd, args, opts), do: GitHubCommand.run_system_cmd(cmd, args, opts)
 
   defp find_binary(deps, key, error) do
     case deps[key].() do
