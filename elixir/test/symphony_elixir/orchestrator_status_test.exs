@@ -2286,6 +2286,138 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert next_poll_in_ms <= 50
   end
 
+  test "orchestrator poll cycle preserves state when the cycle body raises" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      poll_interval_ms: 5_000
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :PollCycleExceptionGuardOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    assert %{polling: %{checking?: false}} =
+             wait_for_snapshot(
+               pid,
+               fn
+                 %{polling: %{checking?: false, next_poll_in_ms: due_in_ms}} when is_integer(due_in_ms) ->
+                   true
+
+                 _ ->
+                   false
+               end,
+               1_000
+             )
+
+    issue = %Issue{
+      id: "issue-poll-guard",
+      identifier: "LAB-POLL-GUARD",
+      title: "Preserve running state",
+      state: "In Progress"
+    }
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        after
+          5_000 -> :ok
+        end
+      end)
+
+    worker_ref = Process.monitor(worker_pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: worker_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      branch_name: "lab-poll-guard",
+      workspace_path: "/tmp/lab-poll-guard",
+      session_id: "thread-poll-guard",
+      codex_app_server_pid: nil,
+      codex_input_tokens: nil,
+      codex_output_tokens: nil,
+      codex_total_tokens: nil,
+      turn_count: 0,
+      started_at: DateTime.utc_now(),
+      last_codex_timestamp: nil,
+      last_codex_message: nil,
+      last_codex_event: nil
+    }
+
+    retry_attempt = %{attempt: 1, due_at_ms: System.monotonic_time(:millisecond) + 5_000}
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | poll_interval_ms: 5_000,
+          poll_check_in_progress: true,
+          next_poll_due_at_ms: nil,
+          running: %{"issue-poll-guard" => running_entry},
+          claimed: MapSet.put(state.claimed, "issue-poll-guard"),
+          retry_attempts: %{"issue-poll-guard" => retry_attempt}
+      }
+    end)
+
+    log =
+      capture_log(fn ->
+        write_workflow_file!(Workflow.workflow_file_path(),
+          tracker_api_token: nil,
+          poll_interval_ms: "invalid"
+        )
+
+        send(pid, :run_poll_cycle)
+        _state_after_poll = :sys.get_state(pid, 15_000)
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          tracker_api_token: nil,
+          poll_interval_ms: 5_000
+        )
+
+        assert %{
+                 polling: %{checking?: false, next_poll_in_ms: next_poll_in_ms},
+                 running: [%{issue_id: "issue-poll-guard", identifier: "LAB-POLL-GUARD"}]
+               } =
+                 wait_for_snapshot(
+                   pid,
+                   fn
+                     %{
+                       polling: %{checking?: false, next_poll_in_ms: due_in_ms},
+                       running: [%{issue_id: "issue-poll-guard"}]
+                     }
+                     when is_integer(due_in_ms) ->
+                       true
+
+                     _ ->
+                       false
+                   end,
+                   1_000
+                 )
+
+        assert next_poll_in_ms >= 0
+        assert Process.alive?(pid)
+      end)
+
+    assert log =~ "Orchestrator poll cycle crashed; preserving orchestrator state"
+    assert log =~ "Invalid WORKFLOW.md config"
+
+    state = :sys.get_state(pid, 15_000)
+    assert Map.has_key?(state.running, "issue-poll-guard")
+    assert MapSet.member?(state.claimed, "issue-poll-guard")
+    assert %{"issue-poll-guard" => %{attempt: 1, due_at_ms: due_at_ms}} = state.retry_attempts
+    assert is_integer(due_at_ms)
+    assert state.poll_check_in_progress == false
+
+    send(worker_pid, :stop)
+    Process.demonitor(worker_ref, [:flush])
+  end
+
   test "orchestrator snapshot keeps unroutable issues when agent slots are full" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
