@@ -264,7 +264,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="empty-state">No issues are approved to land.</p>
           <% else %>
             <div class="table-wrap">
-              <table class="data-table" style="min-width: 980px;">
+              <table class="data-table" style="min-width: 1080px;">
                 <thead>
                   <tr>
                     <th>Order</th>
@@ -273,6 +273,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <th>Repository</th>
                     <th>PR state</th>
                     <th>Mergeability</th>
+                    <th>Review</th>
                     <th>Blocker</th>
                     <th>PR</th>
                   </tr>
@@ -296,6 +297,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td class="mono"><%= entry.repository || "unknown" %></td>
                     <td><%= entry.pr_state || "unknown" %></td>
                     <td><%= entry.mergeability || "unknown" %></td>
+                    <td><%= entry.review_decision || "unknown" %></td>
                     <td>
                       <span
                         class="event-text"

@@ -214,6 +214,7 @@ defmodule SymphonyElixirWeb.Presenter do
       pr_state: Map.get(entry, :pr_state),
       draft: Map.get(entry, :draft),
       mergeability: Map.get(entry, :mergeability),
+      review_decision: Map.get(entry, :review_decision),
       head_branch: Map.get(entry, :head_branch),
       head_sha: Map.get(entry, :head_sha),
       blocker: Map.get(entry, :blocker),

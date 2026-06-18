@@ -1249,6 +1249,11 @@ Implementations MAY support a Linear-approved landing queue. When enabled:
   `landing.approval_state`, `landing.in_progress_state`, and `landing.blocked_state` MUST be
   distinct Linear workflow states.
 - The runtime MUST create a dry-run plan before landing any approved issue.
+- The dry-run plan MUST report the planned order, PR state, draft status, mergeability,
+  review decision, head branch/SHA, planned action, and any blocker known before execution.
+- The dry-run plan MUST mark items as non-executable when the merge worker would reject the
+  current PR snapshot, including closed PRs, draft PRs, non-clean mergeability, or GitHub
+  `CHANGES_REQUESTED` review decisions.
 - The runtime MUST NOT execute merges unless `landing.execute_enabled` is true.
 - A plan-only MVP MAY stop after writing that dry-run plan and leave merge or
   close execution to the human operator.

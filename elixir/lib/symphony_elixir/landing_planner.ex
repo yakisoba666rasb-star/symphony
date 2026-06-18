@@ -100,6 +100,7 @@ defmodule SymphonyElixir.LandingPlanner do
       pr_state: snapshot.pr_state,
       draft: snapshot.draft,
       mergeability: snapshot.mergeability,
+      review_decision: snapshot.review_decision,
       head_branch: snapshot.head_branch,
       head_sha: snapshot.head_sha,
       blocker: snapshot.blocker,
@@ -130,6 +131,7 @@ defmodule SymphonyElixir.LandingPlanner do
       pr_state: "unknown",
       draft: "unknown",
       mergeability: "unknown",
+      review_decision: "unknown",
       head_branch: "unknown",
       blocker: "invalid issue payload",
       status: "blocked",
@@ -153,6 +155,7 @@ defmodule SymphonyElixir.LandingPlanner do
       :pr_state,
       :draft,
       :mergeability,
+      :review_decision,
       :head_branch,
       :head_sha,
       :blocker,
@@ -232,6 +235,7 @@ defmodule SymphonyElixir.LandingPlanner do
     - PR state: #{snapshot.pr_state}
     - draft: #{snapshot.draft}
     - mergeability: #{snapshot.mergeability}
+    - review decision: #{snapshot.review_decision}
     - head branch: #{snapshot.head_branch}
     - head SHA: #{snapshot.head_sha}
     - blocker: #{snapshot.blocker}
@@ -271,16 +275,23 @@ defmodule SymphonyElixir.LandingPlanner do
   end
 
   defp pr_snapshot(repo, %{} = pr) do
+    state = pr_value(pr, "state", "unknown")
+    draft = pr_value(pr, "isDraft", "unknown")
+    mergeability = pr_value(pr, "mergeStateStatus", "unknown")
+    review_decision = pr_value(pr, "reviewDecision", "unknown")
+    blocker = pr_blocker(state, draft, mergeability, review_decision)
+
     %{
-      status: :ready,
+      status: if(blocker == "none", do: :ready, else: :blocked),
       repository: repo,
       pr_url: pr_value(pr, "url", "unknown"),
-      pr_state: pr_value(pr, "state", "unknown"),
-      draft: format_pr_value(pr_value(pr, "isDraft", "unknown")),
-      mergeability: pr_value(pr, "mergeStateStatus", "unknown"),
+      pr_state: state,
+      draft: format_pr_value(draft),
+      mergeability: mergeability,
+      review_decision: review_decision,
       head_branch: pr_value(pr, "headRefName", "unknown"),
       head_sha: pr_value(pr, "headRefOid", "unknown"),
-      blocker: "none"
+      blocker: blocker
     }
   end
 
@@ -294,11 +305,29 @@ defmodule SymphonyElixir.LandingPlanner do
       pr_state: "unknown",
       draft: "unknown",
       mergeability: "unknown",
+      review_decision: "unknown",
       head_branch: "unknown",
       head_sha: "unknown",
       blocker: blocker
     }
   end
+
+  defp pr_blocker(state, _draft, _mergeability, _review_decision) when state != "OPEN" do
+    "PR is not open: #{state}"
+  end
+
+  defp pr_blocker(_state, true, _mergeability, _review_decision), do: "PR is draft"
+  defp pr_blocker(_state, "true", _mergeability, _review_decision), do: "PR is draft"
+
+  defp pr_blocker(_state, _draft, mergeability, _review_decision) when mergeability != "CLEAN" do
+    "PR mergeability is #{mergeability}"
+  end
+
+  defp pr_blocker(_state, _draft, _mergeability, "CHANGES_REQUESTED") do
+    "GitHub review decision is CHANGES_REQUESTED"
+  end
+
+  defp pr_blocker(_state, _draft, _mergeability, _review_decision), do: "none"
 
   defp landing_plan_comment_exists?(%Issue{comments: comments}) when is_list(comments) do
     Enum.any?(comments, fn
@@ -330,6 +359,7 @@ defmodule SymphonyElixir.LandingPlanner do
   defp atom_key("state"), do: :state
   defp atom_key("isDraft"), do: :isDraft
   defp atom_key("mergeStateStatus"), do: :mergeStateStatus
+  defp atom_key("reviewDecision"), do: :reviewDecision
   defp atom_key("headRefName"), do: :headRefName
   defp atom_key("headRefOid"), do: :headRefOid
   defp atom_key(_key), do: nil
