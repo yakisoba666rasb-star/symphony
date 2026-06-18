@@ -32,7 +32,7 @@ Recommended workflow states:
 | `Approved to Land` | Human | Human has approved Symphony to plan landing for this issue. |
 | `Landing` | Symphony runtime | Symphony is actively merging, closing, or repairing the approved queue. |
 | `Blocked` | Symphony runtime | Landing stopped and needs human attention. |
-| `Done` | Symphony runtime | Accepted work landed and Done sync completed. |
+| `Done` | Symphony runtime | Accepted work landed and the landing worker or Done sync completed terminal state update. |
 | `Closed` / `Duplicate` / `Cancelled` | Human or Symphony runtime | Work should not land as a merge. |
 
 `Approved to Land` is not an implementation dispatch state. The ordinary agent
@@ -89,8 +89,8 @@ Execution settings:
    GitHub and Linear state, the landing worker moves planned issues to
    `Landing` and executes them in order.
 7. Each item is revalidated immediately before action.
-8. Completed merges rely on Done sync to move the issue to `Done` after
-   merged-PR evidence is observed.
+8. Completed merges move the issue to `Done` immediately after the landing
+   worker confirms the merge succeeded.
 9. Non-merge terminal outcomes move to `Closed`, `Duplicate`, or `Cancelled`
    only when the plan contains explicit evidence and policy permits it.
 
@@ -150,8 +150,8 @@ automatically, so stacked PRs keep their branch topology. If revalidation or
 merge fails, the issue is moved to `landing.blocked_state` with a Linear
 comment. When repair is enabled, Symphony then adds a repair request comment and
 moves the issue to `landing.repair_state` so the ordinary agent loop can update
-the existing PR. Successful merges leave final `Done` transition to merged PR
-Done sync.
+the existing PR. Successful merges move the issue to `Done` before the ordinary
+agent loop can reclaim the landed issue.
 
 ## Conflict Repair
 

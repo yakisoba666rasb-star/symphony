@@ -83,6 +83,25 @@ defmodule SymphonyElixir.LandingWorkerTest do
     defp test_pid, do: Application.fetch_env!(:symphony_elixir, :landing_worker_test_pid)
   end
 
+  defmodule FakeTrackerDoneStateError do
+    def update_issue_state(issue_id, "Done") do
+      send(test_pid(), {:landing_state_update, issue_id, "Done"})
+      {:error, :done_state_down}
+    end
+
+    def update_issue_state(issue_id, state_name) do
+      send(test_pid(), {:landing_state_update, issue_id, state_name})
+      :ok
+    end
+
+    def create_comment(issue_id, body) do
+      send(test_pid(), {:landing_comment, issue_id, body})
+      :ok
+    end
+
+    defp test_pid, do: Application.fetch_env!(:symphony_elixir, :landing_worker_test_pid)
+  end
+
   setup do
     Application.put_env(:symphony_elixir, :landing_worker_test_pid, self())
 
@@ -179,8 +198,10 @@ defmodule SymphonyElixir.LandingWorkerTest do
     assert start_body =~ "merge with squash"
     assert_receive {:gh_command, ["pr", "view", "https://github.com/octo/repo/pull/1", "--json", _json]}
     assert_receive {:gh_command, ["pr", "merge", "https://github.com/octo/repo/pull/1", "--squash"]}
+    assert_receive {:landing_state_update, "issue-1", "Done"}
     assert_receive {:landing_comment, "issue-1", success_body}
     assert success_body =~ "execution completed"
+    assert success_body =~ "Linear state: moved to Done"
     refute_receive {:landing_state_update, "issue-2", _state_name}, 100
   end
 
@@ -201,6 +222,8 @@ defmodule SymphonyElixir.LandingWorkerTest do
     assert %{enabled: true, attempted: 1, merged: 1, blocked: 0, errors: 0} = result
     assert_receive {:gh_command, ["pr", "view", "https://github.com/octo/repo/pull/1", "--json", _json]}
     assert_receive {:gh_command, ["pr", "merge", "https://github.com/octo/repo/pull/1", "--squash"]}
+    assert_receive {:landing_state_update, "issue-1", "Landing"}
+    assert_receive {:landing_state_update, "issue-1", "Done"}
   end
 
   test "blocks stale PRs without merging" do
@@ -475,8 +498,28 @@ defmodule SymphonyElixir.LandingWorkerTest do
     assert_receive {:landing_state_update, "issue-1", "Landing"}
     assert_receive {:landing_comment, "issue-1", start_body}
     assert start_body =~ "execution started"
+    assert_receive {:landing_state_update, "issue-1", "Done"}
     assert_receive {:landing_comment, "issue-1", success_body}
     assert success_body =~ "execution completed"
+  end
+
+  test "counts merged PRs when Done transition fails after merge" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true
+    )
+
+    assert %{enabled: true, attempted: 1, merged: 1, blocked: 0, errors: 1} =
+             LandingWorker.execute(Config.settings!(), FakeTrackerDoneStateError, [ready_entry()], deps())
+
+    assert_receive {:landing_state_update, "issue-1", "Landing"}
+    assert_receive {:landing_comment, "issue-1", start_body}
+    assert start_body =~ "execution started"
+    assert_receive {:gh_command, ["pr", "merge", "https://github.com/octo/repo/pull/1", "--squash"]}
+    assert_receive {:landing_state_update, "issue-1", "Done"}
+    assert_receive {:landing_comment, "issue-1", success_body}
+    assert success_body =~ "execution completed"
+    assert success_body =~ "Linear state: failed to move to Done"
   end
 
   test "skips entries that are not ready for execution" do
