@@ -1273,7 +1273,9 @@ Implementations MAY support a Linear-approved landing queue. When enabled:
 - Implementation agents MAY repair conflicts on a PR branch, but MUST NOT perform the final merge
   or terminal close action themselves.
 - Completed merges MUST be backed by GitHub merged-PR evidence before moving Linear to `Done`;
-  Done sync SHOULD own the final `Done` transition.
+  when the landing worker performs the merge, it MUST move the Linear issue to `Done`
+  immediately after the merge succeeds so the normal implementation dispatch loop cannot
+  reclaim landed work.
 
 ## 12. Prompt Construction and Context Assembly
 

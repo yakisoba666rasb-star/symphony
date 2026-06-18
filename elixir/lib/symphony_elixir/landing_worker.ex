@@ -140,14 +140,25 @@ defmodule SymphonyElixir.LandingWorker do
   end
 
   defp finish_success(entry, pr, output, settings, tracker, result) do
-    case create_comment(tracker, entry, success_comment(entry, pr, output, settings)) do
-      :ok ->
-        %{result | merged: 1}
+    done_state = done_state_name(settings)
+    done_result = move_issue_state(tracker, entry, done_state)
 
-      {:error, reason} ->
-        Logger.warning("Approved to Land merged #{entry_context(entry)} but success comment failed: #{inspect(reason)}")
-        %{result | merged: 1, errors: 1}
+    if match?({:error, _reason}, done_result) do
+      Logger.warning("Approved to Land merged #{entry_context(entry)} but Done transition failed: #{inspect(done_result)}")
     end
+
+    comment_result =
+      create_comment(
+        tracker,
+        entry,
+        success_comment(entry, pr, output, settings, done_state, done_result)
+      )
+
+    if match?({:error, _reason}, comment_result) do
+      Logger.warning("Approved to Land merged #{entry_context(entry)} but success comment failed: #{inspect(comment_result)}")
+    end
+
+    %{result | merged: 1, errors: done_error_count(done_result) + done_error_count(comment_result)}
   end
 
   defp merge_execution_result(%{} = entry_result, %{} = acc) do
@@ -388,7 +399,7 @@ defmodule SymphonyElixir.LandingWorker do
     |> String.trim()
   end
 
-  defp success_comment(entry, pr, output, settings) do
+  defp success_comment(entry, pr, output, settings, done_state, done_result) do
     """
     Symphony Approved to Land execution completed
 
@@ -396,8 +407,7 @@ defmodule SymphonyElixir.LandingWorker do
     Action: merged with #{settings.landing.merge_method}
     PR: #{pr_value(pr, "url")}
     GitHub output: #{blank_fallback(output, "merge command completed")}
-
-    Done sync will move the Linear issue to Done after merged PR evidence is observed.
+    Linear state: #{done_state_update_line(done_state, done_result)}
     """
     |> String.trim()
   end
@@ -509,6 +519,17 @@ defmodule SymphonyElixir.LandingWorker do
   end
 
   defp format_reason(reason), do: inspect(reason)
+
+  defp done_state_name(settings) do
+    settings.tracker.terminal_states
+    |> Enum.find("Done", fn state -> Config.Schema.normalize_issue_state(to_string(state)) == "done" end)
+  end
+
+  defp done_state_update_line(done_state, :ok), do: "moved to #{done_state}"
+  defp done_state_update_line(done_state, {:error, reason}), do: "failed to move to #{done_state}: #{format_reason(reason)}"
+
+  defp done_error_count(:ok), do: 0
+  defp done_error_count({:error, _reason}), do: 1
 
   defp issue_label(entry), do: Map.get(entry, :issue_identifier) || Map.get(entry, :issue_id) || "unknown"
 
