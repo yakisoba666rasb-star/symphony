@@ -60,6 +60,7 @@ defmodule SymphonyElixir.Orchestrator do
       review_rework_rounds: %{},
       github_intake_attempts: %{},
       github_intake_task: nil,
+      done_source_github_issue_closes: MapSet.new(),
       last_github_intake_sync_ms: nil,
       last_done_sync_ms: nil,
       last_landing_plan_ms: nil,
@@ -1326,8 +1327,7 @@ defmodule SymphonyElixir.Orchestrator do
     case module.fetch_issues_by_states(states) do
       {:ok, issues} when is_list(issues) ->
         log_done_issue_source_github_issue_candidates(issues, states)
-        Enum.each(issues, &maybe_close_done_issue_source_github_issue/1)
-        state
+        Enum.reduce(issues, state, &maybe_close_done_issue_source_github_issue/2)
 
       {:error, reason} ->
         Logger.warning("Skipping Linear Done source GitHub issue close sync; failed to fetch Linear issues: #{inspect(reason)}")
@@ -1357,27 +1357,53 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp maybe_close_done_issue_source_github_issue(%Issue{} = issue) do
-    cond do
-      !issue_has_done_sync_evidence?(issue) ->
-        :ok
+  defp maybe_close_done_issue_source_github_issue(%Issue{} = issue, %State{} = state) do
+    issue_url = RepositoryResolver.source_github_issue_url(issue)
+    close_key = done_source_github_issue_close_key(issue, issue_url)
 
-      !present_string?(RepositoryResolver.source_github_issue_url(issue)) ->
-        :ok
+    cond do
+      MapSet.member?(state.done_source_github_issue_closes, close_key) ->
+        state
+
+      !issue_has_done_sync_evidence?(issue) ->
+        state
+
+      !present_string?(issue_url) ->
+        state
 
       true ->
-        do_maybe_close_done_issue_source_github_issue(issue)
+        do_maybe_close_done_issue_source_github_issue(issue, issue_url, close_key, state)
     end
   end
 
-  defp maybe_close_done_issue_source_github_issue(_issue), do: :ok
+  defp maybe_close_done_issue_source_github_issue(_issue, %State{} = state), do: state
 
-  defp do_maybe_close_done_issue_source_github_issue(%Issue{} = issue) do
+  defp do_maybe_close_done_issue_source_github_issue(%Issue{} = issue, issue_url, close_key, %State{} = state) do
     attachment_urls = issue_attachment_urls(issue)
 
     case RepositoryResolver.resolve(issue, Config.settings!()) do
       {:ok, %{slug: repo}} when is_binary(repo) ->
-        close_done_issue_source_github_issue_with_merged_pr(issue, repo, attachment_urls)
+        case done_source_github_issue_closed?(issue, repo, issue_url) do
+          {:ok, true} ->
+            Logger.info(
+              "Merged PR Done sync skipping already closed source GitHub issue for #{issue_context(issue)} " <>
+                "repo=#{repo} issue=#{issue_url}"
+            )
+
+            mark_done_source_github_issue_close(state, close_key)
+
+          {:ok, false} ->
+            close_done_issue_source_github_issue_with_merged_pr(issue, repo, attachment_urls, close_key, state)
+
+          {:error, reason} ->
+            Logger.warning(
+              "Linear Done source GitHub issue close sync could not inspect source issue state for " <>
+                "#{issue_context(issue)} repo=#{repo} issue=#{issue_url} reason=#{inspect(reason)}; " <>
+                "continuing with merged PR lookup"
+            )
+
+            close_done_issue_source_github_issue_with_merged_pr(issue, repo, attachment_urls, close_key, state)
+        end
 
       {:ok, other} ->
         Logger.warning(
@@ -1385,15 +1411,41 @@ defmodule SymphonyElixir.Orchestrator do
             "repository resolver returned invalid result=#{inspect(other)}"
         )
 
+        state
+
       {:error, reason} ->
         Logger.warning(
           "Skipping Linear Done source GitHub issue close sync for #{issue_context(issue)}; " <>
             "failed to resolve repository from issue metadata: #{inspect(reason)}"
         )
+
+        state
     end
   end
 
-  defp close_done_issue_source_github_issue_with_merged_pr(issue, repo, attachment_urls) do
+  defp done_source_github_issue_closed?(%Issue{} = _issue, repo, issue_url) do
+    module = github_issue_module()
+
+    if module_exports?(module, :closed_at, 2) do
+      case module.closed_at(repo, issue_url) do
+        {:ok, closed_at} when is_binary(closed_at) ->
+          {:ok, String.trim(closed_at) != ""}
+
+        {:ok, _open_or_unknown} ->
+          {:ok, false}
+
+        {:error, reason} ->
+          {:error, reason}
+
+        other ->
+          {:error, {:unexpected_closed_at_result, other}}
+      end
+    else
+      {:ok, false}
+    end
+  end
+
+  defp close_done_issue_source_github_issue_with_merged_pr(issue, repo, attachment_urls, close_key, state) do
     case lookup_merged_pull_request_for_done(issue, repo, attachment_urls) do
       {:ok, %{} = pr} ->
         Logger.info(
@@ -1401,10 +1453,16 @@ defmodule SymphonyElixir.Orchestrator do
             "#{issue_context(issue)} repo=#{repo} pr=#{pr_url(pr)}"
         )
 
-        close_source_github_issue_after_done(issue, repo, pr)
+        case close_source_github_issue_after_done(issue, repo, pr) do
+          {:ok, _status} ->
+            mark_done_source_github_issue_close(state, close_key)
+
+          _other ->
+            state
+        end
 
       {:ok, nil} ->
-        :ok
+        state
 
       {:error, reason} ->
         Logger.warning(
@@ -1412,12 +1470,24 @@ defmodule SymphonyElixir.Orchestrator do
             "repo=#{repo}; failed to inspect merged PR evidence: #{inspect(reason)}"
         )
 
+        state
+
       other ->
         Logger.warning(
           "Skipping Linear Done source GitHub issue close sync for #{issue_context(issue)}; " <>
             "repo=#{repo}; unexpected PR lookup result=#{inspect(other)}"
         )
+
+        state
     end
+  end
+
+  defp done_source_github_issue_close_key(%Issue{} = issue, issue_url) do
+    {issue.id, issue_url}
+  end
+
+  defp mark_done_source_github_issue_close(%State{} = state, close_key) do
+    %{state | done_source_github_issue_closes: MapSet.put(state.done_source_github_issue_closes, close_key)}
   end
 
   defp log_post_merge_done_sync_candidates(issues, states) when is_list(issues) do
@@ -1910,21 +1980,26 @@ defmodule SymphonyElixir.Orchestrator do
       case module.close_if_open(repo, issue_url, comment) do
         {:ok, :closed} ->
           Logger.info("Closed source GitHub issue for #{issue_context(issue)} repo=#{repo} issue=#{issue_url}")
+          {:ok, :closed}
 
-        {:ok, _status} ->
-          :ok
+        {:ok, _status} = result ->
+          result
 
-        {:error, reason} ->
+        {:error, reason} = error ->
           Logger.warning(
             "Merged PR Done sync could not close source GitHub issue for #{issue_context(issue)} " <>
               "repo=#{repo} issue=#{inspect(issue_url)} reason=#{inspect(reason)}"
           )
+
+          error
       end
     else
       Logger.warning(
         "Skipping source GitHub issue close for #{issue_context(issue)}; " <>
           "#{inspect(module)} does not export close_if_open/3"
       )
+
+      {:error, {:missing_close_if_open, module}}
     end
   end
 

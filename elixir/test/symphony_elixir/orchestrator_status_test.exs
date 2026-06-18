@@ -429,6 +429,18 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   defmodule FakeGitHubIssueCloser do
+    def closed_at(repo, issue_url) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:github_issue_closed_at_called, repo, issue_url})
+
+        _ ->
+          :ok
+      end
+
+      {:ok, nil}
+    end
+
     def close_if_open(repo, issue_url, comment) do
       case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
         recipient when is_pid(recipient) ->
@@ -439,6 +451,32 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
 
       {:ok, :closed}
+    end
+  end
+
+  defmodule FakeGitHubIssueAlreadyClosed do
+    def closed_at(repo, issue_url) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:github_issue_closed_at_called, repo, issue_url})
+
+        _ ->
+          :ok
+      end
+
+      {:ok, "2026-06-18T13:34:00Z"}
+    end
+
+    def close_if_open(repo, issue_url, comment) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:github_issue_close_called, repo, issue_url, comment})
+
+        _ ->
+          :ok
+      end
+
+      {:ok, :already_closed}
     end
   end
 
@@ -2881,6 +2919,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_receive {:post_merge_fetch_states, done_state_names}, 200
     assert done_state_names == ["Done"]
 
+    assert_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/381"}, 200
+
     assert_receive {:merged_issue_pr_lookup_called, "MT-381", "https://linear.app/example/issue/MT-381/body-linked-merged-pr", "lab-381-body-linked"},
                    200
 
@@ -2890,6 +2930,68 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     refute_receive {:tracker_state_update_called, "issue-already-done-source", "Done"}, 100
     refute MapSet.member?(state.completed, "issue-already-done-source")
+
+    assert MapSet.member?(
+             state.done_source_github_issue_closes,
+             {"issue-already-done-source", "https://github.com/octo/repo/issues/381"}
+           )
+
+    due_state = %{state | last_done_sync_ms: nil}
+    _state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(due_state)
+
+    assert_receive {:post_merge_fetch_states, _active_state_names}, 200
+    assert_receive {:post_merge_fetch_states, ["Done"]}, 200
+    refute_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/381"}, 100
+    refute_receive {:merged_issue_pr_lookup_called, "MT-381", _issue_url, _branch_name}, 100
+    refute_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", _close_comment}, 100
+  end
+
+  test "Done sync skips merged PR lookup when source GitHub issue is already closed" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      poll_interval_ms: 50
+    )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_github_issue = Application.get_env(:symphony_elixir, :github_issue)
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_tracker_comment_recipient = Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup),
+        do: Application.delete_env(:symphony_elixir, :github_pr_lookup),
+        else: Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+
+      if is_nil(previous_github_issue),
+        do: Application.delete_env(:symphony_elixir, :github_issue),
+        else: Application.put_env(:symphony_elixir, :github_issue, previous_github_issue)
+
+      if is_nil(previous_tracker_module),
+        do: Application.delete_env(:symphony_elixir, :tracker_module),
+        else: Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+
+      if is_nil(previous_tracker_comment_recipient),
+        do: Application.delete_env(:symphony_elixir, :tracker_comment_recipient),
+        else: Application.put_env(:symphony_elixir, :tracker_comment_recipient, previous_tracker_comment_recipient)
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupMergedLinkedPr)
+    Application.put_env(:symphony_elixir, :github_issue, FakeGitHubIssueAlreadyClosed)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerAlreadyDoneSourceIssue)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(%Orchestrator.State{})
+
+    assert_receive {:post_merge_fetch_states, _active_state_names}, 200
+    assert_receive {:post_merge_fetch_states, ["Done"]}, 200
+    assert_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/381"}, 200
+    refute_receive {:merged_issue_pr_lookup_called, "MT-381", _issue_url, _branch_name}, 100
+    refute_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", _close_comment}, 100
+
+    assert MapSet.member?(
+             state.done_source_github_issue_closes,
+             {"issue-already-done-source", "https://github.com/octo/repo/issues/381"}
+           )
   end
 
   test "Done sync prefers merged implementation PR evidence over unrelated linked PR attachments" do
