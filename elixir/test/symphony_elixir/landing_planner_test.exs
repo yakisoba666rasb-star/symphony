@@ -28,6 +28,7 @@ defmodule SymphonyElixir.LandingPlannerTest do
          "headRefName" => branch_name || "lab-500",
          "isDraft" => false,
          "mergeStateStatus" => "CLEAN",
+         "reviewDecision" => "APPROVED",
          "headRefOid" => "abc123",
          "state" => "OPEN"
        }}
@@ -39,6 +40,13 @@ defmodule SymphonyElixir.LandingPlannerTest do
   defmodule FakePrLookupNone do
     def lookup_open_issue_pull_request(_repo, _issue_identifier, _issue_url, _branch_name, _attachment_urls) do
       {:ok, nil}
+    end
+  end
+
+  defmodule FakePrLookupBlocked do
+    def lookup_open_issue_pull_request(_repo, issue_identifier, _issue_url, _branch_name, _attachment_urls) do
+      prs = Application.fetch_env!(:symphony_elixir, :landing_test_prs)
+      {:ok, Map.fetch!(prs, issue_identifier)}
     end
   end
 
@@ -74,6 +82,7 @@ defmodule SymphonyElixir.LandingPlannerTest do
     on_exit(fn ->
       Application.delete_env(:symphony_elixir, :test_pid)
       Application.delete_env(:symphony_elixir, :landing_planner_issues)
+      Application.delete_env(:symphony_elixir, :landing_test_prs)
     end)
   end
 
@@ -102,6 +111,7 @@ defmodule SymphonyElixir.LandingPlannerTest do
     assert queue_entry.planned_action == "merge"
     assert queue_entry.repository == "octo/repo"
     assert queue_entry.mergeability == "CLEAN"
+    assert queue_entry.review_decision == "APPROVED"
     assert queue_entry.head_sha == "abc123"
     assert queue_entry.blocker == "none"
 
@@ -115,7 +125,65 @@ defmodule SymphonyElixir.LandingPlannerTest do
     assert body =~ "Planned action: merge (execution gated)"
     assert body =~ "PR: https://github.com/octo/repo/pull/42"
     assert body =~ "mergeability: CLEAN"
+    assert body =~ "review decision: APPROVED"
     assert body =~ "head SHA: abc123"
+  end
+
+  test "dry-run plan blocks PRs that the merge worker would reject" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      repository_default: "octo/repo"
+    )
+
+    cases = [
+      {"LAB-DRAFT", %{"isDraft" => true, "mergeStateStatus" => "CLEAN", "reviewDecision" => "APPROVED", "state" => "OPEN"}, "PR is draft"},
+      {"LAB-DIRTY", %{"isDraft" => false, "mergeStateStatus" => "DIRTY", "reviewDecision" => "APPROVED", "state" => "OPEN"}, "PR mergeability is DIRTY"},
+      {"LAB-CHANGES", %{"isDraft" => false, "mergeStateStatus" => "CLEAN", "reviewDecision" => "CHANGES_REQUESTED", "state" => "OPEN"}, "GitHub review decision is CHANGES_REQUESTED"},
+      {"LAB-CLOSED", %{"isDraft" => false, "mergeStateStatus" => "CLEAN", "reviewDecision" => "APPROVED", "state" => "CLOSED"}, "PR is not open: CLOSED"}
+    ]
+
+    prs =
+      Map.new(cases, fn {identifier, pr, _blocker} ->
+        {identifier,
+         Map.merge(
+           %{
+             "number" => 42,
+             "url" => "https://github.com/octo/repo/pull/42",
+             "headRefName" => String.downcase(identifier),
+             "headRefOid" => "abc123"
+           },
+           pr
+         )}
+      end)
+
+    Application.put_env(:symphony_elixir, :landing_test_prs, prs)
+
+    issues =
+      Enum.map(cases, fn {identifier, _pr, _blocker} ->
+        %Issue{
+          id: "issue-#{String.downcase(identifier)}",
+          identifier: identifier,
+          title: identifier,
+          state: "Approved to Land"
+        }
+      end)
+
+    Application.put_env(:symphony_elixir, :landing_planner_issues, issues)
+
+    assert %{inspected: 4, commented: 4, skipped: 0, errors: 0, queue: queue} =
+             LandingPlanner.reconcile(Config.settings!(), FakeTracker, FakePrLookupBlocked)
+
+    for {identifier, _pr, blocker} <- cases do
+      issue_id = "issue-#{String.downcase(identifier)}"
+      entry = Enum.find(queue, &(&1.issue_identifier == identifier))
+      assert entry.planned_action == "skip"
+      assert entry.status == "blocked"
+      assert entry.blocker == blocker
+
+      assert_receive {:landing_comment, ^issue_id, body}
+      assert body =~ "Planned action: skip (execution gated)"
+      assert body =~ "blocker: #{blocker}"
+    end
   end
 
   test "does not create duplicate dry-run comments when marker already exists" do
@@ -239,6 +307,7 @@ defmodule SymphonyElixir.LandingPlannerTest do
       pr_state: "OPEN",
       draft: "false",
       mergeability: "CLEAN",
+      review_decision: "APPROVED",
       head_branch: "lab-508",
       head_sha: "def456",
       blocker: "none"
@@ -248,6 +317,7 @@ defmodule SymphonyElixir.LandingPlannerTest do
 
     assert body =~ "Planned action: merge (execution gated)"
     assert body =~ "PR state: OPEN"
+    assert body =~ "review decision: APPROVED"
     assert body =~ "head branch: lab-508"
     assert body =~ "head SHA: def456"
   end

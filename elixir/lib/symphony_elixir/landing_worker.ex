@@ -111,6 +111,7 @@ defmodule SymphonyElixir.LandingWorker do
 
       {:error, reason} ->
         Logger.warning("Approved to Land execution failed for #{entry_context(entry)}: #{inspect(reason)}")
+        write_transition_failure_comment(tracker, entry, landing_transition_failed_comment(entry, pr, reason, settings))
         %{result | errors: 1}
     end
   end
@@ -289,14 +290,28 @@ defmodule SymphonyElixir.LandingWorker do
   defp block_entry(tracker, entry, settings, reason, result) do
     Logger.warning("Blocking Approved to Land item #{entry_context(entry)}: #{reason}")
 
-    with :ok <- move_issue_state(tracker, entry, settings.landing.blocked_state),
-         :ok <- create_comment(tracker, entry, blocked_comment(entry, reason, settings)) do
-      result
-      |> Map.put(:blocked, 1)
-      |> maybe_request_repair(tracker, entry, settings, reason)
-    else
+    case move_issue_state(tracker, entry, settings.landing.blocked_state) do
+      :ok ->
+        case create_comment(tracker, entry, blocked_comment(entry, reason, settings)) do
+          :ok ->
+            result
+            |> Map.put(:blocked, 1)
+            |> maybe_request_repair(tracker, entry, settings, reason)
+
+          {:error, comment_reason} ->
+            Logger.warning("Failed to comment on blocked Approved to Land item #{entry_context(entry)}: #{inspect(comment_reason)}")
+            %{result | errors: 1}
+        end
+
       {:error, blocker_reason} ->
         Logger.warning("Failed to block Approved to Land item #{entry_context(entry)}: #{inspect(blocker_reason)}")
+
+        write_transition_failure_comment(
+          tracker,
+          entry,
+          blocked_transition_failed_comment(entry, reason, blocker_reason, settings)
+        )
+
         %{result | errors: 1}
     end
   end
@@ -346,6 +361,17 @@ defmodule SymphonyElixir.LandingWorker do
     end
   end
 
+  defp write_transition_failure_comment(tracker, entry, body) do
+    case create_comment(tracker, entry, body) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to write Approved to Land transition failure comment for #{entry_context(entry)}: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
   defp start_comment(entry, pr, settings) do
     """
     Symphony Approved to Land execution started
@@ -376,6 +402,20 @@ defmodule SymphonyElixir.LandingWorker do
     |> String.trim()
   end
 
+  defp landing_transition_failed_comment(entry, pr, reason, settings) do
+    """
+    Symphony Approved to Land execution could not start
+
+    Issue: #{issue_label(entry)}
+    PR: #{pr_value(pr, "url")}
+    Target state: #{settings.landing.in_progress_state}
+    Reason: #{format_reason(reason)}
+
+    No merge was attempted. Create or configure the Linear workflow state, then move the issue back to #{settings.landing.approval_state}.
+    """
+    |> String.trim()
+  end
+
   defp blocked_comment(entry, reason, settings) do
     """
     Symphony Approved to Land execution blocked
@@ -386,6 +426,22 @@ defmodule SymphonyElixir.LandingWorker do
     Reason: #{reason}
 
     The issue was moved to #{settings.landing.blocked_state}. Move it back to #{settings.landing.approval_state} after resolving the blocker.
+    """
+    |> String.trim()
+  end
+
+  defp blocked_transition_failed_comment(entry, original_reason, transition_reason, settings) do
+    """
+    Symphony Approved to Land execution could not mark the item blocked
+
+    Issue: #{issue_label(entry)}
+    Planned action: #{Map.get(entry, :planned_action, "unknown")}
+    PR: #{Map.get(entry, :pr_url, "unknown")}
+    Original blocker: #{original_reason}
+    Target blocked state: #{settings.landing.blocked_state}
+    State transition error: #{format_reason(transition_reason)}
+
+    No merge was attempted after this blocker. Create or configure the Linear workflow state, then move the issue back to #{settings.landing.approval_state} when it is ready for another landing attempt.
     """
     |> String.trim()
   end

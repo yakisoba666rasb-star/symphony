@@ -71,7 +71,7 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
         "--state",
         "open",
         "--json",
-        "number,url,headRefName,isDraft,mergeStateStatus,state",
+        "number,url,headRefName,headRefOid,isDraft,mergeStateStatus,reviewDecision,state",
         "--head",
         "feature/head-branch"
       ]
@@ -1035,7 +1035,8 @@ defmodule SymphonyElixir.GitHubPrLookupTest do
             {:ok, {Jason.encode!([]), 0}}
 
           ["pr", "view", "83", "--repo", "octo/repo", "--json", fields] ->
-            assert fields == "number,url,headRefName,isDraft,mergeStateStatus,state"
+            assert fields ==
+                     "number,url,headRefName,headRefOid,isDraft,mergeStateStatus,reviewDecision,state"
 
             {:ok,
              {Jason.encode!(%{
