@@ -29,6 +29,8 @@ defmodule SymphonyElixir.LandingWorker do
           errors: non_neg_integer()
         }
 
+  @blocked_label "landing-blocked"
+
   @spec execute(Config.Schema.t(), module(), [map()]) :: execution_result()
   def execute(settings, tracker, queue), do: execute(settings, tracker, queue, runtime_deps())
 
@@ -78,7 +80,11 @@ defmodule SymphonyElixir.LandingWorker do
 
     queue
     |> Enum.reject(&ready_queue_entry?/1)
-    |> Enum.reduce(result, fn _entry, acc -> %{acc | skipped: acc.skipped + 1} end)
+    |> Enum.reduce(result, fn entry, acc ->
+      entry
+      |> handle_non_ready_entry(settings, tracker)
+      |> merge_execution_result(acc)
+    end)
     |> then(fn acc ->
       Enum.reduce(selected, acc, fn entry, acc ->
         entry
@@ -185,6 +191,48 @@ defmodule SymphonyElixir.LandingWorker do
   end
 
   defp ready_queue_entry?(_entry), do: false
+
+  defp handle_non_ready_entry(%{} = entry, settings, tracker) do
+    result = empty_result(settings)
+
+    if blockable_queue_entry?(entry) do
+      block_entry(tracker, entry, settings, block_reason_from_entry(entry), result)
+    else
+      %{result | skipped: 1}
+    end
+  end
+
+  defp handle_non_ready_entry(_entry, settings, _tracker), do: %{empty_result(settings) | skipped: 1}
+
+  defp blockable_queue_entry?(%{} = entry) do
+    valid_string?(Map.get(entry, :issue_id)) and
+      (Map.get(entry, :planned_action) == "skip" or
+         Map.get(entry, :status) == "blocked" or
+         non_empty_blocker?(Map.get(entry, :blocker)) or
+         blocked_by_draft?(entry) or
+         not valid_pr_url?(Map.get(entry, :pr_url)))
+  end
+
+  defp non_empty_blocker?(blocker) when is_binary(blocker), do: String.trim(blocker) not in ["", "none", "unknown"]
+  defp non_empty_blocker?(_blocker), do: false
+
+  defp blocked_by_draft?(entry), do: not draft_executable?(Map.get(entry, :draft))
+
+  defp block_reason_from_entry(entry) do
+    cond do
+      non_empty_blocker?(Map.get(entry, :blocker)) ->
+        Map.get(entry, :blocker)
+
+      blocked_by_draft?(entry) ->
+        "PR is draft"
+
+      not valid_pr_url?(Map.get(entry, :pr_url)) ->
+        "PR URL is missing or invalid: #{Map.get(entry, :pr_url, "unknown")}"
+
+      true ->
+        "Approved to Land item is not ready to merge"
+    end
+  end
 
   defp draft_executable?(true), do: false
   defp draft_executable?("true"), do: false
@@ -303,16 +351,13 @@ defmodule SymphonyElixir.LandingWorker do
 
     case move_issue_state(tracker, entry, settings.landing.blocked_state) do
       :ok ->
-        case create_comment(tracker, entry, blocked_comment(entry, reason, settings)) do
-          :ok ->
-            result
-            |> Map.put(:blocked, 1)
-            |> maybe_request_repair(tracker, entry, settings, reason)
+        label_result = add_blocked_labels(tracker, entry, reason)
+        comment_result = create_comment(tracker, entry, blocked_comment(entry, reason, settings, label_result))
 
-          {:error, comment_reason} ->
-            Logger.warning("Failed to comment on blocked Approved to Land item #{entry_context(entry)}: #{inspect(comment_reason)}")
-            %{result | errors: 1}
-        end
+        result
+        |> Map.put(:blocked, 1)
+        |> add_label_error_count(label_result)
+        |> add_block_comment_result(tracker, entry, settings, reason, comment_result)
 
       {:error, blocker_reason} ->
         Logger.warning("Failed to block Approved to Land item #{entry_context(entry)}: #{inspect(blocker_reason)}")
@@ -326,6 +371,89 @@ defmodule SymphonyElixir.LandingWorker do
         %{result | errors: 1}
     end
   end
+
+  defp add_block_comment_result(result, tracker, entry, settings, reason, :ok) do
+    maybe_request_repair(result, tracker, entry, settings, reason)
+  end
+
+  defp add_block_comment_result(result, _tracker, entry, _settings, _reason, {:error, comment_reason}) do
+    Logger.warning("Failed to comment on blocked Approved to Land item #{entry_context(entry)}: #{inspect(comment_reason)}")
+    %{result | errors: result.errors + 1}
+  end
+
+  defp add_label_error_count(result, :ok), do: result
+  defp add_label_error_count(result, :unsupported), do: result
+  defp add_label_error_count(result, {:error, _reason}), do: %{result | errors: result.errors + 1}
+
+  defp add_blocked_labels(tracker, entry, reason) do
+    labels = blocked_labels(reason)
+
+    cond do
+      labels == [] ->
+        :ok
+
+      not module_exports?(tracker, :add_issue_labels, 2) ->
+        Logger.warning("Skipping Approved to Land blocked labels for #{entry_context(entry)}; #{inspect(tracker)} does not export add_issue_labels/2")
+        :unsupported
+
+      true ->
+        case tracker.add_issue_labels(Map.fetch!(entry, :issue_id), labels) do
+          :ok ->
+            :ok
+
+          {:ok, _value} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("Failed to label blocked Approved to Land item #{entry_context(entry)}: #{inspect(reason)}")
+            {:error, reason}
+
+          other ->
+            Logger.warning("Unexpected blocked label result for #{entry_context(entry)}: #{inspect(other)}")
+            {:error, {:linear_label_unexpected, other}}
+        end
+    end
+  end
+
+  defp blocked_labels(reason) do
+    [@blocked_label, reason_label(reason)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp reason_label(reason) do
+    reason
+    |> reason_text()
+    |> String.downcase()
+    |> cond_label()
+  end
+
+  defp reason_text(reason) when is_binary(reason), do: reason
+  defp reason_text(reason), do: inspect(reason)
+
+  defp cond_label(reason) do
+    cond do
+      reason_matches?(reason, ["dirty", "conflict"]) ->
+        "landing-conflict"
+
+      reason_matches?(reason, ["check"]) ->
+        "landing-checks-failing"
+
+      reason_matches?(reason, ["changes_requested", "review"]) ->
+        "landing-needs-review"
+
+      reason_matches?(reason, ["draft"]) ->
+        "landing-draft"
+
+      reason_matches?(reason, ["closed", "head branch", "head sha"]) ->
+        "landing-stale-pr"
+
+      true ->
+        nil
+    end
+  end
+
+  defp reason_matches?(reason, terms), do: Enum.any?(terms, &String.contains?(reason, &1))
 
   defp maybe_request_repair(result, _tracker, _entry, %{landing: %{repair_enabled: false}}, _reason), do: result
 
@@ -426,7 +554,7 @@ defmodule SymphonyElixir.LandingWorker do
     |> String.trim()
   end
 
-  defp blocked_comment(entry, reason, settings) do
+  defp blocked_comment(entry, reason, settings, label_result) do
     """
     Symphony Approved to Land execution blocked
 
@@ -434,11 +562,16 @@ defmodule SymphonyElixir.LandingWorker do
     Planned action: #{Map.get(entry, :planned_action, "unknown")}
     PR: #{Map.get(entry, :pr_url, "unknown")}
     Reason: #{reason}
+    Labels: #{label_status_line(reason, label_result)}
 
     The issue was moved to #{settings.landing.blocked_state}. Move it back to #{settings.landing.approval_state} after resolving the blocker.
     """
     |> String.trim()
   end
+
+  defp label_status_line(reason, :ok), do: blocked_labels(reason) |> Enum.join(", ")
+  defp label_status_line(_reason, :unsupported), do: "not applied; tracker does not support labels"
+  defp label_status_line(_reason, {:error, reason}), do: "failed to apply: #{format_reason(reason)}"
 
   defp blocked_transition_failed_comment(entry, original_reason, transition_reason, settings) do
     """

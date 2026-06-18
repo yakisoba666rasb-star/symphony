@@ -23,6 +23,14 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @update_labels_mutation """
+  mutation SymphonyUpdateIssueLabels($issueId: String!, $labelIds: [String!]) {
+    issueUpdate(id: $issueId, input: {labelIds: $labelIds}) {
+      success
+    }
+  }
+  """
+
   @issue_team_projects_query """
   query SymphonyIssueTeamProjects($issueId: String!, $first: Int!) {
     issue(id: $issueId) {
@@ -138,6 +146,28 @@ defmodule SymphonyElixir.Linear.Adapter do
   @team_labels_query """
   query SymphonyTeamLabels($teamId: String!, $first: Int!) {
     team(id: $teamId) {
+      labels(first: $first) {
+        nodes {
+          id
+          name
+        }
+      }
+    }
+  }
+  """
+
+  @issue_labels_target_query """
+  query SymphonyIssueLabelsTarget($issueId: String!, $first: Int!) {
+    issue(id: $issueId) {
+      team {
+        id
+        labels(first: $first) {
+          nodes {
+            id
+            name
+          }
+        }
+      }
       labels(first: $first) {
         nodes {
           id
@@ -282,6 +312,29 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
+  @spec add_issue_labels(String.t(), [String.t()]) :: :ok | {:error, term()}
+  def add_issue_labels(issue_id, labels)
+      when is_binary(issue_id) and is_list(labels) do
+    normalized_labels = normalize_label_names(labels)
+
+    if normalized_labels == [] do
+      :ok
+    else
+      with {:ok, target} <- fetch_issue_label_target(issue_id),
+           {:ok, label_ids} <- resolve_or_create_label_ids(target.team_id, normalized_labels, target.known_labels),
+           merged_label_ids = merge_label_ids(target.current_label_ids, label_ids),
+           {:ok, response} <-
+             client_module().graphql(@update_labels_mutation, %{issueId: issue_id, labelIds: merged_label_ids}),
+           true <- get_in(response, ["data", "issueUpdate", "success"]) == true do
+        :ok
+      else
+        false -> {:error, :issue_label_update_failed}
+        {:error, reason} -> {:error, reason}
+        _ -> {:error, :issue_label_update_failed}
+      end
+    end
+  end
+
   @spec fetch_issue_team_projects(String.t()) :: {:ok, [map()]} | {:error, term()}
   def fetch_issue_team_projects(issue_id) when is_binary(issue_id) do
     with {:ok, response} <- client_module().graphql(@issue_team_projects_query, %{issueId: issue_id, first: 250}),
@@ -414,6 +467,24 @@ defmodule SymphonyElixir.Linear.Adapter do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
   end
 
+  defp fetch_issue_label_target(issue_id) do
+    with {:ok, response} <- client_module().graphql(@issue_labels_target_query, %{issueId: issue_id, first: 250}),
+         %{} = issue <- get_in(response, ["data", "issue"]),
+         team_id when is_binary(team_id) <- get_in(issue, ["team", "id"]),
+         team_labels when is_list(team_labels) <- get_in(issue, ["team", "labels", "nodes"]),
+         current_labels when is_list(current_labels) <- get_in(issue, ["labels", "nodes"]) do
+      {:ok,
+       %{
+         team_id: team_id,
+         known_labels: existing_label_ids_by_name(team_labels),
+         current_label_ids: current_label_ids(current_labels)
+       }}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :issue_label_target_not_found}
+    end
+  end
+
   defp fetch_team_labels(team_id) do
     with {:ok, response} <- client_module().graphql(@team_labels_query, %{teamId: team_id, first: 250}),
          labels when is_list(labels) <- get_in(response, ["data", "team", "labels", "nodes"]) do
@@ -495,6 +566,22 @@ defmodule SymphonyElixir.Linear.Adapter do
   defp issue_label_id?(%{"id" => id}) when is_binary(id), do: true
   defp issue_label_id?(%{id: id}) when is_binary(id), do: true
   defp issue_label_id?(_label), do: false
+
+  defp current_label_ids(labels) when is_list(labels) do
+    labels
+    |> Enum.flat_map(fn
+      %{"id" => id} when is_binary(id) -> [id]
+      %{id: id} when is_binary(id) -> [id]
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp merge_label_ids(existing_ids, new_ids) do
+    (existing_ids ++ new_ids)
+    |> Enum.filter(&is_binary/1)
+    |> Enum.uniq()
+  end
 
   defp fetch_team_projects_with_query(query, team_key) do
     with {:ok, response} <- client_module().graphql(query, %{teamKey: team_key, first: 250}),
