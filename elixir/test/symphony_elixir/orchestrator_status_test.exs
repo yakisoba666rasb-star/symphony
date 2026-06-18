@@ -805,6 +805,53 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule FakeTrackerAlreadyDoneSourceIssue do
+    alias SymphonyElixir.Linear.Issue
+
+    def fetch_issues_by_states(state_names) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:post_merge_fetch_states, state_names})
+
+        _ ->
+          :ok
+      end
+
+      if "Done" in state_names do
+        {:ok,
+         [
+           %Issue{
+             id: "issue-already-done-source",
+             identifier: "MT-381",
+             title: "Already Done issue with stale source GitHub issue",
+             state: "Done",
+             url: "https://linear.app/example/issue/MT-381/body-linked-merged-pr",
+             branch_name: "lab-381-body-linked",
+             project_name: "repo",
+             description: "Repo: https://github.com/octo/repo",
+             attachment_urls: ["https://github.com/octo/repo/issues/381"]
+           }
+         ]}
+      else
+        {:ok, []}
+      end
+    end
+
+    def fetch_candidate_issues, do: {:ok, []}
+
+    def update_issue_state(issue_id, state_name) do
+      case Application.get_env(:symphony_elixir, :tracker_state_update_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:tracker_state_update_called, issue_id, state_name})
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
+  end
+
   defmodule FakeTrackerDoneSyncImplementationIssue do
     alias SymphonyElixir.Linear.Issue
 
@@ -1283,6 +1330,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(state.last_done_sync_ms)
     assert_receive {:post_merge_fetch_states, state_names}, 200
     assert "In Progress" in state_names
+    assert_receive {:post_merge_fetch_states, ["Done"]}, 200
 
     _state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(state)
     refute_receive {:post_merge_fetch_states, _state_names}, 100
@@ -1290,6 +1338,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     due_state = %{state | last_done_sync_ms: System.monotonic_time(:millisecond) - 1_001}
     _state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(due_state)
     assert_receive {:post_merge_fetch_states, _state_names}, 200
+    assert_receive {:post_merge_fetch_states, ["Done"]}, 200
   end
 
   test "snapshot returns :timeout when snapshot server is unresponsive" do
@@ -2759,6 +2808,88 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert MapSet.member?(state.completed, "issue-progress-merged")
     assert MapSet.member?(state.completed, "issue-body-linked-merged")
     assert MapSet.member?(state.completed, "issue-identifier-url-only")
+  end
+
+  test "Done sync closes source GitHub issues for Linear issues already in Done" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      poll_interval_ms: 50
+    )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_github_issue = Application.get_env(:symphony_elixir, :github_issue)
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+
+    previous_tracker_state_update_recipient =
+      Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
+
+    previous_tracker_comment_recipient =
+      Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_github_issue) do
+        Application.delete_env(:symphony_elixir, :github_issue)
+      else
+        Application.put_env(:symphony_elixir, :github_issue, previous_github_issue)
+      end
+
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+
+      if is_nil(previous_tracker_state_update_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_state_update_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_state_update_recipient,
+          previous_tracker_state_update_recipient
+        )
+      end
+
+      if is_nil(previous_tracker_comment_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_comment_recipient,
+          previous_tracker_comment_recipient
+        )
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupMergedLinkedPr)
+    Application.put_env(:symphony_elixir, :github_issue, FakeGitHubIssueCloser)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerAlreadyDoneSourceIssue)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(%Orchestrator.State{})
+
+    assert_receive {:post_merge_fetch_states, active_state_names}, 200
+    assert "In Progress" in active_state_names
+    refute "Done" in active_state_names
+
+    assert_receive {:post_merge_fetch_states, done_state_names}, 200
+    assert done_state_names == ["Done"]
+
+    assert_receive {:merged_issue_pr_lookup_called, "MT-381", "https://linear.app/example/issue/MT-381/body-linked-merged-pr", "lab-381-body-linked"},
+                   200
+
+    assert_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", close_comment}, 200
+    assert close_comment =~ "https://github.com/octo/repo/pull/201"
+    assert close_comment =~ "MT-381"
+
+    refute_receive {:tracker_state_update_called, "issue-already-done-source", "Done"}, 100
+    refute MapSet.member?(state.completed, "issue-already-done-source")
   end
 
   test "Done sync prefers merged implementation PR evidence over unrelated linked PR attachments" do
