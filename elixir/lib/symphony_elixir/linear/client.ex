@@ -135,33 +135,72 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_issues_by_states(state_names) when is_list(state_names) do
+  def fetch_issues_by_states(state_names), do: fetch_issues_by_states(state_names, [])
+
+  @spec fetch_issues_by_states([String.t()], keyword()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_states(state_names, opts) when is_list(state_names) and is_list(opts) do
     normalized_states = Enum.map(state_names, &to_string/1) |> Enum.uniq()
 
     if normalized_states == [] do
       {:ok, []}
     else
-      tracker = Config.settings!().tracker
-      project_slug = tracker.project_slug
-      team_key = tracker.team_key
-
-      cond do
-        is_nil(tracker.api_key) ->
-          {:error, :missing_linear_api_token}
-
-        tracker.all_projects and blank?(team_key) ->
-          {:error, :missing_linear_team_key}
-
-        tracker.all_projects ->
-          do_fetch_by_team_states(team_key, normalized_states, nil)
-
-        is_nil(project_slug) ->
-          {:error, :missing_linear_project_slug}
-
-        true ->
-          do_fetch_by_states(project_slug, normalized_states, nil)
-      end
+      fetch_non_empty_issues_by_states(normalized_states, opts)
     end
+  end
+
+  defp fetch_non_empty_issues_by_states(normalized_states, opts) do
+    tracker = Config.settings!().tracker
+
+    with :ok <- require_linear_token(tracker),
+         {:ok, scope} <- issue_state_fetch_scope(tracker, opts) do
+      fetch_issues_by_scope(scope, normalized_states)
+    end
+  end
+
+  defp require_linear_token(tracker) do
+    if is_nil(tracker.api_key), do: {:error, :missing_linear_api_token}, else: :ok
+  end
+
+  defp issue_state_fetch_scope(tracker, opts) do
+    explicit_project_slug = Keyword.get(opts, :project_slug)
+    explicit_team_key = Keyword.get(opts, :team_key)
+
+    cond do
+      explicit_all_projects?(tracker, opts, explicit_project_slug, explicit_team_key) ->
+        team_fetch_scope(explicit_team_key || tracker.team_key)
+
+      not blank?(explicit_team_key) ->
+        team_fetch_scope(explicit_team_key)
+
+      not blank?(explicit_project_slug) ->
+        {:ok, {:project, explicit_project_slug}}
+
+      tracker.all_projects ->
+        team_fetch_scope(tracker.team_key)
+
+      blank?(tracker.project_slug) ->
+        {:error, :missing_linear_project_slug}
+
+      true ->
+        {:ok, {:project, tracker.project_slug}}
+    end
+  end
+
+  defp explicit_all_projects?(tracker, opts, explicit_project_slug, explicit_team_key) do
+    Keyword.get(opts, :all_projects, false) or
+      (blank?(explicit_project_slug) and blank?(explicit_team_key) and tracker.all_projects)
+  end
+
+  defp team_fetch_scope(team_key) do
+    if blank?(team_key), do: {:error, :missing_linear_team_key}, else: {:ok, {:team, team_key}}
+  end
+
+  defp fetch_issues_by_scope({:team, team_key}, normalized_states) do
+    do_fetch_by_team_states(team_key, normalized_states, nil)
+  end
+
+  defp fetch_issues_by_scope({:project, project_slug}, normalized_states) do
+    do_fetch_by_states(project_slug, normalized_states, nil)
   end
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
