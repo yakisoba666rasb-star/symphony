@@ -57,6 +57,11 @@ defmodule SymphonyElixir.LandingWorkerTest do
       :ok
     end
 
+    def add_issue_labels(issue_id, labels) do
+      send(test_pid(), {:landing_labels, issue_id, labels})
+      :ok
+    end
+
     defp test_pid, do: Application.fetch_env!(:symphony_elixir, :landing_worker_test_pid)
   end
 
@@ -459,11 +464,14 @@ defmodule SymphonyElixir.LandingWorkerTest do
              )
 
     assert_receive {:landing_state_update, "issue-1", "Blocked"}
+    assert_receive {:landing_labels, "issue-1", labels}
+    assert labels == ["landing-blocked", "landing-conflict"]
     assert_receive {:landing_comment, "issue-1", body}
     assert body =~ "could not mark the item blocked"
     assert body =~ "Original blocker: PR mergeability changed to DIRTY"
     assert body =~ "Target blocked state: Blocked"
     assert body =~ "state_not_found"
+    assert body =~ "Labels: landing-blocked, landing-conflict"
     refute_receive {:gh_command, ["pr", "merge" | _args]}, 100
   end
 
