@@ -137,12 +137,31 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info(:run_poll_cycle, state) do
-    state = refresh_runtime_config(state)
-    state = maybe_dispatch(state)
-    state = schedule_tick(state, state.poll_interval_ms)
-    state = %{state | poll_check_in_progress: false}
+    state =
+      try do
+        state
+        |> refresh_runtime_config()
+        |> maybe_dispatch()
+      rescue
+        error ->
+          Logger.error(
+            "Orchestrator poll cycle crashed; preserving orchestrator state: " <>
+              Exception.format(:error, error, __STACKTRACE__)
+          )
 
-    notify_dashboard()
+          state
+      catch
+        kind, reason ->
+          Logger.error(
+            "Orchestrator poll cycle aborted (#{inspect(kind)}); preserving orchestrator state: " <>
+              Exception.format(kind, reason, __STACKTRACE__)
+          )
+
+          state
+      end
+
+    state = finish_poll_cycle(state)
+
     {:noreply, state}
   end
 
@@ -274,6 +293,16 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
+  end
+
+  defp finish_poll_cycle(%State{} = state) do
+    state =
+      state
+      |> schedule_tick(state.poll_interval_ms)
+      |> Map.put(:poll_check_in_progress, false)
+
+    notify_dashboard()
+    state
   end
 
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
