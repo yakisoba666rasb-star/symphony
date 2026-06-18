@@ -103,7 +103,7 @@ defmodule SymphonyElixir.Orchestrator do
   @impl true
   def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
       when is_reference(tick_token) do
-    state = refresh_runtime_config(state)
+    state = preserve_orchestrator_state(state, "tick runtime config refresh", &refresh_runtime_config/1)
 
     state = %{
       state
@@ -121,7 +121,7 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info({:tick, _tick_token}, state), do: {:noreply, state}
 
   def handle_info(:tick, state) do
-    state = refresh_runtime_config(state)
+    state = preserve_orchestrator_state(state, "tick runtime config refresh", &refresh_runtime_config/1)
 
     state = %{
       state
@@ -138,27 +138,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(:run_poll_cycle, state) do
     state =
-      try do
+      preserve_orchestrator_state(state, "poll cycle", fn state ->
         state
         |> refresh_runtime_config()
         |> maybe_dispatch()
-      rescue
-        error ->
-          Logger.error(
-            "Orchestrator poll cycle crashed; preserving orchestrator state: " <>
-              Exception.format(:error, error, __STACKTRACE__)
-          )
-
-          state
-      catch
-        kind, reason ->
-          Logger.error(
-            "Orchestrator poll cycle aborted (#{inspect(kind)}); preserving orchestrator state: " <>
-              Exception.format(kind, reason, __STACKTRACE__)
-          )
-
-          state
-      end
+      end)
 
     state = finish_poll_cycle(state)
 
@@ -5388,6 +5372,26 @@ defmodule SymphonyElixir.Orchestrator do
       | poll_interval_ms: config.polling.interval_ms,
         max_concurrent_agents: config.agent.max_concurrent_agents
     }
+  end
+
+  defp preserve_orchestrator_state(%State{} = state, operation, fun) when is_function(fun, 1) do
+    fun.(state)
+  rescue
+    error ->
+      Logger.error(
+        "Orchestrator #{operation} crashed; preserving orchestrator state: " <>
+          Exception.format(:error, error, __STACKTRACE__)
+      )
+
+      state
+  catch
+    kind, reason ->
+      Logger.error(
+        "Orchestrator #{operation} aborted (#{inspect(kind)}); preserving orchestrator state: " <>
+          Exception.format(kind, reason, __STACKTRACE__)
+      )
+
+      state
   end
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
