@@ -850,6 +850,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> validate_interval_at_least_polling(:review_rework)
     |> validate_landing_approval_state()
     |> validate_landing_repair_state()
+    |> validate_landing_execution_states()
     |> validate_stall_review_threshold()
   end
 
@@ -900,6 +901,63 @@ defmodule SymphonyElixir.Config.Schema do
     else
       changeset
     end
+  end
+
+  defp validate_landing_execution_states(changeset) do
+    tracker = get_field(changeset, :tracker)
+    landing = get_field(changeset, :landing)
+
+    if landing_execution_enabled?(landing) do
+      tracker
+      |> normalized_active_states()
+      |> landing_execution_state_errors(landing)
+      |> Enum.reduce(changeset, fn message, acc -> add_error(acc, :landing, message) end)
+    else
+      changeset
+    end
+  end
+
+  defp landing_execution_enabled?(landing), do: landing && landing.enabled && landing.execute_enabled
+
+  defp landing_execution_state_errors(active_states, landing) do
+    []
+    |> maybe_prepend_error(
+      MapSet.member?(active_states, normalize_issue_state(landing.in_progress_state)),
+      "in_progress_state must not be included in tracker.active_states when landing.execute_enabled is true"
+    )
+    |> maybe_prepend_error(
+      MapSet.member?(active_states, normalize_issue_state(landing.blocked_state)),
+      "blocked_state must not be included in tracker.active_states when landing.execute_enabled is true"
+    )
+    |> maybe_prepend_error(
+      not distinct_landing_states?(landing, [:approval_state, :in_progress_state, :blocked_state]),
+      "approval_state, in_progress_state, and blocked_state must be distinct when landing.execute_enabled is true"
+    )
+    |> maybe_prepend_error(
+      landing.repair_enabled &&
+        not distinct_landing_states?(landing, [:approval_state, :in_progress_state, :blocked_state, :repair_state]),
+      "repair_state must be distinct from approval_state, in_progress_state, and blocked_state when landing.repair_enabled is true"
+    )
+    |> Enum.reverse()
+  end
+
+  defp maybe_prepend_error(errors, true, message), do: [message | errors]
+  defp maybe_prepend_error(errors, false, _message), do: errors
+
+  defp normalized_active_states(tracker) do
+    tracker
+    |> Map.get(:active_states, [])
+    |> Enum.map(&normalize_issue_state/1)
+    |> MapSet.new()
+  end
+
+  defp distinct_landing_states?(landing, fields) do
+    normalized =
+      fields
+      |> Enum.map(fn field -> Map.fetch!(landing, field) end)
+      |> Enum.map(&normalize_issue_state/1)
+
+    length(normalized) == length(Enum.uniq(normalized))
   end
 
   defp validate_stall_review_threshold(changeset) do

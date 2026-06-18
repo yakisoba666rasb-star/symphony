@@ -27,7 +27,32 @@ defmodule SymphonyElixir.LandingWorkerTest do
 
   defmodule FakeTrackerStateError do
     def update_issue_state(_issue_id, _state_name), do: {:error, :linear_down}
-    def create_comment(_issue_id, _body), do: :ok
+
+    def create_comment(issue_id, body) do
+      send(test_pid(), {:landing_comment, issue_id, body})
+      :ok
+    end
+
+    defp test_pid, do: Application.fetch_env!(:symphony_elixir, :landing_worker_test_pid)
+  end
+
+  defmodule FakeTrackerBlockedStateMissing do
+    def update_issue_state(issue_id, "Blocked") do
+      send(test_pid(), {:landing_state_update, issue_id, "Blocked"})
+      {:error, :state_not_found}
+    end
+
+    def update_issue_state(issue_id, state_name) do
+      send(test_pid(), {:landing_state_update, issue_id, state_name})
+      :ok
+    end
+
+    def create_comment(issue_id, body) do
+      send(test_pid(), {:landing_comment, issue_id, body})
+      :ok
+    end
+
+    defp test_pid, do: Application.fetch_env!(:symphony_elixir, :landing_worker_test_pid)
   end
 
   defmodule FakeTrackerCommentError do
@@ -376,10 +401,38 @@ defmodule SymphonyElixir.LandingWorkerTest do
     assert %{enabled: true, attempted: 1, merged: 0, blocked: 0, errors: 1} =
              LandingWorker.execute(Config.settings!(), FakeTrackerStateError, [ready_entry()], deps())
 
+    assert_receive {:landing_comment, "issue-1", transition_body}
+    assert transition_body =~ "execution could not start"
+    assert transition_body =~ "Target state: Landing"
+    assert transition_body =~ "No merge was attempted"
+
     assert %{enabled: true, attempted: 1, merged: 0, blocked: 0, errors: 1} =
              LandingWorker.execute(Config.settings!(), FakeTrackerCommentError, [ready_entry()], deps())
 
     assert_receive {:gh_command, ["pr", "view", "https://github.com/octo/repo/pull/1", "--json", _json]}
+  end
+
+  test "comments visibly when the configured blocked state is missing" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true
+    )
+
+    assert %{enabled: true, attempted: 1, merged: 0, blocked: 0, errors: 1} =
+             LandingWorker.execute(
+               Config.settings!(),
+               FakeTrackerBlockedStateMissing,
+               [ready_entry()],
+               deps(%{"https://github.com/octo/repo/pull/1" => pr_view(%{"mergeStateStatus" => "DIRTY"})})
+             )
+
+    assert_receive {:landing_state_update, "issue-1", "Blocked"}
+    assert_receive {:landing_comment, "issue-1", body}
+    assert body =~ "could not mark the item blocked"
+    assert body =~ "Original blocker: PR mergeability changed to DIRTY"
+    assert body =~ "Target blocked state: Blocked"
+    assert body =~ "state_not_found"
+    refute_receive {:gh_command, ["pr", "merge" | _args]}, 100
   end
 
   test "moves Landing items to Blocked when start comments or merge commands error after state transition" do

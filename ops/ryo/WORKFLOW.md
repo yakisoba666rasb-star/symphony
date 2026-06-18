@@ -204,6 +204,11 @@ or a human moves it.
 - `Blocked`: the runtime needs human attention before landing can continue.
 - `Done`, `Closed`, `Cancelled`, `Canceled`, `Duplicate`: terminal.
 
+Before enabling real landing execution, create the `Landing` and `Blocked`
+workflow states in Linear. Do not include `Approved to Land`, `Landing`, or
+`Blocked` in `tracker.active_states`; only `repair_state` should be an active
+dispatch state when `landing.repair_enabled` is true.
+
 ## Superpowers planning gate
 
 Before implementation, always use `superpowers:brainstorming` to clarify requirements,

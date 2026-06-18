@@ -405,6 +405,53 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert message =~ "approval_state must not be included in tracker.active_states"
   end
 
+  test "workflow config rejects executable landing states that dispatch agents or overlap" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "tracker" => %{"active_states" => ["Todo", " Landing "]},
+               "landing" => %{"enabled" => true, "execute_enabled" => true, "in_progress_state" => "Landing"}
+             })
+
+    assert message =~ "landing"
+    assert message =~ "in_progress_state must not be included in tracker.active_states"
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "tracker" => %{"active_states" => ["Todo", "Blocked"]},
+               "landing" => %{"enabled" => true, "execute_enabled" => true, "blocked_state" => "Blocked"}
+             })
+
+    assert message =~ "blocked_state must not be included in tracker.active_states"
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "landing" => %{
+                 "enabled" => true,
+                 "execute_enabled" => true,
+                 "approval_state" => "Approved to Land",
+                 "in_progress_state" => "Approved to Land",
+                 "blocked_state" => "Blocked"
+               }
+             })
+
+    assert message =~ "approval_state, in_progress_state, and blocked_state must be distinct"
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "landing" => %{
+                 "enabled" => true,
+                 "execute_enabled" => true,
+                 "approval_state" => "Approved to Land",
+                 "in_progress_state" => "Landing",
+                 "blocked_state" => "Blocked",
+                 "repair_enabled" => true,
+                 "repair_state" => "Blocked"
+               }
+             })
+
+    assert message =~ "repair_state must be distinct"
+  end
+
   test "workflow config rejects invalid Approved to Land landing settings" do
     assert {:error, {:invalid_workflow_config, message}} =
              Schema.parse(%{

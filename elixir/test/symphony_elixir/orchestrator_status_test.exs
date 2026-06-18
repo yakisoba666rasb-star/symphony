@@ -1202,7 +1202,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_receive {:landing_worker_execute, true, 1}
 
     _state = Orchestrator.plan_approved_landings_for_test(state)
-    refute_receive {:landing_fetch_states, _states}, 100
+    refute_receive {:landing_fetch_states, ["Approved to Land"]}, 100
 
     due_state = %{state | last_landing_plan_ms: System.monotonic_time(:millisecond) - 1_001}
     _state = Orchestrator.plan_approved_landings_for_test(due_state)
@@ -5127,9 +5127,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     state = %Orchestrator.State{max_concurrent_agents: 10}
     updated_state = Orchestrator.reconcile_review_rework_requests_for_test(state)
 
-    refute_receive {:memory_tracker_state_update, _issue_id, _state}, 200
-    refute_receive {:memory_tracker_comment, _issue_id, _comment}, 200
-    refute_receive {:agent_runner_called, _issue, _opts}, 200
+    refute_receive {:memory_tracker_state_update, "issue-review-rework-approved", _state}, 200
+
+    refute_receive {:memory_tracker_comment, "issue-review-rework-approved", "Symphony detected GitHub changes requested" <> _comment},
+                   200
+
+    refute_receive {:agent_runner_called, %{id: "issue-review-rework-approved"}, _opts}, 200
     assert updated_state.review_rework_rounds == %{}
     assert updated_state.running == %{}
   end
