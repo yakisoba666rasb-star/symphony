@@ -14,6 +14,11 @@ defmodule SymphonyElixir.LandingWorkerTest do
       :ok
     end
 
+    def add_issue_labels(issue_id, labels) do
+      send(test_pid(), {:landing_labels, issue_id, labels})
+      :ok
+    end
+
     defp test_pid, do: Application.fetch_env!(:symphony_elixir, :landing_worker_test_pid)
   end
 
@@ -243,9 +248,13 @@ defmodule SymphonyElixir.LandingWorkerTest do
 
     assert %{enabled: true, attempted: 1, merged: 0, blocked: 1, errors: 0} = result
     assert_receive {:landing_state_update, "issue-1", "Needs Human"}
+    assert_receive {:landing_labels, "issue-1", labels}
+    assert "landing-blocked" in labels
+    assert "landing-conflict" in labels
     assert_receive {:landing_comment, "issue-1", body}
     assert body =~ "execution blocked"
     assert body =~ "PR mergeability changed to DIRTY"
+    assert body =~ "Labels: landing-blocked, landing-conflict"
     refute_receive {:landing_state_update, "issue-1", "In Progress"}, 100
     refute_receive {:gh_command, ["pr", "merge" | _args]}, 100
   end
@@ -429,7 +438,7 @@ defmodule SymphonyElixir.LandingWorkerTest do
     assert transition_body =~ "Target state: Landing"
     assert transition_body =~ "No merge was attempted"
 
-    assert %{enabled: true, attempted: 1, merged: 0, blocked: 0, errors: 1} =
+    assert %{enabled: true, attempted: 1, merged: 0, blocked: 1, errors: 1} =
              LandingWorker.execute(Config.settings!(), FakeTrackerCommentError, [ready_entry()], deps())
 
     assert_receive {:gh_command, ["pr", "view", "https://github.com/octo/repo/pull/1", "--json", _json]}
@@ -464,7 +473,7 @@ defmodule SymphonyElixir.LandingWorkerTest do
       landing_execute_enabled: true
     )
 
-    assert %{enabled: true, attempted: 1, merged: 0, blocked: 0, errors: 1} =
+    assert %{enabled: true, attempted: 1, merged: 0, blocked: 1, errors: 1} =
              LandingWorker.execute(Config.settings!(), FakeTrackerCommentError, [ready_entry()], deps())
 
     assert_receive {:landing_state_update, "issue-1", "Landing"}
@@ -522,7 +531,7 @@ defmodule SymphonyElixir.LandingWorkerTest do
     assert success_body =~ "Linear state: failed to move to Done"
   end
 
-  test "skips entries that are not ready for execution" do
+  test "moves blocked skip entries to Blocked with labels and a visible reason" do
     write_workflow_file!(Workflow.workflow_file_path(),
       landing_enabled: true,
       landing_execute_enabled: true
@@ -532,11 +541,18 @@ defmodule SymphonyElixir.LandingWorkerTest do
 
     result = LandingWorker.execute(Config.settings!(), FakeTracker, [entry], deps())
 
-    assert %{enabled: true, attempted: 0, merged: 0, blocked: 0, skipped: 1, errors: 0} = result
+    assert %{enabled: true, attempted: 0, merged: 0, blocked: 1, skipped: 0, errors: 0} = result
+    assert_receive {:landing_state_update, "issue-1", "Blocked"}
+    assert_receive {:landing_labels, "issue-1", labels}
+    assert labels == ["landing-blocked", "landing-conflict"]
+    assert_receive {:landing_comment, "issue-1", body}
+    assert body =~ "execution blocked"
+    assert body =~ "Reason: conflict"
+    assert body =~ "Labels: landing-blocked, landing-conflict"
     refute_receive {:gh_command, _args}, 100
   end
 
-  test "skips draft and malformed ready entries before gh revalidation" do
+  test "blocks draft and malformed ready entries before gh revalidation when an issue id is available" do
     write_workflow_file!(Workflow.workflow_file_path(),
       landing_enabled: true,
       landing_execute_enabled: true
@@ -551,7 +567,23 @@ defmodule SymphonyElixir.LandingWorkerTest do
 
     result = LandingWorker.execute(Config.settings!(), FakeTracker, entries, deps())
 
-    assert %{enabled: true, attempted: 0, merged: 0, blocked: 0, skipped: 4, errors: 0} = result
+    assert %{enabled: true, attempted: 0, merged: 0, blocked: 3, skipped: 1, errors: 0} = result
+    assert_receive {:landing_state_update, "issue-1", "Blocked"}
+    assert_receive {:landing_labels, "issue-1", labels}
+    assert "landing-draft" in labels
+    assert_receive {:landing_comment, "issue-1", body}
+    assert body =~ "PR is draft"
+
+    assert_receive {:landing_state_update, "issue-2", "Blocked"}
+    assert_receive {:landing_labels, "issue-2", labels}
+    assert "landing-draft" in labels
+
+    assert_receive {:landing_state_update, "issue-3", "Blocked"}
+    assert_receive {:landing_labels, "issue-3", labels}
+    assert labels == ["landing-blocked"]
+    assert_receive {:landing_comment, "issue-3", body}
+    assert body =~ "PR URL is missing or invalid"
+
     refute_receive {:gh_command, _args}, 100
   end
 

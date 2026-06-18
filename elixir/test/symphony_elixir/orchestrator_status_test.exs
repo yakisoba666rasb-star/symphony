@@ -2354,7 +2354,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert comment =~ "https://github.com/octo/repo/pull/83"
     assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 1_000
 
-    state = :sys.get_state(pid, 15_000)
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        MapSet.member?(state.completed, issue_id)
+      end)
+
     assert state.running == %{}
     assert state.blocked == %{}
     assert MapSet.member?(state.completed, issue_id)
@@ -2473,7 +2477,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert comment =~ "https://github.com/octo/repo/pull/83"
     assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 1_000
 
-    state = :sys.get_state(pid, 15_000)
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        MapSet.member?(state.completed, issue_id)
+      end)
+
     assert state.running == %{}
     assert state.blocked == %{}
     assert MapSet.member?(state.completed, issue_id)
@@ -3145,8 +3153,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute Map.has_key?(state.retry_attempts, issue_id)
     assert %{policy_terminal_context: :done_sync, error: error} = state.blocked[issue_id]
     assert error =~ "failed to move Linear issue to Done"
-    assert_receive {:tracker_comment_called, ^issue_id, comment}, 500
-    assert comment =~ "merged PR Done sync retry limit reached (2)"
+    assert_tracker_comment_contains(issue_id, "merged PR Done sync retry limit reached (2)", 500)
   end
 
   test "orchestrator restarts stalled workers with retry backoff" do
@@ -7950,6 +7957,27 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   defp wait_for_orchestrator_state(pid, predicate, timeout_ms \\ 2_000) when is_function(predicate, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_orchestrator_state(pid, predicate, deadline_ms)
+  end
+
+  defp assert_tracker_comment_contains(issue_id, expected, timeout_ms) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_assert_tracker_comment_contains(issue_id, expected, deadline_ms)
+  end
+
+  defp do_assert_tracker_comment_contains(issue_id, expected, deadline_ms) do
+    remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:tracker_comment_called, ^issue_id, comment} ->
+        if comment =~ expected do
+          comment
+        else
+          do_assert_tracker_comment_contains(issue_id, expected, deadline_ms)
+        end
+    after
+      remaining_ms ->
+        flunk("timed out waiting for tracker comment #{inspect(expected)} on #{issue_id}")
+    end
   end
 
   defp do_wait_for_orchestrator_state(pid, predicate, deadline_ms) do
