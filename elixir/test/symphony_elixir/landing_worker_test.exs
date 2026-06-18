@@ -76,7 +76,16 @@ defmodule SymphonyElixir.LandingWorkerTest do
 
     result = LandingWorker.execute(Config.settings!(), FakeTracker, [ready_entry()], deps())
 
-    assert result == %{enabled: false, attempted: 0, merged: 0, blocked: 0, skipped: 0, errors: 0}
+    assert result == %{
+             enabled: false,
+             attempted: 0,
+             merged: 0,
+             blocked: 0,
+             repair_requested: 0,
+             skipped: 0,
+             errors: 0
+           }
+
     refute_receive {:landing_state_update, _issue_id, _state_name}, 100
     refute_receive {:landing_comment, _issue_id, _body}, 100
   end
@@ -89,7 +98,16 @@ defmodule SymphonyElixir.LandingWorkerTest do
 
     result = LandingWorker.execute(Config.settings!(), FakeTracker, [ready_entry()])
 
-    assert result == %{enabled: false, attempted: 0, merged: 0, blocked: 0, skipped: 0, errors: 0}
+    assert result == %{
+             enabled: false,
+             attempted: 0,
+             merged: 0,
+             blocked: 0,
+             repair_requested: 0,
+             skipped: 0,
+             errors: 0
+           }
+
     refute_receive {:gh_command, _args}, 100
   end
 
@@ -180,6 +198,39 @@ defmodule SymphonyElixir.LandingWorkerTest do
     assert_receive {:landing_comment, "issue-1", body}
     assert body =~ "execution blocked"
     assert body =~ "PR mergeability changed to DIRTY"
+    refute_receive {:landing_state_update, "issue-1", "In Progress"}, 100
+    refute_receive {:gh_command, ["pr", "merge" | _args]}, 100
+  end
+
+  test "requests repair after blocking stale PRs when enabled" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true,
+      landing_blocked_state: "Blocked",
+      landing_repair_enabled: true,
+      landing_repair_state: "In Progress"
+    )
+
+    result =
+      LandingWorker.execute(
+        Config.settings!(),
+        FakeTracker,
+        [ready_entry()],
+        deps(%{"https://github.com/octo/repo/pull/1" => pr_view(%{"mergeStateStatus" => "DIRTY"})})
+      )
+
+    assert %{enabled: true, attempted: 1, merged: 0, blocked: 1, repair_requested: 1, errors: 0} = result
+    assert_receive {:landing_state_update, "issue-1", "Blocked"}
+    assert_receive {:landing_comment, "issue-1", blocked_body}
+    assert blocked_body =~ "PR mergeability changed to DIRTY"
+    assert_receive {:landing_state_update, "issue-1", "In Progress"}
+    assert_receive {:landing_comment, "issue-1", repair_body}
+    assert repair_body =~ "repair requested"
+    assert repair_body =~ "https://github.com/octo/repo/pull/1"
+    assert repair_body =~ "PR mergeability changed to DIRTY"
+    assert repair_body =~ "In Review"
+    assert repair_body =~ "Approved to Land"
+    assert repair_body =~ "must not merge"
     refute_receive {:gh_command, ["pr", "merge" | _args]}, 100
   end
 
@@ -261,6 +312,35 @@ defmodule SymphonyElixir.LandingWorkerTest do
     assert_receive {:landing_state_update, "issue-1", "Blocked"}
     assert_receive {:landing_comment, "issue-1", blocked_body}
     assert blocked_body =~ "GitHub merge command failed with status 1"
+  end
+
+  test "requests repair after merge command blockers when enabled" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true,
+      landing_repair_enabled: true,
+      landing_repair_state: "In Progress"
+    )
+
+    result =
+      LandingWorker.execute(
+        Config.settings!(),
+        FakeTracker,
+        [ready_entry()],
+        deps(%{}, merge_result: {"merge conflict", 1})
+      )
+
+    assert %{enabled: true, attempted: 1, merged: 0, blocked: 1, repair_requested: 1, errors: 0} = result
+    assert_receive {:landing_state_update, "issue-1", "Landing"}
+    assert_receive {:landing_comment, "issue-1", start_body}
+    assert start_body =~ "execution started"
+    assert_receive {:landing_state_update, "issue-1", "Blocked"}
+    assert_receive {:landing_comment, "issue-1", blocked_body}
+    assert blocked_body =~ "GitHub merge command failed with status 1"
+    assert_receive {:landing_state_update, "issue-1", "In Progress"}
+    assert_receive {:landing_comment, "issue-1", repair_body}
+    assert repair_body =~ "merge conflict"
+    assert repair_body =~ "normal implementation agent"
   end
 
   test "supports configured merge methods" do

@@ -92,6 +92,8 @@ defmodule SymphonyElixir.CoreTest do
     assert config.agent.max_review_fix_loops == 3
     assert config.agent.same_review_fingerprint_limit == 4
     assert config.agent.same_test_failure_fingerprint_limit == 4
+    assert config.landing.repair_enabled == false
+    assert config.landing.repair_state == "In Progress"
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -138,6 +140,16 @@ defmodule SymphonyElixir.CoreTest do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "tracker.active_states"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_repair_enabled: true,
+      landing_repair_state: "Needs Repair",
+      tracker_active_states: ["Todo", "In Progress"]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "repair_state must be included in tracker.active_states"
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "linear",

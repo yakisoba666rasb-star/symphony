@@ -17,7 +17,10 @@ Symphony detects issues in `Approved to Land`, writes a dry-run landing plan
 comment, and exposes the same queue in the observability API and dashboard.
 When `landing.execute_enabled` is also true, Symphony revalidates ready queue
 items and merges at most `landing.max_per_run` PRs per reconcile. It does not
-repair conflicts or close non-merge outcomes yet.
+close non-merge outcomes yet. Conflict repair is opt-in: when
+`landing.repair_enabled` is true, blocked landing items are moved to the
+configured repair state so the normal implementation dispatch loop can fix the
+existing PR and return it to review.
 
 ## Linear State Model
 
@@ -47,6 +50,8 @@ landing:
   approval_state: Approved to Land
   in_progress_state: Landing
   blocked_state: Blocked
+  repair_enabled: false
+  repair_state: In Progress
   interval_ms: 120000
   merge_method: squash
   max_per_run: 1
@@ -65,6 +70,11 @@ Execution settings:
 - `max_per_run`: maximum number of ready queue entries to execute per reconcile;
   default `1`.
 - `command_timeout_ms`: timeout for each `gh` command; default `120000`.
+- `repair_enabled`: when true, blocked landing items are moved to
+  `repair_state` after the blocked comment is written; default `false`.
+- `repair_state`: implementation dispatch state used for repair, normally
+  `In Progress`. When repair is enabled, this state must be included in
+  `tracker.active_states`.
 
 ## Operator Flow
 
@@ -138,22 +148,27 @@ The current worker uses `gh pr view` for revalidation and `gh pr merge
 --<merge_method>` for execution. It does not delete the source branch
 automatically, so stacked PRs keep their branch topology. If revalidation or
 merge fails, the issue is moved to `landing.blocked_state` with a Linear
-comment. Successful merges leave final `Done` transition to merged PR Done sync.
+comment. When repair is enabled, Symphony then adds a repair request comment and
+moves the issue to `landing.repair_state` so the ordinary agent loop can update
+the existing PR. Successful merges leave final `Done` transition to merged PR
+Done sync.
 
 ## Conflict Repair
 
-Conflict repair is not executed by the MVP.
-
-Conflict repair is a separate worker mode, not merge authority for agents.
+Conflict repair is not merge authority for agents. The repair step only fixes
+the PR branch and returns the issue to review; the landing worker remains the
+only component allowed to execute the approved merge.
 
 When a PR cannot merge because of conflicts:
 
-1. Move the issue to `Landing` if it is not already there.
-2. Start a Codex repair session scoped to the PR branch.
-3. Ask the repair session to merge or rebase against the current base branch,
-   resolve conflicts, run targeted validation, and push a repair commit.
-4. Re-read GitHub checks and review state.
-5. Return the issue to the landing queue only after the PR is green again.
+1. Move the issue to `Blocked` and comment with the stale or merge blocker.
+2. If `landing.repair_enabled` is true, comment with a repair request and move
+   the issue to `landing.repair_state`.
+3. The normal implementation dispatch loop starts a Codex repair session scoped
+   to the issue and existing PR.
+4. The repair session resolves conflicts or other merge blockers, runs targeted
+   validation, pushes a repair commit, and returns the issue to `In Review`.
+5. A human re-reviews and moves the issue back to `Approved to Land`.
 
 The repair session must stop and block when resolution requires product,
 security, data migration, or API-contract judgment. It must not merge the PR.

@@ -24,6 +24,7 @@ defmodule SymphonyElixir.LandingWorker do
           attempted: non_neg_integer(),
           merged: non_neg_integer(),
           blocked: non_neg_integer(),
+          repair_requested: non_neg_integer(),
           skipped: non_neg_integer(),
           errors: non_neg_integer()
         }
@@ -63,6 +64,7 @@ defmodule SymphonyElixir.LandingWorker do
       attempted: 0,
       merged: 0,
       blocked: 0,
+      repair_requested: 0,
       skipped: 0,
       errors: 0
     }
@@ -153,6 +155,7 @@ defmodule SymphonyElixir.LandingWorker do
       | attempted: acc.attempted + Map.get(entry_result, :attempted, 0),
         merged: acc.merged + Map.get(entry_result, :merged, 0),
         blocked: acc.blocked + Map.get(entry_result, :blocked, 0),
+        repair_requested: acc.repair_requested + Map.get(entry_result, :repair_requested, 0),
         skipped: acc.skipped + Map.get(entry_result, :skipped, 0),
         errors: acc.errors + Map.get(entry_result, :errors, 0)
     }
@@ -288,11 +291,28 @@ defmodule SymphonyElixir.LandingWorker do
 
     with :ok <- move_issue_state(tracker, entry, settings.landing.blocked_state),
          :ok <- create_comment(tracker, entry, blocked_comment(entry, reason, settings)) do
-      %{result | blocked: 1}
+      result
+      |> Map.put(:blocked, 1)
+      |> maybe_request_repair(tracker, entry, settings, reason)
     else
       {:error, blocker_reason} ->
         Logger.warning("Failed to block Approved to Land item #{entry_context(entry)}: #{inspect(blocker_reason)}")
         %{result | errors: 1}
+    end
+  end
+
+  defp maybe_request_repair(result, _tracker, _entry, %{landing: %{repair_enabled: false}}, _reason), do: result
+
+  defp maybe_request_repair(result, tracker, entry, settings, reason) do
+    repair_state = settings.landing.repair_state
+
+    with :ok <- move_issue_state(tracker, entry, repair_state),
+         :ok <- create_comment(tracker, entry, repair_comment(entry, reason, settings)) do
+      %{result | repair_requested: result.repair_requested + 1}
+    else
+      {:error, repair_reason} ->
+        Logger.warning("Failed to request Approved to Land repair for #{entry_context(entry)}: #{inspect(repair_reason)}")
+        %{result | errors: result.errors + 1}
     end
   end
 
@@ -366,6 +386,21 @@ defmodule SymphonyElixir.LandingWorker do
     Reason: #{reason}
 
     The issue was moved to #{settings.landing.blocked_state}. Move it back to #{settings.landing.approval_state} after resolving the blocker.
+    """
+    |> String.trim()
+  end
+
+  defp repair_comment(entry, reason, settings) do
+    """
+    Symphony Approved to Land repair requested
+
+    Issue: #{issue_label(entry)}
+    PR: #{Map.get(entry, :pr_url, "unknown")}
+    Reason: #{reason}
+
+    The issue was moved from #{settings.landing.blocked_state} to #{settings.landing.repair_state} so the normal implementation agent can repair the PR branch. Resolve the blocker, update the existing PR when possible, and return the issue to #{settings.tracker.review_state}. A human should move it back to #{settings.landing.approval_state} after re-review.
+
+    The repair agent must not merge the PR.
     """
     |> String.trim()
   end

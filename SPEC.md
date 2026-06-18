@@ -581,6 +581,8 @@ not require recognizing or validating extension fields unless that extension is 
 - `landing.approval_state`: string, default `"Approved to Land"`
 - `landing.in_progress_state`: string, default `"Landing"`
 - `landing.blocked_state`: string, default `"Blocked"`
+- `landing.repair_enabled`: boolean, default `false`
+- `landing.repair_state`: string, default `"In Progress"`
 - `landing.interval_ms`: integer, default `120000`
 - `landing.merge_method`: string, one of `"squash"`, `"merge"`, or `"rebase"`, default `"squash"`
 - `landing.max_per_run`: integer, default `1`
@@ -1253,6 +1255,9 @@ Implementations MAY support a Linear-approved landing queue. When enabled:
   with an explanatory Linear comment.
 - If execution fails after moving an issue to `landing.in_progress_state` but before merge
   completion is confirmed, the runtime MUST move the issue to `landing.blocked_state`.
+- If `landing.repair_enabled` is true, the runtime MAY move a blocked landing issue to
+  `landing.repair_state` after writing the blocked comment so the normal implementation dispatch
+  loop can repair the existing PR and return it to review.
 - Implementation agents MAY repair conflicts on a PR branch, but MUST NOT perform the final merge
   or terminal close action themselves.
 - Completed merges MUST be backed by GitHub merged-PR evidence before moving Linear to `Done`;
