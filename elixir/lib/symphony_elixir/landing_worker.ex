@@ -362,13 +362,17 @@ defmodule SymphonyElixir.LandingWorker do
       {:error, blocker_reason} ->
         Logger.warning("Failed to block Approved to Land item #{entry_context(entry)}: #{inspect(blocker_reason)}")
 
+        label_result = add_blocked_labels(tracker, entry, reason)
+
         write_transition_failure_comment(
           tracker,
           entry,
-          blocked_transition_failed_comment(entry, reason, blocker_reason, settings)
+          blocked_transition_failed_comment(entry, reason, blocker_reason, settings, label_result)
         )
 
-        %{result | errors: 1}
+        result
+        |> Map.put(:errors, 1)
+        |> add_label_error_count(label_result)
     end
   end
 
@@ -573,7 +577,7 @@ defmodule SymphonyElixir.LandingWorker do
   defp label_status_line(_reason, :unsupported), do: "not applied; tracker does not support labels"
   defp label_status_line(_reason, {:error, reason}), do: "failed to apply: #{format_reason(reason)}"
 
-  defp blocked_transition_failed_comment(entry, original_reason, transition_reason, settings) do
+  defp blocked_transition_failed_comment(entry, original_reason, transition_reason, settings, label_result) do
     """
     Symphony Approved to Land execution could not mark the item blocked
 
@@ -583,6 +587,7 @@ defmodule SymphonyElixir.LandingWorker do
     Original blocker: #{original_reason}
     Target blocked state: #{settings.landing.blocked_state}
     State transition error: #{format_reason(transition_reason)}
+    Labels: #{label_status_line(original_reason, label_result)}
 
     No merge was attempted after this blocker. Create or configure the Linear workflow state, then move the issue back to #{settings.landing.approval_state} when it is ready for another landing attempt.
     """
