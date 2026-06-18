@@ -5135,6 +5135,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "review rework opt-in checks PR status at most once per interval" do
+    orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
+
+    on_exit(fn ->
+      if is_nil(Process.whereis(SymphonyElixir.Orchestrator)) do
+        case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+        end
+      end
+    end)
+
+    if is_pid(orchestrator_pid) do
+      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
+    end
+
     review_rework_interval_ms = 60_000
 
     write_workflow_file!(Workflow.workflow_file_path(),
