@@ -223,9 +223,12 @@ done_sync:
   interval_ms: 120000        # W3
 landing:
   enabled: false
+  execute_enabled: false
   approval_state: Approved to Land
   in_progress_state: Landing
   blocked_state: Blocked
+  repair_enabled: false
+  repair_state: In Progress
   interval_ms: 120000
 stall:
   enabled: true              # W4

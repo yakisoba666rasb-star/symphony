@@ -185,6 +185,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:approval_state, :string, default: "Approved to Land")
       field(:in_progress_state, :string, default: "Landing")
       field(:blocked_state, :string, default: "Blocked")
+      field(:repair_enabled, :boolean, default: false)
+      field(:repair_state, :string, default: "In Progress")
       field(:interval_ms, :integer, default: 120_000)
       field(:merge_method, :string, default: "squash")
       field(:max_per_run, :integer, default: 1)
@@ -202,6 +204,8 @@ defmodule SymphonyElixir.Config.Schema do
           :approval_state,
           :in_progress_state,
           :blocked_state,
+          :repair_enabled,
+          :repair_state,
           :interval_ms,
           :merge_method,
           :max_per_run,
@@ -212,6 +216,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> update_change(:approval_state, &String.trim/1)
       |> update_change(:in_progress_state, &String.trim/1)
       |> update_change(:blocked_state, &String.trim/1)
+      |> update_change(:repair_state, &String.trim/1)
       |> update_change(:merge_method, &String.trim/1)
       |> validate_number(:interval_ms, greater_than: 0)
       |> validate_number(:max_per_run, greater_than: 0)
@@ -220,6 +225,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_change(:approval_state, &validate_state_name/2)
       |> validate_change(:in_progress_state, &validate_state_name/2)
       |> validate_change(:blocked_state, &validate_state_name/2)
+      |> validate_change(:repair_state, &validate_state_name/2)
     end
 
     defp validate_state_name(field, value) when is_binary(value) do
@@ -843,6 +849,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> validate_interval_at_least_polling(:landing)
     |> validate_interval_at_least_polling(:review_rework)
     |> validate_landing_approval_state()
+    |> validate_landing_repair_state()
     |> validate_stall_review_threshold()
   end
 
@@ -872,6 +879,24 @@ defmodule SymphonyElixir.Config.Schema do
 
     if landing && landing.enabled && MapSet.member?(active_states, normalize_issue_state(landing.approval_state)) do
       add_error(changeset, :landing, "approval_state must not be included in tracker.active_states when landing.enabled is true")
+    else
+      changeset
+    end
+  end
+
+  defp validate_landing_repair_state(changeset) do
+    tracker = get_field(changeset, :tracker)
+    landing = get_field(changeset, :landing)
+
+    active_states =
+      tracker
+      |> Map.get(:active_states, [])
+      |> Enum.map(&normalize_issue_state/1)
+      |> MapSet.new()
+
+    if landing && landing.enabled && landing.repair_enabled &&
+         not MapSet.member?(active_states, normalize_issue_state(landing.repair_state)) do
+      add_error(changeset, :landing, "repair_state must be included in tracker.active_states when landing.repair_enabled is true")
     else
       changeset
     end

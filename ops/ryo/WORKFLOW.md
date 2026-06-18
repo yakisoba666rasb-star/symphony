@@ -22,6 +22,8 @@ landing:
   approval_state: Approved to Land
   in_progress_state: Landing
   blocked_state: Blocked
+  repair_enabled: false
+  repair_state: In Progress
   interval_ms: 120000
   merge_method: squash
   max_per_run: 1

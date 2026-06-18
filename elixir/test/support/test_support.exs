@@ -131,6 +131,8 @@ defmodule SymphonyElixir.TestSupport do
           landing_approval_state: "Approved to Land",
           landing_in_progress_state: "Landing",
           landing_blocked_state: "Blocked",
+          landing_repair_enabled: false,
+          landing_repair_state: "In Progress",
           landing_interval_ms: 120_000,
           landing_execute_enabled: false,
           landing_merge_method: "squash",
@@ -210,6 +212,8 @@ defmodule SymphonyElixir.TestSupport do
     landing_approval_state = Keyword.get(config, :landing_approval_state)
     landing_in_progress_state = Keyword.get(config, :landing_in_progress_state)
     landing_blocked_state = Keyword.get(config, :landing_blocked_state)
+    landing_repair_enabled = Keyword.get(config, :landing_repair_enabled)
+    landing_repair_state = Keyword.get(config, :landing_repair_state)
     landing_interval_ms = Keyword.get(config, :landing_interval_ms)
     landing_execute_enabled = Keyword.get(config, :landing_execute_enabled)
     landing_merge_method = Keyword.get(config, :landing_merge_method)
@@ -296,6 +300,8 @@ defmodule SymphonyElixir.TestSupport do
           approval_state: landing_approval_state,
           in_progress_state: landing_in_progress_state,
           blocked_state: landing_blocked_state,
+          repair_enabled: landing_repair_enabled,
+          repair_state: landing_repair_state,
           interval_ms: landing_interval_ms,
           execute_enabled: landing_execute_enabled,
           merge_method: landing_merge_method,
@@ -385,6 +391,8 @@ defmodule SymphonyElixir.TestSupport do
          approval_state: "Approved to Land",
          in_progress_state: "Landing",
          blocked_state: "Blocked",
+         repair_enabled: false,
+         repair_state: "In Progress",
          interval_ms: 120_000,
          execute_enabled: false,
          merge_method: "squash",
@@ -401,6 +409,8 @@ defmodule SymphonyElixir.TestSupport do
       "  approval_state: #{yaml_value(config.approval_state)}",
       "  in_progress_state: #{yaml_value(config.in_progress_state)}",
       "  blocked_state: #{yaml_value(config.blocked_state)}",
+      "  repair_enabled: #{yaml_value(config.repair_enabled)}",
+      "  repair_state: #{yaml_value(config.repair_state)}",
       "  interval_ms: #{yaml_value(config.interval_ms)}",
       "  merge_method: #{yaml_value(config.merge_method)}",
       "  max_per_run: #{yaml_value(config.max_per_run)}",

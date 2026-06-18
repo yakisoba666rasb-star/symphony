@@ -85,6 +85,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         attempted: 0,
         merged: 0,
         blocked: 0,
+        repair_requested: 0,
         skipped: 0,
         errors: 0
       }

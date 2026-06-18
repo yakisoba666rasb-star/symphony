@@ -1247,7 +1247,8 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info(
           "Approved to Land execution completed " <>
             "attempted=#{execution_result.attempted} merged=#{execution_result.merged} " <>
-            "blocked=#{execution_result.blocked} skipped=#{execution_result.skipped} errors=#{execution_result.errors}"
+            "blocked=#{execution_result.blocked} repair_requested=#{execution_result.repair_requested} " <>
+            "skipped=#{execution_result.skipped} errors=#{execution_result.errors}"
         )
       end
 
