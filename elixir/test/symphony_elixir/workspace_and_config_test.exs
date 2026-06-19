@@ -6,6 +6,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Linear.Client
   alias SymphonyElixir.RepositoryResolver
 
+  defmodule FailingDirtyCleanupFile do
+    def rm_rf(path), do: {:error, :eacces, path}
+  end
+
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
       Path.join(
@@ -1837,6 +1841,39 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace cleanup reports local dirty quarantine removal failures" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-dirty-cleanup-failure-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      expired_dirty = Path.join(workspace_root, "MT-OLD.dirty-20260501-000000")
+      fresh_dirty = Path.join(workspace_root, "MT-NEW.dirty-20260525-000000")
+
+      File.mkdir_p!(expired_dirty)
+      File.mkdir_p!(fresh_dirty)
+      File.write!(Path.join(expired_dirty, "marker.txt"), "remove")
+      File.write!(Path.join(fresh_dirty, "marker.txt"), "keep")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        dirty_workspace_retention_days: 7
+      )
+
+      now = ~U[2026-05-26 00:00:00Z]
+
+      assert {:ok, %{removed: [], kept: [^fresh_dirty], failed: [%{path: ^expired_dirty, reason: :eacces}]}} =
+               Workspace.cleanup_dirty_workspaces(now: now, file_module: FailingDirtyCleanupFile)
+
+      assert File.exists?(expired_dirty)
+      assert File.exists?(fresh_dirty)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace cleanup removes expired remote dirty quarantine directories on worker hosts" do
     test_root =
       Path.join(
@@ -1892,6 +1929,69 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert trace =~ ~s(stat -c %Y "$dirty_workspace")
       assert trace =~ ~s([ "$dirty_reason_log_mtime" -lt "$cutoff_epoch" ])
       assert trace =~ ~s(rm -rf -- "$dirty_workspace")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace cleanup reports remote dirty quarantine cleanup failures" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-dirty-cleanup-failure-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      local_workspace_root = Path.join(test_root, "local-workspaces")
+
+      File.mkdir_p!(test_root)
+      File.mkdir_p!(local_workspace_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+      printf 'permission denied cleaning remote workspace\\n'
+      exit 23
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: local_workspace_root,
+        dirty_workspace_retention_days: 7,
+        worker_ssh_hosts: ["worker-01"]
+      )
+
+      now = ~U[2026-05-26 00:00:00Z]
+
+      assert {:ok,
+              %{
+                removed: [],
+                kept: [],
+                failed: [],
+                remote: [
+                  %{
+                    worker_host: "worker-01",
+                    status: :error,
+                    error: %{status: 23, output: output}
+                  }
+                ]
+              }} = Workspace.cleanup_dirty_workspaces(now: now)
+
+      assert output =~ "permission denied cleaning remote workspace"
     after
       File.rm_rf(test_root)
     end

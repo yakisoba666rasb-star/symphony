@@ -76,6 +76,7 @@ defmodule SymphonyElixir.Orchestrator do
       landing_queue: [],
       last_review_rework_sync_ms: nil,
       last_dirty_workspace_cleanup_ms: nil,
+      last_dirty_workspace_cleanup: nil,
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -100,13 +101,14 @@ defmodule SymphonyElixir.Orchestrator do
       tick_timer_ref: nil,
       tick_token: nil,
       last_dirty_workspace_cleanup_ms: now_ms,
+      last_dirty_workspace_cleanup: nil,
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil
     }
 
-    run_dirty_workspace_cleanup()
+    cleanup_result = run_dirty_workspace_cleanup()
     run_terminal_workspace_cleanup()
-    state = schedule_tick(state, 0)
+    state = state |> Map.put(:last_dirty_workspace_cleanup, cleanup_result) |> schedule_tick(0)
 
     {:ok, state}
   end
@@ -4699,14 +4701,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp run_dirty_workspace_cleanup do
     case Workspace.cleanup_dirty_workspaces() do
-      {:ok, %{removed: removed}} when removed != [] ->
-        Logger.info("Cleaned expired dirty workspaces count=#{length(removed)}")
+      {:ok, result} ->
+        log_dirty_workspace_cleanup_result(result)
+        dirty_workspace_cleanup_status(:ok, result)
 
-      {:ok, _result} ->
-        :ok
-
-      {:error, reason} ->
+      {:error, reason} = error ->
         Logger.warning("Skipping dirty workspace cleanup: #{inspect(reason)}")
+        dirty_workspace_cleanup_status(:error, error)
     end
   end
 
@@ -4718,10 +4719,56 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       _last_ms ->
-        run_dirty_workspace_cleanup()
-        %{state | last_dirty_workspace_cleanup_ms: now_ms}
+        cleanup_result = run_dirty_workspace_cleanup()
+        %{state | last_dirty_workspace_cleanup_ms: now_ms, last_dirty_workspace_cleanup: cleanup_result}
     end
   end
+
+  defp log_dirty_workspace_cleanup_result(%{removed: removed} = result) do
+    if removed != [] do
+      Logger.info("Cleaned expired dirty workspaces count=#{length(removed)}")
+    end
+
+    failed = Map.get(result, :failed, [])
+    remote_failed = Enum.filter(Map.get(result, :remote, []), &(Map.get(&1, :status) == :error))
+    failed_count = length(failed) + length(remote_failed)
+
+    if failed_count > 0 do
+      Logger.warning("Dirty workspace cleanup completed with failures failed_count=#{failed_count} local_failed=#{length(failed)} remote_failed=#{length(remote_failed)}")
+    end
+
+    :ok
+  end
+
+  defp dirty_workspace_cleanup_status(status, result) do
+    %{
+      status: status,
+      checked_at: DateTime.utc_now() |> DateTime.truncate(:second),
+      removed_count: cleanup_count(result, :removed),
+      kept_count: cleanup_count(result, :kept),
+      failed_count: cleanup_failed_count(result),
+      local_failed: cleanup_local_failed(result),
+      remote: cleanup_remote_results(result),
+      error: cleanup_error(result)
+    }
+  end
+
+  defp cleanup_count(result, key) when is_map(result), do: result |> Map.get(key, []) |> length()
+  defp cleanup_count(_result, _key), do: 0
+
+  defp cleanup_failed_count(result) do
+    length(cleanup_local_failed(result)) +
+      (result |> cleanup_remote_results() |> Enum.count(&(Map.get(&1, :status) == :error)))
+  end
+
+  defp cleanup_local_failed(result) when is_map(result), do: Map.get(result, :failed, [])
+  defp cleanup_local_failed(_result), do: []
+
+  defp cleanup_remote_results(result) when is_map(result), do: Map.get(result, :remote, [])
+  defp cleanup_remote_results(_result), do: []
+
+  defp cleanup_error({:error, reason}), do: inspect(reason)
+  defp cleanup_error(_result), do: nil
 
   defp notify_dashboard do
     StatusDashboard.notify_update()
@@ -5070,6 +5117,7 @@ defmodule SymphonyElixir.Orchestrator do
        unroutable: state.unroutable,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
+       dirty_workspace_cleanup: Map.get(state, :last_dirty_workspace_cleanup),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),

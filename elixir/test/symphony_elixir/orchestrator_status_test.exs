@@ -2549,10 +2549,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           wait_for_orchestrator_state(pid, fn
             %{
               poll_check_in_progress: false,
+              tick_token: observed_tick_token,
               running: %{"issue-tick-guard" => _running_entry},
               retry_attempts: %{"issue-tick-guard" => %{attempt: 1}}
             } ->
-              true
+              observed_tick_token != tick_token
 
             _ ->
               false
@@ -2629,6 +2630,95 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     refute File.exists?(expired_dirty)
+  end
+
+  test "orchestrator snapshot exposes latest dirty workspace cleanup failures" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-periodic-dirty-cleanup-status-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+      File.rm_rf(test_root)
+    end)
+
+    trace_file = Path.join(test_root, "ssh.trace")
+    fake_ssh = Path.join(test_root, "ssh")
+    workspace_root = Path.join(test_root, "workspaces")
+
+    File.mkdir_p!(test_root)
+    File.mkdir_p!(workspace_root)
+    System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+    System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+    File.write!(fake_ssh, """
+    #!/bin/sh
+    trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+    printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+    printf 'remote cleanup failed\\n'
+    exit 23
+    """)
+
+    File.chmod!(fake_ssh, 0o755)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      poll_interval_ms: 5_000,
+      workspace_root: workspace_root,
+      dirty_workspace_retention_days: 7,
+      worker_ssh_hosts: ["worker-01"]
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    orchestrator_name = Module.concat(__MODULE__, :PeriodicDirtyCleanupStatusOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      %{state | last_dirty_workspace_cleanup_ms: System.monotonic_time(:millisecond) - :timer.hours(25)}
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    snapshot =
+      wait_for_orchestrator_state(pid, fn state ->
+        cleanup = Map.get(state, :last_dirty_workspace_cleanup)
+
+        match?(
+          %{status: :ok, failed_count: 1, remote: [%{worker_host: "worker-01", status: :error}]},
+          cleanup
+        ) and state.poll_check_in_progress == false
+      end)
+      |> then(fn _state -> Orchestrator.snapshot(orchestrator_name, 15_000) end)
+
+    assert %{
+             dirty_workspace_cleanup: %{
+               status: :ok,
+               failed_count: 1,
+               remote: [%{worker_host: "worker-01", status: :error}]
+             }
+           } = snapshot
+
+    assert %{
+             dirty_workspace_cleanup: %{
+               status: :ok,
+               failed_count: 1,
+               remote: [%{worker_host: "worker-01", status: :error}]
+             }
+           } = SymphonyElixirWeb.Presenter.state_payload(orchestrator_name, 15_000)
   end
 
   test "orchestrator snapshot keeps unroutable issues when agent slots are full" do
