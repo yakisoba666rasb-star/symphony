@@ -56,8 +56,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           :ok
       end
 
-      issues = Application.get_env(:symphony_elixir, :landing_repair_refreshed_issues, [])
-      {:ok, Enum.filter(issues, &(&1.id in issue_ids))}
+      case Application.get_env(:symphony_elixir, :landing_repair_refresh_result, :default) do
+        :default ->
+          issues = Application.get_env(:symphony_elixir, :landing_repair_refreshed_issues, [])
+          {:ok, Enum.filter(issues, &(&1.id in issue_ids))}
+
+        result ->
+          result
+      end
     end
 
     def create_comment(issue_id, body) do
@@ -97,6 +103,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
 
     def remove_issue_labels(_issue_id, _labels), do: :ok
+  end
+
+  defmodule FakeLandingTrackerWithoutRefresh do
+    def fetch_issues_by_states(states), do: FakeLandingTracker.fetch_issues_by_states(states)
+    def create_comment(issue_id, body), do: FakeLandingTracker.create_comment(issue_id, body)
+    def update_issue_state(issue_id, state_name), do: FakeLandingTracker.update_issue_state(issue_id, state_name)
   end
 
   defmodule FakeLandingWorker do
@@ -1879,7 +1891,136 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert_receive {:landing_worker_execute, true, 1}
     assert_receive {:landing_repair_issue_refresh, [^issue_id]}
+    refute_receive {:agent_runner_called, %{id: ^issue_id}, _opts}, 100
+    assert state.running == %{}
+  end
+
+  test "Approved to Land repair dispatch skips refreshed issues outside repair state" do
+    %{issue_id: issue_id, approved_issue: approved_issue} = setup_landing_repair_dispatch_test!()
+
+    Application.put_env(:symphony_elixir, :landing_repair_refreshed_issues, [approved_issue])
+
+    state = Orchestrator.plan_approved_landings_for_test(%Orchestrator.State{})
+
+    assert_receive {:landing_worker_execute, true, 1}
+    assert_receive {:landing_repair_issue_refresh, [^issue_id]}
     refute_receive {:agent_runner_called, _issue, _opts}, 100
+    assert state.running == %{}
+  end
+
+  for tracked_kind <- [:claimed, :running, :blocked] do
+    test "Approved to Land repair dispatch skips already #{tracked_kind} issues" do
+      %{issue_id: issue_id, refreshed_issue: refreshed_issue} = setup_landing_repair_dispatch_test!()
+
+      initial_state =
+        case unquote(tracked_kind) do
+          :claimed ->
+            %Orchestrator.State{claimed: MapSet.new([issue_id])}
+
+          :running ->
+            %Orchestrator.State{
+              running: %{issue_id => %{issue: refreshed_issue, ref: make_ref(), recipient: self()}}
+            }
+
+          :blocked ->
+            %Orchestrator.State{blocked: %{issue_id => %{issue: refreshed_issue}}}
+        end
+
+      state = Orchestrator.plan_approved_landings_for_test(initial_state)
+
+      assert_receive {:landing_worker_execute, true, 1}
+      assert_receive {:landing_repair_issue_refresh, [^issue_id]}
+      refute_receive {:agent_runner_called, %{id: ^issue_id}, _opts}, 100
+      assert state.running == initial_state.running
+      assert state.claimed == initial_state.claimed
+      assert state.blocked == initial_state.blocked
+    end
+  end
+
+  test "Approved to Land repair dispatch skips when worker capacity is exhausted" do
+    %{issue_id: issue_id} = setup_landing_repair_dispatch_test!()
+
+    state = Orchestrator.plan_approved_landings_for_test(%Orchestrator.State{max_concurrent_agents: 0})
+
+    assert_receive {:landing_worker_execute, true, 1}
+    assert_receive {:landing_repair_issue_refresh, [^issue_id]}
+    refute_receive {:agent_runner_called, %{id: ^issue_id}, _opts}, 100
+    assert state.running == %{}
+  end
+
+  test "Approved to Land repair dispatch leaves state unchanged when refresh fails" do
+    %{issue_id: issue_id} = setup_landing_repair_dispatch_test!(refresh_result: {:error, :linear_unavailable})
+    initial_state = %Orchestrator.State{claimed: MapSet.new(["existing-claim"])}
+
+    state = Orchestrator.plan_approved_landings_for_test(initial_state)
+
+    assert_receive {:landing_worker_execute, true, 1}
+    assert_receive {:landing_repair_issue_refresh, [^issue_id]}
+    refute_receive {:agent_runner_called, %{id: ^issue_id}, _opts}, 100
+
+    assert state == %{
+             initial_state
+             | last_landing_plan_ms: state.last_landing_plan_ms,
+               landing_queue: state.landing_queue
+           }
+
+    assert is_integer(state.last_landing_plan_ms)
+    assert [%{issue_identifier: "LAB-491"}] = state.landing_queue
+  end
+
+  test "Approved to Land repair dispatch leaves state unchanged for unexpected refresh results" do
+    %{issue_id: issue_id} = setup_landing_repair_dispatch_test!(refresh_result: :unexpected_refresh_result)
+    initial_state = %Orchestrator.State{blocked: %{"existing-blocked" => %{reason: :review}}}
+
+    state = Orchestrator.plan_approved_landings_for_test(initial_state)
+
+    assert_receive {:landing_worker_execute, true, 1}
+    assert_receive {:landing_repair_issue_refresh, [^issue_id]}
+    refute_receive {:agent_runner_called, %{id: ^issue_id}, _opts}, 100
+
+    assert state == %{
+             initial_state
+             | last_landing_plan_ms: state.last_landing_plan_ms,
+               landing_queue: state.landing_queue
+           }
+
+    assert is_integer(state.last_landing_plan_ms)
+    assert [%{issue_identifier: "LAB-491"}] = state.landing_queue
+  end
+
+  test "Approved to Land repair dispatch leaves state unchanged when tracker cannot refresh issues" do
+    %{issue_id: issue_id} = setup_landing_repair_dispatch_test!(tracker_module: FakeLandingTrackerWithoutRefresh)
+    initial_state = %Orchestrator.State{claimed: MapSet.new(["existing-claim"])}
+
+    state = Orchestrator.plan_approved_landings_for_test(initial_state)
+
+    assert_receive {:landing_worker_execute, true, 1}
+    refute_receive {:landing_repair_issue_refresh, [^issue_id]}, 100
+    refute_receive {:agent_runner_called, %{id: ^issue_id}, _opts}, 100
+
+    assert state == %{
+             initial_state
+             | last_landing_plan_ms: state.last_landing_plan_ms,
+               landing_queue: state.landing_queue
+           }
+
+    assert is_integer(state.last_landing_plan_ms)
+    assert [%{issue_identifier: "LAB-491"}] = state.landing_queue
+  end
+
+  test "Approved to Land repair dispatch filters repair entries with invalid issue ids" do
+    invalid_entries = [
+      landing_repair_entry("", "LAB-EMPTY"),
+      landing_repair_entry(123, "LAB-NONBINARY")
+    ]
+
+    %{issue_id: issue_id} = setup_landing_repair_dispatch_test!(repair_entries: invalid_entries)
+
+    state = Orchestrator.plan_approved_landings_for_test(%Orchestrator.State{})
+
+    assert_receive {:landing_worker_execute, true, 1}
+    refute_receive {:landing_repair_issue_refresh, _issue_ids}, 100
+    refute_receive {:agent_runner_called, %{id: ^issue_id}, _opts}, 100
     assert state.running == %{}
   end
 
@@ -9713,6 +9854,110 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     after
       0 -> :ok
     end
+  end
+
+  defp setup_landing_repair_dispatch_test!(opts \\ []) do
+    previous_env =
+      for key <- landing_repair_dispatch_env_keys(),
+          do: {key, Application.get_env(:symphony_elixir, key)}
+
+    on_exit(fn ->
+      Enum.each(previous_env, fn
+        {key, nil} -> Application.delete_env(:symphony_elixir, key)
+        {key, value} -> Application.put_env(:symphony_elixir, key, value)
+      end)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true,
+      landing_blocked_state: "Merge Blocked",
+      landing_repair_enabled: true,
+      landing_repair_state: "In Progress",
+      poll_interval_ms: 50,
+      landing_interval_ms: 1_000,
+      repository_default: "octo/repo"
+    )
+
+    issue_id =
+      Keyword.get_lazy(opts, :issue_id, fn ->
+        "issue-landing-repair-guard-dispatch-#{System.unique_integer([:positive])}"
+      end)
+
+    approved_issue = landing_repair_approved_issue(issue_id)
+    refreshed_issue = Keyword.get(opts, :refreshed_issue, %{approved_issue | state: "In Progress"})
+    repair_entries = Keyword.get(opts, :repair_entries, [landing_repair_entry(issue_id)])
+    tracker_module = Keyword.get(opts, :tracker_module, FakeLandingTracker)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeLandingPrLookup)
+    Application.put_env(:symphony_elixir, :tracker_module, tracker_module)
+    Application.put_env(:symphony_elixir, :landing_worker, FakeLandingWorker)
+    Application.put_env(:symphony_elixir, :landing_planner_issues, [approved_issue])
+    Application.put_env(:symphony_elixir, :landing_repair_refreshed_issues, [refreshed_issue])
+    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
+    Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    if Keyword.has_key?(opts, :refresh_result) do
+      Application.put_env(:symphony_elixir, :landing_repair_refresh_result, Keyword.fetch!(opts, :refresh_result))
+    end
+
+    Application.put_env(:symphony_elixir, :landing_worker_result, %{
+      attempted: 1,
+      blocked: 1,
+      repair_requested: 1,
+      repair_entries: repair_entries
+    })
+
+    %{
+      issue_id: issue_id,
+      approved_issue: approved_issue,
+      refreshed_issue: refreshed_issue,
+      repair_entry: List.first(repair_entries)
+    }
+  end
+
+  defp landing_repair_dispatch_env_keys do
+    [
+      :github_pr_lookup,
+      :tracker_module,
+      :landing_worker,
+      :landing_planner_issues,
+      :landing_worker_result,
+      :landing_repair_refreshed_issues,
+      :landing_repair_refresh_result,
+      :agent_runner,
+      :agent_runner_recipient,
+      :tracker_comment_recipient
+    ]
+  end
+
+  defp landing_repair_approved_issue(issue_id) do
+    %Issue{
+      id: issue_id,
+      identifier: "LAB-491",
+      title: "Repair dispatch coverage",
+      state: "Approved to Land",
+      url: "https://linear.app/example/issue/LAB-491/reconcile-tests",
+      branch_name: "lab-491-landing-repair-reconcile-tests",
+      attachment_urls: ["https://github.com/octo/repo/pull/206"]
+    }
+  end
+
+  defp landing_repair_entry(issue_id, issue_identifier \\ "LAB-491") do
+    %{
+      issue_id: issue_id,
+      issue_identifier: issue_identifier,
+      title: "Repair dispatch coverage",
+      repository: "octo/repo",
+      pr_url: "https://github.com/octo/repo/pull/206",
+      pr_state: "OPEN",
+      draft: false,
+      mergeability: "UNSTABLE",
+      head_branch: "lab-491-landing-repair-reconcile-tests",
+      head_sha: "abc123",
+      repair_reason: "PR mergeability is UNSTABLE"
+    }
   end
 
   defp do_receive_post_merge_fetch_states(predicate, deadline_ms, seen_state_names) do
