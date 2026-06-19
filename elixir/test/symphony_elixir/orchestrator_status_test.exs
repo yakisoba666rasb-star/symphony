@@ -645,6 +645,27 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule FakeAgentRunnerRecordsBlocking do
+    def run(issue, recipient, opts) do
+      FakeAgentRunnerRecords.run(issue, recipient, opts)
+
+      case Application.get_env(:symphony_elixir, :agent_runner_blocking_recipient) do
+        owner when is_pid(owner) ->
+          ref = make_ref()
+          send(owner, {:agent_runner_blocking, self(), issue.id, ref})
+
+          receive do
+            {:release_agent_runner, ^ref} -> :ok
+          after
+            5_000 -> :ok
+          end
+
+        _ ->
+          :ok
+      end
+    end
+  end
+
   defmodule FakeTrackerActiveOpenPrReconcile do
     def fetch_issues_by_states(states) do
       case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
@@ -3036,6 +3057,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
             :github_pr_lookup,
             :agent_runner,
             :agent_runner_recipient,
+            :agent_runner_blocking_recipient,
             :tracker_module,
             :tracker_comment_recipient,
             :active_open_pr_reconcile_issues,
@@ -3132,8 +3154,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupDirtyOpenIssuePr)
     Application.put_env(:symphony_elixir, :fake_open_issue_pr_merge_state, "DIRTY")
-    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecordsSlow)
+    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecordsBlocking)
     Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
+    Application.put_env(:symphony_elixir, :agent_runner_blocking_recipient, self())
     Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerActiveOpenPrReconcile)
     Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
 
@@ -3167,6 +3190,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert opts[:extra_prompt] =~ "Landing repair context"
     assert opts[:extra_prompt] =~ "https://github.com/octo/repo/pull/200"
     assert opts[:extra_prompt] =~ "mergeability=DIRTY"
+    assert_receive {:agent_runner_blocking, runner_pid, ^issue_id, runner_ref}, 1_000
 
     state =
       wait_for_orchestrator_state(pid, fn state ->
@@ -3186,6 +3210,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     state = :sys.get_state(pid, 15_000)
     assert Map.has_key?(state.running, issue_id)
+
+    send(runner_pid, {:release_agent_runner, runner_ref})
   end
 
   test "orchestrator defers landing repair reconcile while PR mergeability is unknown" do
