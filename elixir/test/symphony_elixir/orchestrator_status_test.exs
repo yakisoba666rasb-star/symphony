@@ -2418,6 +2418,28 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     Process.demonitor(worker_ref, [:flush])
   end
 
+  test "orchestrator state guard preserves state when the cycle body throws" do
+    state = %Orchestrator.State{
+      poll_interval_ms: 5_000,
+      max_concurrent_agents: 2,
+      poll_check_in_progress: true,
+      running: %{"issue-poll-throw" => %{identifier: "LAB-POLL-THROW"}},
+      claimed: MapSet.new(["issue-poll-throw"]),
+      retry_attempts: %{"issue-poll-throw" => %{attempt: 1, due_at_ms: 123}}
+    }
+
+    log =
+      capture_log(fn ->
+        assert ^state =
+                 Orchestrator.preserve_orchestrator_state_for_test(state, "poll cycle", fn _state ->
+                   throw({:unexpected_payload, "missing field"})
+                 end)
+      end)
+
+    assert log =~ "Orchestrator poll cycle aborted (:throw); preserving orchestrator state"
+    assert log =~ "{:unexpected_payload, \"missing field\"}"
+  end
+
   test "orchestrator tick preserves state when runtime config refresh raises" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,

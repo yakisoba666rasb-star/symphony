@@ -2583,6 +2583,14 @@ defmodule SymphonyElixir.Orchestrator do
     select_worker_host(state, preferred_worker_host)
   end
 
+  if Mix.env() == :test do
+    @doc false
+    @spec preserve_orchestrator_state_for_test(State.t(), String.t(), (State.t() -> State.t())) :: State.t()
+    def preserve_orchestrator_state_for_test(%State{} = state, operation, fun) when is_function(fun, 1) do
+      preserve_orchestrator_state(state, operation, fun)
+    end
+  end
+
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
 
   defp reconcile_running_issue_states([issue | rest], state, active_states, terminal_states) do
