@@ -378,14 +378,32 @@ defmodule SymphonyElixir.Workspace do
     cutoff_timestamp = Calendar.strftime(cutoff, "%Y%m%d-%H%M%S")
     cutoff_epoch = DateTime.to_unix(cutoff)
 
-    Enum.each(settings.worker.ssh_hosts, fn worker_host ->
-      cleanup_remote_dirty_workspaces(
-        settings.workspace.root,
-        worker_host,
-        cutoff_timestamp,
-        cutoff_epoch,
-        settings.hooks.timeout_ms
-      )
+    worker_hosts = settings.worker.ssh_hosts
+    max_concurrency = max(length(worker_hosts), 1)
+    timeout_ms = settings.hooks.timeout_ms
+
+    worker_hosts
+    |> Task.async_stream(
+      fn worker_host ->
+        cleanup_remote_dirty_workspaces(
+          settings.workspace.root,
+          worker_host,
+          cutoff_timestamp,
+          cutoff_epoch,
+          timeout_ms
+        )
+      end,
+      max_concurrency: max_concurrency,
+      ordered: false,
+      on_timeout: :kill_task,
+      timeout: timeout_ms + 1_000
+    )
+    |> Enum.each(fn
+      {:ok, :ok} ->
+        :ok
+
+      {:exit, reason} ->
+        Logger.warning("Remote dirty workspace cleanup task exited: #{inspect(reason)}")
     end)
   end
 
@@ -407,7 +425,7 @@ defmodule SymphonyElixir.Workspace do
             "  if [ -d \"$dirty_workspace\" ] && [[ \"$dirty_workspace_name\" =~ \\.dirty-([0-9]{8}-[0-9]{6})(-[0-9]+)?$ ]] && [[ \"${BASH_REMATCH[1]}\" < \"$cutoff\" ]]; then",
             "    rm -rf -- \"$dirty_workspace\"",
             "  elif [ -f \"$dirty_workspace\" ] && [[ \"$dirty_workspace_name\" == *.dirty-reason.log ]]; then",
-            "    dirty_reason_log_mtime=\"$(stat -c %Y \"$dirty_workspace\" 2>/dev/null || true)\"",
+            "    dirty_reason_log_mtime=\"$(stat -c %Y \"$dirty_workspace\" 2>/dev/null || stat -f %m \"$dirty_workspace\" 2>/dev/null || true)\"",
             "    if [ -n \"$dirty_reason_log_mtime\" ] && [ \"$dirty_reason_log_mtime\" -lt \"$cutoff_epoch\" ]; then",
             "      rm -rf -- \"$dirty_workspace\"",
             "    fi",

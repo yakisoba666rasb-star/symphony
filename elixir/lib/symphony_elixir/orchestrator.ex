@@ -4698,6 +4698,20 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp run_dirty_workspace_cleanup do
+    if Process.whereis(SymphonyElixir.TaskSupervisor) do
+      case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, &do_run_dirty_workspace_cleanup/0) do
+        {:ok, _pid} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Skipping dirty workspace cleanup; failed to start cleanup task: #{inspect(reason)}")
+      end
+    else
+      Logger.warning("Skipping dirty workspace cleanup; task supervisor is not running")
+    end
+  end
+
+  defp do_run_dirty_workspace_cleanup do
     case Workspace.cleanup_dirty_workspaces() do
       {:ok, %{removed: removed}} when removed != [] ->
         Logger.info("Cleaned expired dirty workspaces count=#{length(removed)}")
