@@ -19,6 +19,15 @@ defmodule SymphonyElixir.Linear.Adapter do
   mutation SymphonyUpdateIssueState($issueId: String!, $stateId: String!) {
     issueUpdate(id: $issueId, input: {stateId: $stateId}) {
       success
+      issue {
+        id
+        identifier
+        state {
+          id
+          name
+          type
+        }
+      }
     }
   }
   """
@@ -303,7 +312,8 @@ defmodule SymphonyElixir.Linear.Adapter do
     with {:ok, state_id} <- resolve_state_id(issue_id, state_name),
          {:ok, response} <-
            client_module().graphql(@update_state_mutation, %{issueId: issue_id, stateId: state_id}),
-         true <- get_in(response, ["data", "issueUpdate", "success"]) == true do
+         true <- get_in(response, ["data", "issueUpdate", "success"]) == true,
+         :ok <- verify_updated_issue_state(response, state_id, state_name) do
       :ok
     else
       false -> {:error, :issue_update_failed}
@@ -329,6 +339,24 @@ defmodule SymphonyElixir.Linear.Adapter do
         :ok
       else
         false -> {:error, :issue_label_update_failed}
+        {:error, reason} -> {:error, reason}
+        _ -> {:error, :issue_label_update_failed}
+      end
+    end
+  end
+
+  @spec remove_issue_labels(String.t(), [String.t()]) :: :ok | {:error, term()}
+  def remove_issue_labels(issue_id, labels)
+      when is_binary(issue_id) and is_list(labels) do
+    normalized_labels = normalize_label_names(labels)
+
+    if normalized_labels == [] do
+      :ok
+    else
+      with {:ok, target} <- fetch_issue_label_target(issue_id),
+           remaining_label_ids = remove_label_ids(target.current_labels, normalized_labels) do
+        update_remaining_issue_labels(issue_id, target.current_label_ids, remaining_label_ids)
+      else
         {:error, reason} -> {:error, reason}
         _ -> {:error, :issue_label_update_failed}
       end
@@ -477,6 +505,7 @@ defmodule SymphonyElixir.Linear.Adapter do
        %{
          team_id: team_id,
          known_labels: existing_label_ids_by_name(team_labels),
+         current_labels: current_labels,
          current_label_ids: current_label_ids(current_labels)
        }}
     else
@@ -582,6 +611,37 @@ defmodule SymphonyElixir.Linear.Adapter do
     |> Enum.filter(&is_binary/1)
     |> Enum.uniq()
   end
+
+  defp update_remaining_issue_labels(_issue_id, current_label_ids, current_label_ids), do: :ok
+
+  defp update_remaining_issue_labels(issue_id, _current_label_ids, remaining_label_ids) do
+    with {:ok, response} <-
+           client_module().graphql(@update_labels_mutation, %{issueId: issue_id, labelIds: remaining_label_ids}),
+         true <- get_in(response, ["data", "issueUpdate", "success"]) == true do
+      :ok
+    else
+      false -> {:error, :issue_label_update_failed}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :issue_label_update_failed}
+    end
+  end
+
+  defp remove_label_ids(current_labels, labels_to_remove) do
+    remove_keys = MapSet.new(Enum.map(labels_to_remove, &normalized_label_name/1))
+
+    current_labels
+    |> Enum.reject(fn label ->
+      label
+      |> label_name()
+      |> normalized_label_name()
+      |> then(&MapSet.member?(remove_keys, &1))
+    end)
+    |> current_label_ids()
+  end
+
+  defp label_name(%{"name" => name}) when is_binary(name), do: name
+  defp label_name(%{name: name}) when is_binary(name), do: name
+  defp label_name(_label), do: ""
 
   defp fetch_team_projects_with_query(query, team_key) do
     with {:ok, response} <- client_module().graphql(query, %{teamKey: team_key, first: 250}),
@@ -709,6 +769,33 @@ defmodule SymphonyElixir.Linear.Adapter do
     else
       {:error, reason} -> {:error, reason}
       _ -> {:error, :state_not_found}
+    end
+  end
+
+  defp verify_updated_issue_state(response, expected_state_id, expected_state_name) do
+    case get_in(response, ["data", "issueUpdate", "issue", "state"]) do
+      %{} = state ->
+        cond do
+          Map.get(state, "id") == expected_state_id ->
+            :ok
+
+          normalized_label_name(Map.get(state, "name")) == normalized_label_name(expected_state_name) ->
+            :ok
+
+          true ->
+            {:error,
+             {:issue_state_mismatch,
+              %{
+                expected_id: expected_state_id,
+                expected_name: expected_state_name,
+                actual_id: Map.get(state, "id"),
+                actual_name: Map.get(state, "name"),
+                actual_type: Map.get(state, "type")
+              }}}
+        end
+
+      _ ->
+        {:error, :issue_update_missing_state}
     end
   end
 end

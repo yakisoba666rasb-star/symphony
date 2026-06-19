@@ -30,6 +30,14 @@ defmodule SymphonyElixir.LandingWorker do
         }
 
   @blocked_label "landing-blocked"
+  @blocking_labels [
+    "landing-blocked",
+    "landing-conflict",
+    "landing-checks-failing",
+    "landing-needs-review",
+    "landing-draft",
+    "landing-stale-pr"
+  ]
 
   @spec execute(Config.Schema.t(), module(), [map()]) :: execution_result()
   def execute(settings, tracker, queue), do: execute(settings, tracker, queue, runtime_deps())
@@ -147,24 +155,31 @@ defmodule SymphonyElixir.LandingWorker do
 
   defp finish_success(entry, pr, output, settings, tracker, result) do
     done_state = done_state_name(settings)
-    done_result = move_issue_state(tracker, entry, done_state)
 
-    if match?({:error, _reason}, done_result) do
-      Logger.warning("Approved to Land merged #{entry_context(entry)} but Done transition failed: #{inspect(done_result)}")
+    case move_issue_state(tracker, entry, done_state) do
+      :ok ->
+        label_result = remove_blocked_labels(tracker, entry)
+
+        comment_result =
+          create_comment(
+            tracker,
+            entry,
+            success_comment(entry, pr, output, settings, done_state, label_result)
+          )
+
+        if match?({:error, _reason}, comment_result) do
+          Logger.warning("Approved to Land merged #{entry_context(entry)} but success comment failed: #{inspect(comment_result)}")
+        end
+
+        result
+        |> Map.put(:merged, 1)
+        |> add_label_error_count(label_result)
+        |> add_done_error_count(comment_result)
+
+      {:error, reason} = done_result ->
+        Logger.warning("Approved to Land merged #{entry_context(entry)} but Done verification failed: #{inspect(done_result)}")
+        block_after_merge_done_failure(entry, pr, output, settings, tracker, reason, result)
     end
-
-    comment_result =
-      create_comment(
-        tracker,
-        entry,
-        success_comment(entry, pr, output, settings, done_state, done_result)
-      )
-
-    if match?({:error, _reason}, comment_result) do
-      Logger.warning("Approved to Land merged #{entry_context(entry)} but success comment failed: #{inspect(comment_result)}")
-    end
-
-    %{result | merged: 1, errors: done_error_count(done_result) + done_error_count(comment_result)}
   end
 
   defp merge_execution_result(%{} = entry_result, %{} = acc) do
@@ -389,6 +404,9 @@ defmodule SymphonyElixir.LandingWorker do
   defp add_label_error_count(result, :unsupported), do: result
   defp add_label_error_count(result, {:error, _reason}), do: %{result | errors: result.errors + 1}
 
+  defp add_done_error_count(result, :ok), do: result
+  defp add_done_error_count(result, {:error, _reason}), do: %{result | errors: result.errors + 1}
+
   defp add_blocked_labels(tracker, entry, reason) do
     labels = blocked_labels(reason)
 
@@ -415,6 +433,31 @@ defmodule SymphonyElixir.LandingWorker do
           other ->
             Logger.warning("Unexpected blocked label result for #{entry_context(entry)}: #{inspect(other)}")
             {:error, {:linear_label_unexpected, other}}
+        end
+    end
+  end
+
+  defp remove_blocked_labels(tracker, entry) do
+    cond do
+      not module_exports?(tracker, :remove_issue_labels, 2) ->
+        Logger.warning("Skipping Approved to Land blocked label cleanup for #{entry_context(entry)}; #{inspect(tracker)} does not export remove_issue_labels/2")
+        :unsupported
+
+      true ->
+        case tracker.remove_issue_labels(Map.fetch!(entry, :issue_id), @blocking_labels) do
+          :ok ->
+            :ok
+
+          {:ok, _value} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("Failed to clean Approved to Land blocked labels for #{entry_context(entry)}: #{inspect(reason)}")
+            {:error, reason}
+
+          other ->
+            Logger.warning("Unexpected blocked label cleanup result for #{entry_context(entry)}: #{inspect(other)}")
+            {:error, {:linear_label_cleanup_unexpected, other}}
         end
     end
   end
@@ -486,6 +529,39 @@ defmodule SymphonyElixir.LandingWorker do
     )
   end
 
+  defp block_after_merge_done_failure(entry, pr, output, settings, tracker, reason, result) do
+    blocker = "PR merged but Linear Done verification failed: #{format_reason(reason)}"
+
+    case move_issue_state(tracker, entry, settings.landing.blocked_state) do
+      :ok ->
+        label_result = add_blocked_labels(tracker, entry, blocker)
+
+        comment_result =
+          create_comment(
+            tracker,
+            entry,
+            post_merge_done_failed_comment(entry, pr, output, settings, blocker, label_result)
+          )
+
+        result
+        |> Map.put(:merged, 1)
+        |> Map.put(:blocked, 1)
+        |> add_label_error_count(label_result)
+        |> add_done_error_count(comment_result)
+
+      {:error, blocker_reason} ->
+        Logger.warning("Failed to block merged Approved to Land item #{entry_context(entry)} after Done verification failure: #{inspect(blocker_reason)}")
+
+        write_transition_failure_comment(
+          tracker,
+          entry,
+          post_merge_block_transition_failed_comment(entry, pr, output, settings, blocker, blocker_reason)
+        )
+
+        %{result | merged: 1, errors: result.errors + 1}
+    end
+  end
+
   defp move_issue_state(tracker, entry, state_name) do
     case tracker.update_issue_state(Map.fetch!(entry, :issue_id), state_name) do
       :ok -> :ok
@@ -531,7 +607,7 @@ defmodule SymphonyElixir.LandingWorker do
     |> String.trim()
   end
 
-  defp success_comment(entry, pr, output, settings, done_state, done_result) do
+  defp success_comment(entry, pr, output, settings, done_state, label_result) do
     """
     Symphony Approved to Land execution completed
 
@@ -539,7 +615,41 @@ defmodule SymphonyElixir.LandingWorker do
     Action: merged with #{settings.landing.merge_method}
     PR: #{pr_value(pr, "url")}
     GitHub output: #{blank_fallback(output, "merge command completed")}
-    Linear state: #{done_state_update_line(done_state, done_result)}
+    Linear state: moved to #{done_state}
+    Labels: #{label_cleanup_status_line(label_result)}
+    """
+    |> String.trim()
+  end
+
+  defp post_merge_done_failed_comment(entry, pr, output, settings, reason, label_result) do
+    """
+    Symphony Approved to Land execution needs attention after merge
+
+    Issue: #{issue_label(entry)}
+    Action: merged with #{settings.landing.merge_method}
+    PR: #{pr_value(pr, "url")}
+    GitHub output: #{blank_fallback(output, "merge command completed")}
+    Reason: #{reason}
+    Labels: #{label_status_line(reason, label_result)}
+
+    The PR appears merged, but Symphony could not verify that Linear reached #{done_state_name(settings)}. The issue was moved to #{settings.landing.blocked_state} for manual reconciliation.
+    """
+    |> String.trim()
+  end
+
+  defp post_merge_block_transition_failed_comment(entry, pr, output, settings, original_reason, transition_reason) do
+    """
+    Symphony Approved to Land execution needs attention after merge
+
+    Issue: #{issue_label(entry)}
+    Action: merged with #{settings.landing.merge_method}
+    PR: #{pr_value(pr, "url")}
+    GitHub output: #{blank_fallback(output, "merge command completed")}
+    Original blocker: #{original_reason}
+    Target blocked state: #{settings.landing.blocked_state}
+    State transition error: #{format_reason(transition_reason)}
+
+    The PR appears merged, but Symphony could not verify that Linear reached #{done_state_name(settings)} and could not move the issue to #{settings.landing.blocked_state}. Reconcile the Linear state manually.
     """
     |> String.trim()
   end
@@ -576,6 +686,10 @@ defmodule SymphonyElixir.LandingWorker do
   defp label_status_line(reason, :ok), do: blocked_labels(reason) |> Enum.join(", ")
   defp label_status_line(_reason, :unsupported), do: "not applied; tracker does not support labels"
   defp label_status_line(_reason, {:error, reason}), do: "failed to apply: #{format_reason(reason)}"
+
+  defp label_cleanup_status_line(:ok), do: "removed landing blocking labels"
+  defp label_cleanup_status_line(:unsupported), do: "cleanup skipped; tracker does not support label removal"
+  defp label_cleanup_status_line({:error, reason}), do: "cleanup failed: #{format_reason(reason)}"
 
   defp blocked_transition_failed_comment(entry, original_reason, transition_reason, settings, label_result) do
     """
@@ -662,12 +776,6 @@ defmodule SymphonyElixir.LandingWorker do
     settings.tracker.terminal_states
     |> Enum.find("Done", fn state -> Config.Schema.normalize_issue_state(to_string(state)) == "done" end)
   end
-
-  defp done_state_update_line(done_state, :ok), do: "moved to #{done_state}"
-  defp done_state_update_line(done_state, {:error, reason}), do: "failed to move to #{done_state}: #{format_reason(reason)}"
-
-  defp done_error_count(:ok), do: 0
-  defp done_error_count({:error, _reason}), do: 1
 
   defp issue_label(entry), do: Map.get(entry, :issue_identifier) || Map.get(entry, :issue_id) || "unknown"
 

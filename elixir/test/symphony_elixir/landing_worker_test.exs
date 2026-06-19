@@ -19,6 +19,11 @@ defmodule SymphonyElixir.LandingWorkerTest do
       :ok
     end
 
+    def remove_issue_labels(issue_id, labels) do
+      send(test_pid(), {:landing_remove_labels, issue_id, labels})
+      :ok
+    end
+
     defp test_pid, do: Application.fetch_env!(:symphony_elixir, :landing_worker_test_pid)
   end
 
@@ -209,9 +214,17 @@ defmodule SymphonyElixir.LandingWorkerTest do
     assert_receive {:gh_command, ["pr", "view", "https://github.com/octo/repo/pull/1", "--json", _json]}
     assert_receive {:gh_command, ["pr", "merge", "https://github.com/octo/repo/pull/1", "--squash"]}
     assert_receive {:landing_state_update, "issue-1", "Done"}
+    assert_receive {:landing_remove_labels, "issue-1", labels}
+    assert "landing-blocked" in labels
+    assert "landing-conflict" in labels
+    assert "landing-checks-failing" in labels
+    assert "landing-needs-review" in labels
+    assert "landing-draft" in labels
+    assert "landing-stale-pr" in labels
     assert_receive {:landing_comment, "issue-1", success_body}
     assert success_body =~ "execution completed"
     assert success_body =~ "Linear state: moved to Done"
+    assert success_body =~ "Labels: removed landing blocking labels"
     refute_receive {:landing_state_update, "issue-2", _state_name}, 100
   end
 
@@ -520,13 +533,13 @@ defmodule SymphonyElixir.LandingWorkerTest do
     assert success_body =~ "execution completed"
   end
 
-  test "counts merged PRs when Done transition fails after merge" do
+  test "blocks merged PRs when Done transition verification fails after merge" do
     write_workflow_file!(Workflow.workflow_file_path(),
       landing_enabled: true,
       landing_execute_enabled: true
     )
 
-    assert %{enabled: true, attempted: 1, merged: 1, blocked: 0, errors: 1} =
+    assert %{enabled: true, attempted: 1, merged: 1, blocked: 1, errors: 0} =
              LandingWorker.execute(Config.settings!(), FakeTrackerDoneStateError, [ready_entry()], deps())
 
     assert_receive {:landing_state_update, "issue-1", "Landing"}
@@ -534,9 +547,12 @@ defmodule SymphonyElixir.LandingWorkerTest do
     assert start_body =~ "execution started"
     assert_receive {:gh_command, ["pr", "merge", "https://github.com/octo/repo/pull/1", "--squash"]}
     assert_receive {:landing_state_update, "issue-1", "Done"}
-    assert_receive {:landing_comment, "issue-1", success_body}
-    assert success_body =~ "execution completed"
-    assert success_body =~ "Linear state: failed to move to Done"
+    assert_receive {:landing_state_update, "issue-1", "Blocked"}
+    assert_receive {:landing_comment, "issue-1", blocker_body}
+    assert blocker_body =~ "execution needs attention after merge"
+    assert blocker_body =~ "PR merged but Linear Done verification failed"
+    assert blocker_body =~ "moved to Blocked for manual reconciliation"
+    refute blocker_body =~ "execution completed"
   end
 
   test "moves blocked skip entries to Blocked with labels and a visible reason" do

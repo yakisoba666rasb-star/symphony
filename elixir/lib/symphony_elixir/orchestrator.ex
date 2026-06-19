@@ -29,6 +29,14 @@ defmodule SymphonyElixir.Orchestrator do
   @handoff_pr_lookup_refresh_delay_ms 500
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @landing_blocking_labels [
+    "landing-blocked",
+    "landing-conflict",
+    "landing-checks-failing",
+    "landing-needs-review",
+    "landing-draft",
+    "landing-stale-pr"
+  ]
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -1606,6 +1614,7 @@ defmodule SymphonyElixir.Orchestrator do
             "#{issue_context(issue)} repo=#{repo} pr=#{pr_url(pr)}"
         )
 
+        cleanup_landing_blocking_labels(issue)
         close_source_github_issue_after_done(issue, repo, pr)
         post_zero_touch_evidence_after_done(issue, repo, pr)
 
@@ -1629,6 +1638,33 @@ defmodule SymphonyElixir.Orchestrator do
           "merged PR detected but Linear state update returned unexpected result: " <>
             "repo=#{repo} pr=#{pr_url(pr)} result=#{inspect(other)}"
         )
+    end
+  end
+
+  defp cleanup_landing_blocking_labels(%Issue{} = issue) do
+    module = tracker_module()
+
+    cond do
+      not function_exported?(module, :remove_issue_labels, 2) ->
+        Logger.debug("Skipping landing blocking label cleanup for #{issue_context(issue)}; tracker does not support label removal")
+        :ok
+
+      true ->
+        case module.remove_issue_labels(issue.id, @landing_blocking_labels) do
+          :ok ->
+            :ok
+
+          {:ok, _value} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("Failed to clean landing blocking labels for #{issue_context(issue)} after Done sync: #{inspect(reason)}")
+            {:error, reason}
+
+          other ->
+            Logger.warning("Unexpected landing blocking label cleanup result for #{issue_context(issue)} after Done sync: #{inspect(other)}")
+            {:error, {:linear_label_cleanup_unexpected, other}}
+        end
     end
   end
 

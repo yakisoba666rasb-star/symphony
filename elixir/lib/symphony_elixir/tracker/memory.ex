@@ -58,6 +58,12 @@ defmodule SymphonyElixir.Tracker.Memory do
     :ok
   end
 
+  @spec remove_issue_labels(String.t(), [String.t()]) :: :ok | {:error, term()}
+  def remove_issue_labels(issue_id, labels) do
+    send_event({:memory_tracker_remove_labels, issue_id, labels})
+    :ok
+  end
+
   @spec fetch_issue_team_projects(String.t()) :: {:ok, [map()]} | {:error, term()}
   def fetch_issue_team_projects(issue_id) when is_binary(issue_id) do
     send_event({:memory_tracker_fetch_issue_team_projects, issue_id})

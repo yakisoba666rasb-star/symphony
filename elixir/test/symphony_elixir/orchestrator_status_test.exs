@@ -841,6 +841,18 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       :ok
     end
+
+    def remove_issue_labels(issue_id, labels) do
+      case Application.get_env(:symphony_elixir, :tracker_state_update_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:tracker_remove_labels_called, issue_id, labels})
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
   end
 
   defmodule FakeTrackerAlreadyDoneSourceIssue do
@@ -3125,6 +3137,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_receive {:tracker_state_update_called, "issue-progress-merged", "Done"}, 200
     assert_receive {:tracker_state_update_called, "issue-body-linked-merged", "Done"}, 200
     assert_receive {:tracker_state_update_called, "issue-identifier-url-only", "Done"}, 200
+
+    for issue_id <- [
+          "issue-review-merged",
+          "issue-progress-merged",
+          "issue-body-linked-merged",
+          "issue-identifier-url-only"
+        ] do
+      assert_receive {:tracker_remove_labels_called, ^issue_id, labels}, 200
+      assert "landing-blocked" in labels
+      assert "landing-conflict" in labels
+      assert "landing-checks-failing" in labels
+      assert "landing-needs-review" in labels
+      assert "landing-draft" in labels
+      assert "landing-stale-pr" in labels
+    end
 
     assert_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", close_comment}, 200
     assert close_comment =~ "https://github.com/octo/repo/pull/201"
