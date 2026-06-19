@@ -21,7 +21,7 @@ landing:
   execute_enabled: true
   approval_state: Approved to Land
   in_progress_state: Landing
-  blocked_state: Blocked
+  blocked_state: Merge Blocked
   repair_enabled: true
   repair_state: In Progress
   interval_ms: 120000
