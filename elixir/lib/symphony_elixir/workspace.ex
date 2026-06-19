@@ -92,7 +92,7 @@ defmodule SymphonyElixir.Workspace do
         "        printf '%s\\n' \"$dirty_status\"",
         "        printf '\\n%s\\n' 'Git diff --stat:'",
         "        git diff --stat || true",
-        "      } > \"$workspace.dirty-reason.log\"",
+        "      } > \"$workspace/.dirty-reason.log\"",
         "      dirty_status_for_marker=$(printf '%s' \"$dirty_status\" | sed ':a;N;$!ba;s/\\n/\\\\n/g')",
         "      cd \"$(dirname \"$workspace\")\"",
         "      mv \"$workspace\" \"$quarantine_workspace\"",
@@ -205,8 +205,9 @@ defmodule SymphonyElixir.Workspace do
 
   defp quarantine_dirty_workspace(workspace, dirty_status) do
     quarantine_workspace = dirty_workspace_quarantine_path(workspace)
-    write_dirty_workspace_reason_log(workspace, dirty_status, quarantine_workspace)
+    reason_log_body = dirty_workspace_reason_log_body(workspace, dirty_status, quarantine_workspace)
     File.rename!(workspace, quarantine_workspace)
+    write_dirty_workspace_reason_log(quarantine_workspace, reason_log_body)
     {:ok, quarantine_workspace}
   end
 
@@ -224,7 +225,7 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp write_dirty_workspace_reason_log(workspace, dirty_status, quarantine_workspace) do
+  defp dirty_workspace_reason_log_body(workspace, dirty_status, quarantine_workspace) do
     diff_summary =
       case System.cmd("git", ["-C", workspace, "diff", "--stat"], stderr_to_stdout: true) do
         {"", 0} -> ""
@@ -232,7 +233,7 @@ defmodule SymphonyElixir.Workspace do
         {output, status} -> "\nGit diff --stat failed status=#{status}:\n#{output}"
       end
 
-    body = """
+    """
     dirty workspace detected
 
     Workspace: #{workspace}
@@ -242,16 +243,14 @@ defmodule SymphonyElixir.Workspace do
     Git status --porcelain:
     #{dirty_status}#{diff_summary}
     """
+  end
 
-    File.write(dirty_workspace_reason_log_path(workspace), body)
+  defp write_dirty_workspace_reason_log(quarantine_workspace, body) do
+    File.write(Path.join(quarantine_workspace, ".dirty-reason.log"), body)
     :ok
   end
 
   defp quarantine_line(quarantine_workspace), do: "Quarantine: #{quarantine_workspace}\n"
-
-  defp dirty_workspace_reason_log_path(workspace) do
-    Path.join(Path.dirname(workspace), "#{Path.basename(workspace)}.dirty-reason.log")
-  end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
   def remove(workspace), do: remove(workspace, nil)

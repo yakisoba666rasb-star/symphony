@@ -2586,6 +2586,51 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     Process.demonitor(worker_ref, [:flush])
   end
 
+  test "orchestrator periodically cleans dirty workspace quarantines after startup" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-periodic-dirty-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      poll_interval_ms: 5_000,
+      workspace_root: workspace_root,
+      dirty_workspace_retention_days: 7
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    orchestrator_name = Module.concat(__MODULE__, :PeriodicDirtyCleanupOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    expired_dirty = Path.join(workspace_root, "LAB-OLD.dirty-20260501-000000-42")
+    File.mkdir_p!(expired_dirty)
+    File.write!(Path.join(expired_dirty, "marker.txt"), "remove")
+
+    :sys.replace_state(pid, fn state ->
+      %{state | last_dirty_workspace_cleanup_ms: System.monotonic_time(:millisecond) - :timer.hours(25)}
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    wait_for_orchestrator_state(pid, fn state ->
+      state.poll_check_in_progress == false and not File.exists?(expired_dirty)
+    end)
+
+    refute File.exists?(expired_dirty)
+  end
+
   test "orchestrator snapshot keeps unroutable issues when agent slots are full" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",

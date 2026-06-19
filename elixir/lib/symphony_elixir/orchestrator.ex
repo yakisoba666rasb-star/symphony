@@ -29,6 +29,7 @@ defmodule SymphonyElixir.Orchestrator do
   @handoff_pr_lookup_refresh_delay_ms 500
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @dirty_workspace_cleanup_interval_ms :timer.hours(24)
   @landing_blocking_labels [
     "landing-blocked",
     "landing-conflict",
@@ -74,6 +75,7 @@ defmodule SymphonyElixir.Orchestrator do
       last_landing_plan_ms: nil,
       landing_queue: [],
       last_review_rework_sync_ms: nil,
+      last_dirty_workspace_cleanup_ms: nil,
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -97,6 +99,7 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
+      last_dirty_workspace_cleanup_ms: now_ms,
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil
     }
@@ -290,6 +293,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp finish_poll_cycle(%State{} = state) do
     state =
       state
+      |> maybe_run_periodic_dirty_workspace_cleanup()
       |> schedule_tick(state.poll_interval_ms)
       |> Map.put(:poll_check_in_progress, false)
 
@@ -4703,6 +4707,19 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.warning("Skipping dirty workspace cleanup: #{inspect(reason)}")
+    end
+  end
+
+  defp maybe_run_periodic_dirty_workspace_cleanup(%State{} = state) do
+    now_ms = System.monotonic_time(:millisecond)
+
+    case state.last_dirty_workspace_cleanup_ms do
+      last_ms when is_integer(last_ms) and now_ms - last_ms < @dirty_workspace_cleanup_interval_ms ->
+        state
+
+      _last_ms ->
+        run_dirty_workspace_cleanup()
+        %{state | last_dirty_workspace_cleanup_ms: now_ms}
     end
   end
 
