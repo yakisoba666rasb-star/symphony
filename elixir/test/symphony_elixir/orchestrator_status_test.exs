@@ -1599,6 +1599,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "Approved to Land repair requests immediately dispatch repair workers" do
+    stop_default_orchestrator_for_direct_landing_repair_test!()
+
     previous_env =
       for key <- [
             :github_pr_lookup,
@@ -1811,6 +1813,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "Approved to Land repair dispatch skips non-Issue refresh results" do
+    stop_default_orchestrator_for_direct_landing_repair_test!()
+
     previous_env =
       for key <- [
             :github_pr_lookup,
@@ -1919,7 +1923,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
           :running ->
             %Orchestrator.State{
-              running: %{issue_id => %{issue: refreshed_issue, ref: make_ref(), recipient: self()}}
+              claimed: MapSet.new([issue_id]),
+              running: %{issue_id => Orchestrator.running_entry_for_test(refreshed_issue)}
             }
 
           :blocked ->
@@ -3768,6 +3773,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator preserves running landing repair workers during dirty PR reconcile" do
+    stop_default_orchestrator_for_direct_landing_repair_test!()
+
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
       tracker_api_token: nil,
@@ -3852,19 +3859,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     started_at = DateTime.utc_now()
     initial_state = :sys.get_state(pid, 15_000)
 
-    running_entry = %{
-      pid: worker_pid,
-      ref: worker_ref,
-      identifier: issue.identifier,
-      issue: issue,
-      branch_name: issue.branch_name,
-      workspace_path: "/tmp/lab-490-running-dirty-pr",
-      session_id: "thread-landing-repair-running-dirty-pr",
-      last_codex_message: nil,
-      last_codex_timestamp: nil,
-      last_codex_event: nil,
-      started_at: started_at
-    }
+    running_entry =
+      issue
+      |> Orchestrator.running_entry_for_test(pid: worker_pid, ref: worker_ref)
+      |> Map.merge(%{
+        workspace_path: "/tmp/lab-490-running-dirty-pr",
+        session_id: "thread-landing-repair-running-dirty-pr",
+        started_at: started_at
+      })
 
     :sys.replace_state(pid, fn _state ->
       %{
@@ -9857,6 +9859,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   defp setup_landing_repair_dispatch_test!(opts \\ []) do
+    stop_default_orchestrator_for_direct_landing_repair_test!()
+
     previous_env =
       for key <- landing_repair_dispatch_env_keys(),
           do: {key, Application.get_env(:symphony_elixir, key)}
@@ -9915,6 +9919,35 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       refreshed_issue: refreshed_issue,
       repair_entry: List.first(repair_entries)
     }
+  end
+
+  defp stop_default_orchestrator_for_direct_landing_repair_test! do
+    orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
+
+    on_exit(fn ->
+      maybe_restart_default_orchestrator_for_direct_landing_repair_test(orchestrator_pid)
+    end)
+
+    if is_pid(orchestrator_pid) do
+      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
+    end
+  end
+
+  defp maybe_restart_default_orchestrator_for_direct_landing_repair_test(orchestrator_pid)
+       when is_pid(orchestrator_pid) do
+    if is_nil(Process.whereis(SymphonyElixir.Orchestrator)) do
+      restart_default_orchestrator_for_direct_landing_repair_test()
+    end
+  end
+
+  defp maybe_restart_default_orchestrator_for_direct_landing_repair_test(_orchestrator_pid), do: :ok
+
+  defp restart_default_orchestrator_for_direct_landing_repair_test do
+    case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, :running} -> :ok
+    end
   end
 
   defp landing_repair_dispatch_env_keys do
