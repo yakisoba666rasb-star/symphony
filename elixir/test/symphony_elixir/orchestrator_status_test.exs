@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.LandingWorker.RepairEntry
+
   defmodule FakeGitHubPrLookupNone do
     def lookup_workspace_head(_workspace_path, _branch_name), do: {:ok, nil}
   end
@@ -1421,19 +1423,22 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         attachment_urls: ["https://github.com/octo/repo/pull/206"]
     }
 
-    repair_entry = %{
-      issue_id: issue_id,
-      issue_identifier: "LAB-491",
-      title: "Repair dispatch coverage",
-      repository: "octo/repo",
-      pr_url: "https://github.com/octo/repo/pull/206",
-      pr_state: "OPEN",
-      draft: false,
-      mergeability: "UNSTABLE",
-      head_branch: "lab-491-landing-repair-reconcile-tests",
-      head_sha: "abc123",
-      repair_reason: "PR mergeability is UNSTABLE"
-    }
+    repair_entry =
+      RepairEntry.new!(
+        %{
+          issue_id: issue_id,
+          issue_identifier: "LAB-491",
+          title: "Repair dispatch coverage",
+          repository: "octo/repo",
+          pr_url: "https://github.com/octo/repo/pull/206",
+          pr_state: "OPEN",
+          draft: false,
+          mergeability: "UNSTABLE",
+          head_branch: "lab-491-landing-repair-reconcile-tests",
+          head_sha: "abc123"
+        },
+        "PR mergeability is UNSTABLE"
+      )
 
     Application.put_env(:symphony_elixir, :github_pr_lookup, FakeLandingPrLookup)
     Application.put_env(:symphony_elixir, :tracker_module, FakeLandingTracker)
@@ -1510,18 +1515,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       branch_name: "lab-491-landing-repair-reconcile-tests"
     }
 
-    repair_entry = %{
-      issue_id: issue_id,
-      issue_identifier: "LAB-491",
-      repository: "octo/repo",
-      pr_url: "https://github.com/octo/repo/pull/206",
-      pr_state: "OPEN",
-      draft: false,
-      mergeability: "UNSTABLE",
-      head_branch: "lab-491-landing-repair-reconcile-tests",
-      head_sha: "abc123",
-      repair_reason: "PR mergeability is UNSTABLE"
-    }
+    repair_entry =
+      RepairEntry.new!(
+        %{
+          issue_id: issue_id,
+          issue_identifier: "LAB-491",
+          repository: "octo/repo",
+          pr_url: "https://github.com/octo/repo/pull/206",
+          pr_state: "OPEN",
+          draft: false,
+          mergeability: "UNSTABLE",
+          head_branch: "lab-491-landing-repair-reconcile-tests",
+          head_sha: "abc123"
+        },
+        "PR mergeability is UNSTABLE"
+      )
 
     Application.put_env(:symphony_elixir, :github_pr_lookup, FakeLandingPrLookup)
     Application.put_env(:symphony_elixir, :tracker_module, FakeLandingTracker)

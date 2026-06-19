@@ -24,6 +24,7 @@ defmodule SymphonyElixir.Orchestrator do
     ZeroTouchEvidence
   }
 
+  alias SymphonyElixir.LandingWorker.RepairEntry
   alias SymphonyElixir.Linear.Issue
 
   @handoff_pr_lookup_refresh_delay_ms 500
@@ -1317,7 +1318,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_dispatch_landing_repair_requests([], %State{} = state), do: state
 
   defp do_dispatch_landing_repair_requests(repair_entries, %State{} = state) do
-    repair_entries_by_id = Map.new(repair_entries, &{Map.fetch!(&1, :issue_id), &1})
+    repair_entries_by_id = Map.new(repair_entries, &{&1.issue_id, &1})
     issue_ids = Map.keys(repair_entries_by_id)
     module = tracker_module()
 
@@ -1359,7 +1360,7 @@ defmodule SymphonyElixir.Orchestrator do
     state
   end
 
-  defp maybe_dispatch_landing_repair_request(%State{} = state, %Issue{} = issue, %{} = repair_entry) do
+  defp maybe_dispatch_landing_repair_request(%State{} = state, %Issue{} = issue, %RepairEntry{} = repair_entry) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
     pr = repair_entry_pr(repair_entry)
@@ -1391,21 +1392,21 @@ defmodule SymphonyElixir.Orchestrator do
     available_slots(state) > 0 and state_slots_available?(issue, state.running) and worker_slots_available?(state)
   end
 
-  defp valid_landing_repair_entry?(%{issue_id: issue_id, pr_url: pr_url})
+  defp valid_landing_repair_entry?(%RepairEntry{issue_id: issue_id, pr_url: pr_url})
        when is_binary(issue_id) and is_binary(pr_url) do
     String.trim(issue_id) != "" and String.trim(pr_url) != ""
   end
 
   defp valid_landing_repair_entry?(_entry), do: false
 
-  defp repair_entry_pr(%{} = repair_entry) do
+  defp repair_entry_pr(%RepairEntry{} = repair_entry) do
     %{
-      "url" => Map.get(repair_entry, :pr_url),
-      "state" => Map.get(repair_entry, :pr_state),
-      "isDraft" => Map.get(repair_entry, :draft),
-      "mergeStateStatus" => Map.get(repair_entry, :mergeability),
-      "headRefName" => Map.get(repair_entry, :head_branch),
-      "headRefOid" => Map.get(repair_entry, :head_sha)
+      "url" => repair_entry.pr_url,
+      "state" => repair_entry.pr_state,
+      "isDraft" => repair_entry.draft,
+      "mergeStateStatus" => repair_entry.mergeability,
+      "headRefName" => repair_entry.head_branch,
+      "headRefOid" => repair_entry.head_sha
     }
   end
 

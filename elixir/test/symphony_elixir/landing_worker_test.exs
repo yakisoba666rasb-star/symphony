@@ -2,6 +2,7 @@ defmodule SymphonyElixir.LandingWorkerTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.LandingWorker
+  alias SymphonyElixir.LandingWorker.RepairEntry
 
   defmodule FakeTracker do
     def update_issue_state(issue_id, state_name) do
@@ -465,6 +466,16 @@ defmodule SymphonyElixir.LandingWorkerTest do
       )
 
     assert %{enabled: true, attempted: 1, merged: 0, blocked: 1, repair_requested: 1, errors: 0} = result
+
+    assert [
+             %RepairEntry{
+               issue_id: "issue-1",
+               pr_url: "https://github.com/octo/repo/pull/1",
+               mergeability: "CLEAN",
+               repair_reason: "GitHub merge command failed with status 1: merge conflict"
+             }
+           ] = result.repair_entries
+
     assert_receive {:landing_state_update, "issue-1", "Landing"}
     assert_receive {:landing_comment, "issue-1", start_body}
     assert start_body =~ "execution started"

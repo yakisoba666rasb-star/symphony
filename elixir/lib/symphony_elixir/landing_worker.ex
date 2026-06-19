@@ -10,6 +10,7 @@ defmodule SymphonyElixir.LandingWorker do
   require Logger
 
   alias SymphonyElixir.{Config, GitHubCommand}
+  alias SymphonyElixir.LandingWorker.RepairEntry
 
   @type command_result ::
           {String.t(), integer()} | {:ok, {String.t(), integer()}} | {:error, term()}
@@ -25,7 +26,7 @@ defmodule SymphonyElixir.LandingWorker do
           merged: non_neg_integer(),
           blocked: non_neg_integer(),
           repair_requested: non_neg_integer(),
-          repair_entries: [map()],
+          repair_entries: [RepairEntry.t()],
           skipped: non_neg_integer(),
           errors: non_neg_integer()
         }
@@ -523,20 +524,7 @@ defmodule SymphonyElixir.LandingWorker do
   end
 
   defp repair_entry(entry, reason) do
-    entry
-    |> Map.take([
-      :issue_id,
-      :issue_identifier,
-      :title,
-      :repository,
-      :pr_url,
-      :pr_state,
-      :draft,
-      :mergeability,
-      :head_branch,
-      :head_sha
-    ])
-    |> Map.put(:repair_reason, reason)
+    RepairEntry.new!(entry, reason)
   end
 
   defp block_after_landing(tracker, entry, settings, reason, result) do
