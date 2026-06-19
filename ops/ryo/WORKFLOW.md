@@ -17,8 +17,8 @@ tracker:
     - Canceled
     - Duplicate
 landing:
-  enabled: false
-  execute_enabled: false
+  enabled: true
+  execute_enabled: true
   approval_state: Approved to Land
   in_progress_state: Landing
   blocked_state: Blocked
