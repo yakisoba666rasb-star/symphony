@@ -25,6 +25,7 @@ defmodule SymphonyElixir.LandingWorker do
           merged: non_neg_integer(),
           blocked: non_neg_integer(),
           repair_requested: non_neg_integer(),
+          repair_entries: [map()],
           skipped: non_neg_integer(),
           errors: non_neg_integer()
         }
@@ -75,6 +76,7 @@ defmodule SymphonyElixir.LandingWorker do
       merged: 0,
       blocked: 0,
       repair_requested: 0,
+      repair_entries: [],
       skipped: 0,
       errors: 0
     }
@@ -189,6 +191,7 @@ defmodule SymphonyElixir.LandingWorker do
         merged: acc.merged + Map.get(entry_result, :merged, 0),
         blocked: acc.blocked + Map.get(entry_result, :blocked, 0),
         repair_requested: acc.repair_requested + Map.get(entry_result, :repair_requested, 0),
+        repair_entries: acc.repair_entries ++ Map.get(entry_result, :repair_entries, []),
         skipped: acc.skipped + Map.get(entry_result, :skipped, 0),
         errors: acc.errors + Map.get(entry_result, :errors, 0)
     }
@@ -507,12 +510,33 @@ defmodule SymphonyElixir.LandingWorker do
 
     with :ok <- move_issue_state(tracker, entry, repair_state),
          :ok <- create_comment(tracker, entry, repair_comment(entry, reason, settings)) do
-      %{result | repair_requested: result.repair_requested + 1}
+      %{
+        result
+        | repair_requested: result.repair_requested + 1,
+          repair_entries: [repair_entry(entry, reason) | result.repair_entries]
+      }
     else
       {:error, repair_reason} ->
         Logger.warning("Failed to request Approved to Land repair for #{entry_context(entry)}: #{inspect(repair_reason)}")
         %{result | errors: result.errors + 1}
     end
+  end
+
+  defp repair_entry(entry, reason) do
+    entry
+    |> Map.take([
+      :issue_id,
+      :issue_identifier,
+      :title,
+      :repository,
+      :pr_url,
+      :pr_state,
+      :draft,
+      :mergeability,
+      :head_branch,
+      :head_sha
+    ])
+    |> Map.put(:repair_reason, reason)
   end
 
   defp block_after_landing(tracker, entry, settings, reason, result) do

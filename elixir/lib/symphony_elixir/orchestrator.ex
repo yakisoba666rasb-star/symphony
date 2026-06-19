@@ -1285,7 +1285,10 @@ defmodule SymphonyElixir.Orchestrator do
         )
       end
 
-      %{state | last_landing_plan_ms: System.monotonic_time(:millisecond), landing_queue: result.queue}
+      state
+      |> dispatch_landing_repair_requests(execution_result)
+      |> Map.put(:last_landing_plan_ms, System.monotonic_time(:millisecond))
+      |> Map.put(:landing_queue, result.queue)
     else
       state
     end
@@ -1301,6 +1304,110 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp landing_plan_due?(_state, _settings), do: false
+
+  defp dispatch_landing_repair_requests(%State{} = state, %{repair_entries: repair_entries})
+       when is_list(repair_entries) do
+    repair_entries
+    |> Enum.filter(&valid_landing_repair_entry?/1)
+    |> do_dispatch_landing_repair_requests(state)
+  end
+
+  defp dispatch_landing_repair_requests(%State{} = state, _execution_result), do: state
+
+  defp do_dispatch_landing_repair_requests([], %State{} = state), do: state
+
+  defp do_dispatch_landing_repair_requests(repair_entries, %State{} = state) do
+    repair_entries_by_id = Map.new(repair_entries, &{Map.fetch!(&1, :issue_id), &1})
+    issue_ids = Map.keys(repair_entries_by_id)
+    module = tracker_module()
+
+    if module_exports?(module, :fetch_issue_states_by_ids, 1) do
+      dispatch_landing_repair_requests_from_tracker(state, module, issue_ids, repair_entries_by_id)
+    else
+      Logger.warning("Skipping immediate landing repair dispatch; #{inspect(module)} does not export fetch_issue_states_by_ids/1")
+      state
+    end
+  end
+
+  defp dispatch_landing_repair_requests_from_tracker(%State{} = state, module, issue_ids, repair_entries_by_id) do
+    case module.fetch_issue_states_by_ids(issue_ids) do
+      {:ok, issues} when is_list(issues) ->
+        Enum.reduce(issues, state, &dispatch_refreshed_landing_repair_issue(&1, &2, repair_entries_by_id))
+
+      {:error, reason} ->
+        Logger.warning("Skipping immediate landing repair dispatch; failed to refresh repair issues: #{inspect(reason)}")
+        state
+
+      other ->
+        Logger.warning("Skipping immediate landing repair dispatch; unexpected repair issue refresh result: #{inspect(other)}")
+        state
+    end
+  end
+
+  defp dispatch_refreshed_landing_repair_issue(%Issue{} = issue, %State{} = state, repair_entries_by_id) do
+    case Map.fetch(repair_entries_by_id, issue.id) do
+      {:ok, repair_entry} ->
+        maybe_dispatch_landing_repair_request(state, issue, repair_entry)
+
+      :error ->
+        state
+    end
+  end
+
+  defp dispatch_refreshed_landing_repair_issue(issue, %State{} = state, _repair_entries_by_id) do
+    Logger.warning("Skipping immediate landing repair dispatch; refreshed issue is not a Linear issue: #{inspect(issue)}")
+    state
+  end
+
+  defp maybe_dispatch_landing_repair_request(%State{} = state, %Issue{} = issue, %{} = repair_entry) do
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+    pr = repair_entry_pr(repair_entry)
+
+    cond do
+      not candidate_issue?(issue, active_states, terminal_states) ->
+        Logger.info("Skipping immediate landing repair dispatch; issue is not active/routable: #{issue_context(issue)} state=#{inspect(issue.state)}")
+        state
+
+      MapSet.member?(state.claimed, issue.id) or Map.has_key?(state.running, issue.id) or Map.has_key?(state.blocked, issue.id) ->
+        Logger.info("Skipping immediate landing repair dispatch; issue already tracked: #{issue_context(issue)}")
+        state
+
+      not landing_repair_dispatch_capacity?(state, issue) ->
+        Logger.info("Skipping immediate landing repair dispatch; no worker capacity for #{issue_context(issue)}")
+        state
+
+      true ->
+        Logger.info(
+          "Dispatching immediate landing repair worker for #{issue_context(issue)} " <>
+            "pr=#{pr_url(pr)} mergeability=#{inspect(pr_merge_state(pr))}"
+        )
+
+        do_dispatch_issue(state, issue, nil, nil, put_landing_repair_prompt([], issue, pr))
+    end
+  end
+
+  defp landing_repair_dispatch_capacity?(%State{} = state, %Issue{} = issue) do
+    available_slots(state) > 0 and state_slots_available?(issue, state.running) and worker_slots_available?(state)
+  end
+
+  defp valid_landing_repair_entry?(%{issue_id: issue_id, pr_url: pr_url})
+       when is_binary(issue_id) and is_binary(pr_url) do
+    String.trim(issue_id) != "" and String.trim(pr_url) != ""
+  end
+
+  defp valid_landing_repair_entry?(_entry), do: false
+
+  defp repair_entry_pr(%{} = repair_entry) do
+    %{
+      "url" => Map.get(repair_entry, :pr_url),
+      "state" => Map.get(repair_entry, :pr_state),
+      "isDraft" => Map.get(repair_entry, :draft),
+      "mergeStateStatus" => Map.get(repair_entry, :mergeability),
+      "headRefName" => Map.get(repair_entry, :head_branch),
+      "headRefOid" => Map.get(repair_entry, :head_sha)
+    }
+  end
 
   defp review_rework_sync_due?(%State{last_review_rework_sync_ms: nil}, _settings), do: true
 

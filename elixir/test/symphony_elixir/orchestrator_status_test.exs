@@ -45,6 +45,19 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       {:ok, Application.get_env(:symphony_elixir, :landing_planner_issues, [])}
     end
 
+    def fetch_issue_states_by_ids(issue_ids) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:landing_repair_issue_refresh, issue_ids})
+
+        _ ->
+          :ok
+      end
+
+      issues = Application.get_env(:symphony_elixir, :landing_repair_refreshed_issues, [])
+      {:ok, Enum.filter(issues, &(&1.id in issue_ids))}
+    end
+
     def create_comment(issue_id, body) do
       case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
         recipient when is_pid(recipient) ->
@@ -86,9 +99,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         merged: 0,
         blocked: 0,
         repair_requested: 0,
+        repair_entries: [],
         skipped: 0,
         errors: 0
       }
+      |> Map.merge(Application.get_env(:symphony_elixir, :landing_worker_result, %{}))
     end
   end
 
@@ -1352,6 +1367,184 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     due_state = %{state | last_landing_plan_ms: System.monotonic_time(:millisecond) - 1_001}
     _state = Orchestrator.plan_approved_landings_for_test(due_state)
     assert_receive {:landing_fetch_states, ["Approved to Land"]}, 200
+  end
+
+  test "Approved to Land repair requests immediately dispatch repair workers" do
+    previous_env =
+      for key <- [
+            :github_pr_lookup,
+            :tracker_module,
+            :landing_worker,
+            :landing_planner_issues,
+            :landing_worker_result,
+            :landing_repair_refreshed_issues,
+            :agent_runner,
+            :agent_runner_recipient,
+            :tracker_comment_recipient
+          ],
+          do: {key, Application.get_env(:symphony_elixir, key)}
+
+    on_exit(fn ->
+      Enum.each(previous_env, fn
+        {key, nil} -> Application.delete_env(:symphony_elixir, key)
+        {key, value} -> Application.put_env(:symphony_elixir, key, value)
+      end)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true,
+      landing_blocked_state: "Merge Blocked",
+      landing_repair_enabled: true,
+      landing_repair_state: "In Progress",
+      poll_interval_ms: 50,
+      landing_interval_ms: 1_000,
+      repository_default: "octo/repo"
+    )
+
+    issue_id = "issue-landing-repair-immediate-dispatch"
+    issue_url = "https://linear.app/example/issue/LAB-491/reconcile-tests"
+
+    approved_issue = %Issue{
+      id: issue_id,
+      identifier: "LAB-491",
+      title: "Repair dispatch coverage",
+      state: "Approved to Land",
+      url: issue_url,
+      branch_name: "lab-491-landing-repair-reconcile-tests"
+    }
+
+    refreshed_issue = %{
+      approved_issue
+      | state: "In Progress",
+        labels: ["landing-blocked"],
+        attachment_urls: ["https://github.com/octo/repo/pull/206"]
+    }
+
+    repair_entry = %{
+      issue_id: issue_id,
+      issue_identifier: "LAB-491",
+      title: "Repair dispatch coverage",
+      repository: "octo/repo",
+      pr_url: "https://github.com/octo/repo/pull/206",
+      pr_state: "OPEN",
+      draft: false,
+      mergeability: "UNSTABLE",
+      head_branch: "lab-491-landing-repair-reconcile-tests",
+      head_sha: "abc123",
+      repair_reason: "PR mergeability is UNSTABLE"
+    }
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeLandingPrLookup)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeLandingTracker)
+    Application.put_env(:symphony_elixir, :landing_worker, FakeLandingWorker)
+    Application.put_env(:symphony_elixir, :landing_planner_issues, [approved_issue])
+    Application.put_env(:symphony_elixir, :landing_repair_refreshed_issues, [refreshed_issue])
+    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
+    Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    Application.put_env(:symphony_elixir, :landing_worker_result, %{
+      attempted: 1,
+      blocked: 1,
+      repair_requested: 1,
+      repair_entries: [repair_entry]
+    })
+
+    state = Orchestrator.plan_approved_landings_for_test(%Orchestrator.State{})
+
+    assert [%{issue_identifier: "LAB-491"}] = state.landing_queue
+    assert_receive {:landing_worker_execute, true, 1}
+    assert_receive {:landing_repair_issue_refresh, [^issue_id]}
+
+    assert_receive {:agent_runner_called, %{id: ^issue_id, state: "In Progress"}, opts}, 1_000
+    assert opts[:extra_prompt] =~ "Landing repair context"
+    assert opts[:extra_prompt] =~ "https://github.com/octo/repo/pull/206"
+    assert opts[:extra_prompt] =~ "mergeability=UNSTABLE"
+    assert opts[:extra_prompt] =~ "return the Linear issue to In Review"
+    assert opts[:extra_prompt] =~ "Do not merge the PR"
+
+    assert Map.has_key?(state.running, issue_id)
+  end
+
+  test "Approved to Land repair dispatch skips non-Issue refresh results" do
+    previous_env =
+      for key <- [
+            :github_pr_lookup,
+            :tracker_module,
+            :landing_worker,
+            :landing_planner_issues,
+            :landing_worker_result,
+            :landing_repair_refreshed_issues,
+            :agent_runner,
+            :agent_runner_recipient,
+            :tracker_comment_recipient
+          ],
+          do: {key, Application.get_env(:symphony_elixir, key)}
+
+    on_exit(fn ->
+      Enum.each(previous_env, fn
+        {key, nil} -> Application.delete_env(:symphony_elixir, key)
+        {key, value} -> Application.put_env(:symphony_elixir, key, value)
+      end)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true,
+      landing_blocked_state: "Merge Blocked",
+      landing_repair_enabled: true,
+      landing_repair_state: "In Progress",
+      poll_interval_ms: 50,
+      landing_interval_ms: 1_000,
+      repository_default: "octo/repo"
+    )
+
+    issue_id = "issue-landing-repair-plain-map-refresh"
+
+    approved_issue = %Issue{
+      id: issue_id,
+      identifier: "LAB-491",
+      title: "Repair dispatch coverage",
+      state: "Approved to Land",
+      branch_name: "lab-491-landing-repair-reconcile-tests"
+    }
+
+    repair_entry = %{
+      issue_id: issue_id,
+      issue_identifier: "LAB-491",
+      repository: "octo/repo",
+      pr_url: "https://github.com/octo/repo/pull/206",
+      pr_state: "OPEN",
+      draft: false,
+      mergeability: "UNSTABLE",
+      head_branch: "lab-491-landing-repair-reconcile-tests",
+      head_sha: "abc123",
+      repair_reason: "PR mergeability is UNSTABLE"
+    }
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeLandingPrLookup)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeLandingTracker)
+    Application.put_env(:symphony_elixir, :landing_worker, FakeLandingWorker)
+    Application.put_env(:symphony_elixir, :landing_planner_issues, [approved_issue])
+    Application.put_env(:symphony_elixir, :landing_repair_refreshed_issues, [%{id: issue_id, state: "In Progress"}])
+    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
+    Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    Application.put_env(:symphony_elixir, :landing_worker_result, %{
+      attempted: 1,
+      blocked: 1,
+      repair_requested: 1,
+      repair_entries: [repair_entry]
+    })
+
+    state = Orchestrator.plan_approved_landings_for_test(%Orchestrator.State{})
+
+    assert_receive {:landing_worker_execute, true, 1}
+    assert_receive {:landing_repair_issue_refresh, [^issue_id]}
+    refute_receive {:agent_runner_called, _issue, _opts}, 100
+    assert state.running == %{}
   end
 
   test "Done sync runs immediately and respects interval throttle" do
