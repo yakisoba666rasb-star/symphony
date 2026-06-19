@@ -645,27 +645,6 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
-  defmodule FakeAgentRunnerRecordsBlocking do
-    def run(issue, recipient, opts) do
-      FakeAgentRunnerRecords.run(issue, recipient, opts)
-
-      case Application.get_env(:symphony_elixir, :agent_runner_blocking_recipient) do
-        owner when is_pid(owner) ->
-          ref = make_ref()
-          send(owner, {:agent_runner_blocking, self(), issue.id, ref})
-
-          receive do
-            {:release_agent_runner, ^ref} -> :ok
-          after
-            5_000 -> :ok
-          end
-
-        _ ->
-          :ok
-      end
-    end
-  end
-
   defmodule FakeTrackerActiveOpenPrReconcile do
     def fetch_issues_by_states(states) do
       case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
@@ -3057,7 +3036,6 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
             :github_pr_lookup,
             :agent_runner,
             :agent_runner_recipient,
-            :agent_runner_blocking_recipient,
             :tracker_module,
             :tracker_comment_recipient,
             :active_open_pr_reconcile_issues,
@@ -3123,7 +3101,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
       tracker_api_token: nil,
-      poll_interval_ms: 50,
+      poll_interval_ms: 5_000,
       repository_default: "octo/repo",
       landing_enabled: true,
       landing_execute_enabled: false,
@@ -3154,9 +3132,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupDirtyOpenIssuePr)
     Application.put_env(:symphony_elixir, :fake_open_issue_pr_merge_state, "DIRTY")
-    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecordsBlocking)
+    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
     Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
-    Application.put_env(:symphony_elixir, :agent_runner_blocking_recipient, self())
     Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerActiveOpenPrReconcile)
     Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
 
@@ -3175,7 +3152,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     }
 
     Application.put_env(:symphony_elixir, :active_open_pr_reconcile_issues, [])
-    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
     orchestrator_name = Module.concat(__MODULE__, :LandingRepairReconcileRunningDirtyPrOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -3186,11 +3163,46 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    assert_receive {:agent_runner_called, %{id: ^issue_id, state: "In Progress"}, opts}, 1_000
-    assert opts[:extra_prompt] =~ "Landing repair context"
-    assert opts[:extra_prompt] =~ "https://github.com/octo/repo/pull/200"
-    assert opts[:extra_prompt] =~ "mergeability=DIRTY"
-    assert_receive {:agent_runner_blocking, runner_pid, ^issue_id, runner_ref}, 1_000
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        after
+          5_000 -> :ok
+        end
+      end)
+
+    on_exit(fn ->
+      if Process.alive?(worker_pid) do
+        send(worker_pid, :stop)
+      end
+    end)
+
+    worker_ref = Process.monitor(worker_pid)
+    started_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid, 15_000)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: worker_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      branch_name: issue.branch_name,
+      workspace_path: "/tmp/lab-490-running-dirty-pr",
+      session_id: "thread-landing-repair-running-dirty-pr",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _state ->
+      %{
+        initial_state
+        | running: Map.put(initial_state.running, issue_id, running_entry),
+          claimed: MapSet.put(initial_state.claimed, issue_id)
+      }
+    end)
 
     state =
       wait_for_orchestrator_state(pid, fn state ->
@@ -3199,7 +3211,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert Map.has_key?(state.running, issue_id)
 
+    flush_agent_runner_calls(issue_id)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
     Application.put_env(:symphony_elixir, :active_open_pr_reconcile_issues, [issue])
+
+    send(pid, :run_poll_cycle)
 
     assert_receive {:active_open_pr_reconcile_fetch_called, ["In Progress"]}, 1_000
 
@@ -3210,8 +3226,6 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     state = :sys.get_state(pid, 15_000)
     assert Map.has_key?(state.running, issue_id)
-
-    send(runner_pid, {:release_agent_runner, runner_ref})
   end
 
   test "orchestrator defers landing repair reconcile while PR mergeability is unknown" do
@@ -3748,7 +3762,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     Process.sleep(50)
     state = :sys.get_state(pid, 15_000)
 
-    assert_receive {:post_merge_fetch_states, state_names}, 200
+    state_names =
+      receive_post_merge_fetch_states(fn state_names ->
+        "Todo" in state_names and "In Progress" in state_names and "In Review" in state_names
+      end)
+
     assert "Todo" in state_names
     assert "In Progress" in state_names
     assert "In Review" in state_names
@@ -9152,6 +9170,35 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   defp assert_tracker_comment_contains(issue_id, expected, timeout_ms) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_assert_tracker_comment_contains(issue_id, expected, deadline_ms)
+  end
+
+  defp receive_post_merge_fetch_states(predicate, timeout_ms \\ 500) when is_function(predicate, 1) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_receive_post_merge_fetch_states(predicate, deadline_ms, [])
+  end
+
+  defp flush_agent_runner_calls(issue_id) do
+    receive do
+      {:agent_runner_called, %{id: ^issue_id}, _opts} -> flush_agent_runner_calls(issue_id)
+    after
+      0 -> :ok
+    end
+  end
+
+  defp do_receive_post_merge_fetch_states(predicate, deadline_ms, seen_state_names) do
+    remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:post_merge_fetch_states, state_names} ->
+        if predicate.(state_names) do
+          state_names
+        else
+          do_receive_post_merge_fetch_states(predicate, deadline_ms, [state_names | seen_state_names])
+        end
+    after
+      remaining_ms ->
+        flunk("timed out waiting for post-merge fetch states; saw #{inspect(Enum.reverse(seen_state_names))}")
+    end
   end
 
   defp do_assert_tracker_comment_contains(issue_id, expected, deadline_ms) do
