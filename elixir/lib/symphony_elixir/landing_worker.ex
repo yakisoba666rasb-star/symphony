@@ -38,11 +38,45 @@ defmodule SymphonyElixir.LandingWorker do
     "landing-checks-failing",
     "landing-needs-review",
     "landing-draft",
-    "landing-stale-pr"
+    "landing-stale-pr",
+    "landing-stale-runtime"
   ]
 
   @spec execute(Config.Schema.t(), module(), [map()]) :: execution_result()
   def execute(settings, tracker, queue), do: execute(settings, tracker, queue, runtime_deps())
+
+  @spec block_runtime_stale(Config.Schema.t(), module(), [map()], map()) :: execution_result()
+  def block_runtime_stale(settings, tracker, queue, freshness) when is_list(queue) and is_map(freshness) do
+    result = empty_result(settings)
+
+    cond do
+      not settings.landing.enabled ->
+        result
+
+      not settings.landing.execute_enabled ->
+        result
+
+      not module_exports?(tracker, :update_issue_state, 2) ->
+        Logger.warning("Skipping stale runtime landing block; #{inspect(tracker)} does not export update_issue_state/2")
+        %{result | errors: result.errors + 1}
+
+      not module_exports?(tracker, :create_comment, 2) ->
+        Logger.warning("Skipping stale runtime landing block; #{inspect(tracker)} does not export create_comment/2")
+        %{result | errors: result.errors + 1}
+
+      true ->
+        queue
+        |> Enum.filter(&valid_landing_issue_entry?/1)
+        |> Enum.take(settings.landing.max_per_run)
+        |> Enum.reduce(result, fn entry, acc ->
+          entry
+          |> block_runtime_stale_entry(tracker, settings, freshness)
+          |> merge_execution_result(acc)
+        end)
+    end
+  end
+
+  def block_runtime_stale(settings, tracker, _queue, freshness), do: block_runtime_stale(settings, tracker, [], freshness)
 
   @spec execute(Config.Schema.t(), module(), [map()], deps()) :: execution_result()
   def execute(settings, tracker, queue, deps) when is_list(queue) do
@@ -210,6 +244,9 @@ defmodule SymphonyElixir.LandingWorker do
   end
 
   defp ready_queue_entry?(_entry), do: false
+
+  defp valid_landing_issue_entry?(%{} = entry), do: valid_string?(Map.get(entry, :issue_id))
+  defp valid_landing_issue_entry?(_entry), do: false
 
   defp handle_non_ready_entry(%{} = entry, settings, tracker) do
     result = empty_result(settings)
@@ -497,6 +534,9 @@ defmodule SymphonyElixir.LandingWorker do
       reason_matches?(reason, ["closed", "head branch", "head sha"]) ->
         "landing-stale-pr"
 
+      reason_matches?(reason, ["stale", "runtime"]) ->
+        "landing-stale-runtime"
+
       true ->
         nil
     end
@@ -525,6 +565,40 @@ defmodule SymphonyElixir.LandingWorker do
 
   defp repair_entry(entry, reason) do
     RepairEntry.new!(entry, reason)
+  end
+
+  defp block_runtime_stale_entry(entry, tracker, settings, freshness) do
+    result = empty_result(settings)
+    reason = runtime_stale_reason(freshness)
+
+    Logger.warning("Blocking Approved to Land item #{entry_context(entry)} because runtime is not fresh: #{reason}")
+
+    case move_issue_state(tracker, entry, settings.landing.blocked_state) do
+      :ok ->
+        label_result = add_blocked_labels(tracker, entry, reason)
+        comment = runtime_stale_comment(entry, settings, freshness, reason, label_result)
+        comment_result = create_comment(tracker, entry, comment)
+
+        result
+        |> Map.put(:blocked, 1)
+        |> add_label_error_count(label_result)
+        |> add_done_error_count(comment_result)
+
+      {:error, blocker_reason} ->
+        Logger.warning("Failed to block stale runtime landing item #{entry_context(entry)}: #{inspect(blocker_reason)}")
+
+        label_result = add_blocked_labels(tracker, entry, reason)
+
+        write_transition_failure_comment(
+          tracker,
+          entry,
+          runtime_stale_transition_failed_comment(entry, settings, freshness, reason, blocker_reason, label_result)
+        )
+
+        result
+        |> Map.put(:errors, 1)
+        |> add_label_error_count(label_result)
+    end
   end
 
   defp block_after_landing(tracker, entry, settings, reason, result) do
@@ -733,6 +807,68 @@ defmodule SymphonyElixir.LandingWorker do
     |> String.trim()
   end
 
+  defp runtime_stale_comment(entry, settings, freshness, reason, label_result) do
+    """
+    Symphony Approved to Land execution blocked
+
+    Issue: #{issue_label(entry)}
+    Planned action: #{Map.get(entry, :planned_action, "unknown")}
+    PR: #{Map.get(entry, :pr_url, "unknown")}
+    Reason: #{reason}
+    Runtime HEAD: #{freshness_value(freshness, :current_sha)}
+    Upstream: #{freshness_value(freshness, :upstream_ref)} #{freshness_value(freshness, :upstream_sha)}
+    Labels: #{label_status_line(reason, label_result)}
+
+    No merge was attempted. The running Symphony process is not fresh enough to execute landing safely. Pull the latest code, restart the runtime, then move this issue back to #{settings.landing.approval_state} after the runtime freshness check is green.
+    """
+    |> String.trim()
+  end
+
+  defp runtime_stale_transition_failed_comment(entry, settings, freshness, reason, transition_reason, label_result) do
+    """
+    Symphony Approved to Land execution could not mark the item blocked
+
+    Issue: #{issue_label(entry)}
+    Planned action: #{Map.get(entry, :planned_action, "unknown")}
+    PR: #{Map.get(entry, :pr_url, "unknown")}
+    Original blocker: #{reason}
+    Runtime HEAD: #{freshness_value(freshness, :current_sha)}
+    Upstream: #{freshness_value(freshness, :upstream_ref)} #{freshness_value(freshness, :upstream_sha)}
+    Target blocked state: #{settings.landing.blocked_state}
+    State transition error: #{format_reason(transition_reason)}
+    Labels: #{label_status_line(reason, label_result)}
+
+    No merge was attempted. Pull the latest code, restart the runtime, and reconcile the Linear state manually.
+    """
+    |> String.trim()
+  end
+
+  defp runtime_stale_reason(freshness) when is_map(freshness) do
+    status = Map.get(freshness, :status, :unknown)
+    message = Map.get(freshness, :message)
+
+    cond do
+      is_binary(message) and String.trim(message) != "" ->
+        "Symphony runtime freshness is #{status}: #{message}"
+
+      status == :stale ->
+        "Symphony runtime is stale; pull/restart required"
+
+      true ->
+        "Symphony runtime freshness is #{status}; pull/restart required before landing"
+    end
+  end
+
+  defp runtime_stale_reason(_freshness), do: "Symphony runtime freshness is unknown; pull/restart required before landing"
+
+  defp freshness_value(freshness, key) when is_map(freshness) do
+    freshness
+    |> Map.get(key)
+    |> blank_fallback("unknown")
+  end
+
+  defp freshness_value(_freshness, _key), do: "unknown"
+
   @spec runtime_deps() :: deps()
   defp runtime_deps do
     %{
@@ -779,6 +915,8 @@ defmodule SymphonyElixir.LandingWorker do
   defp blank_fallback(value, fallback) when is_binary(value) do
     if String.trim(value) == "", do: fallback, else: String.trim(value)
   end
+
+  defp blank_fallback(_value, fallback), do: fallback
 
   defp format_reason(reason), do: inspect(reason)
 

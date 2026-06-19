@@ -76,6 +76,21 @@ Execution settings:
   `In Progress`. When repair is enabled, this state must be included in
   `tracker.active_states`.
 
+Runtime freshness:
+
+- When `landing.execute_enabled` is true and the approved queue is non-empty,
+  Symphony fetches the configured upstream ref, defaults to `origin/main`, and
+  verifies that the running runtime HEAD contains it before attempting a merge.
+- A definitively stale runtime moves queued items to `landing.blocked_state`
+  with the `landing-stale-runtime` label and a comment. No merge or repair
+  dispatch is attempted.
+- An indeterminate freshness result, for example a transient `git fetch`
+  failure or a deployment without a discoverable `.git` checkout, skips merge
+  execution without changing Linear state so the next reconcile can retry.
+- Release deployments should set the `:runtime_freshness_repo_path`
+  application environment to a full, non-shallow checkout of this runtime
+  repository. Shallow or missing Git history can make freshness indeterminate.
+
 ## Operator Flow
 
 1. Symphony moves completed PR handoffs to `In Review`.
@@ -178,6 +193,9 @@ security, data migration, or API-contract judgment. It must not merge the PR.
 Symphony should fail closed:
 
 - stale plan: move the issue to `Blocked` with the stale evidence reason
+- stale runtime: move the issue to `Blocked` with the runtime freshness evidence
+- unknown runtime freshness: do not merge and do not mutate Linear state; retry
+  on the next landing reconcile
 - ambiguous PR lookup: move to `Blocked`
 - failed checks or requested changes: move back to `In Review` or `Blocked`
 - conflict repair cannot complete: move to `Blocked`

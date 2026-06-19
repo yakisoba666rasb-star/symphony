@@ -18,6 +18,7 @@ defmodule SymphonyElixir.Orchestrator do
     RepositoryRoutes,
     RetryPolicy,
     ReviewRunner,
+    RuntimeFreshness,
     StatusDashboard,
     Tracker,
     Workspace,
@@ -37,7 +38,8 @@ defmodule SymphonyElixir.Orchestrator do
     "landing-checks-failing",
     "landing-needs-review",
     "landing-draft",
-    "landing-stale-pr"
+    "landing-stale-pr",
+    "landing-stale-runtime"
   ]
   @empty_codex_totals %{
     input_tokens: 0,
@@ -78,6 +80,7 @@ defmodule SymphonyElixir.Orchestrator do
       last_review_rework_sync_ms: nil,
       last_dirty_workspace_cleanup_ms: nil,
       last_dirty_workspace_cleanup: nil,
+      runtime_freshness: nil,
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -103,6 +106,7 @@ defmodule SymphonyElixir.Orchestrator do
       tick_token: nil,
       last_dirty_workspace_cleanup_ms: now_ms,
       last_dirty_workspace_cleanup: nil,
+      runtime_freshness: runtime_freshness(false),
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil
     }
@@ -596,6 +600,53 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp landing_worker_module do
     Application.get_env(:symphony_elixir, :landing_worker, LandingWorker)
+  end
+
+  defp runtime_freshness(fetch?) do
+    case Application.get_env(:symphony_elixir, :runtime_freshness_check) do
+      fun when is_function(fun, 1) ->
+        fun.(fetch?)
+
+      fun when is_function(fun, 0) ->
+        fun.()
+
+      module when is_atom(module) and not is_nil(module) ->
+        module.check(fetch: fetch?)
+
+      _ ->
+        RuntimeFreshness.check(fetch: fetch?)
+    end
+  end
+
+  defp runtime_freshness_message(freshness) when is_map(freshness) do
+    status = runtime_freshness_status(freshness)
+    message = map_value(freshness, ["message", :message])
+    current_sha = map_value(freshness, ["current_sha", :current_sha])
+    upstream_ref = map_value(freshness, ["upstream_ref", :upstream_ref])
+    upstream_sha = map_value(freshness, ["upstream_sha", :upstream_sha])
+
+    [
+      "status=#{status}",
+      "current=#{current_sha || "unknown"}",
+      "upstream=#{upstream_ref || "unknown"} #{upstream_sha || "unknown"}",
+      message
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" ")
+  end
+
+  defp runtime_freshness_message(other), do: inspect(other)
+
+  defp runtime_freshness_status(freshness) when is_map(freshness) do
+    freshness
+    |> map_value(["status", :status])
+    |> runtime_freshness_status()
+  end
+
+  defp runtime_freshness_status(status) do
+    status
+    |> to_string()
+    |> String.downcase()
   end
 
   defp github_issue_intake_adapter do
@@ -1267,7 +1318,8 @@ defmodule SymphonyElixir.Orchestrator do
 
     if landing_plan_due?(state, settings) do
       result = LandingPlanner.reconcile(settings, tracker_module(), github_pr_lookup_module())
-      execution_result = landing_worker_module().execute(settings, tracker_module(), result.queue)
+      freshness = landing_runtime_freshness(settings, result.queue, state.runtime_freshness)
+      execution_result = run_landing_execution(settings, result.queue, freshness)
 
       if result.inspected > 0 or result.errors > 0 do
         Logger.info(
@@ -1290,9 +1342,65 @@ defmodule SymphonyElixir.Orchestrator do
       |> dispatch_landing_repair_requests(execution_result)
       |> Map.put(:last_landing_plan_ms, System.monotonic_time(:millisecond))
       |> Map.put(:landing_queue, result.queue)
+      |> Map.put(:runtime_freshness, freshness)
     else
       state
     end
+  end
+
+  defp run_landing_execution(settings, queue, freshness) do
+    case landing_execution_action(settings, queue, freshness) do
+      :execute ->
+        landing_worker_module().execute(settings, tracker_module(), queue)
+
+      :block ->
+        block_stale_landing_execution(settings, queue, freshness)
+
+      :skip ->
+        skip_indeterminate_landing_execution(settings, queue, freshness)
+    end
+  end
+
+  defp landing_runtime_freshness(%{landing: %{execute_enabled: true}}, [_entry | _rest], _cached) do
+    runtime_freshness(true)
+  end
+
+  defp landing_runtime_freshness(_settings, _queue, nil), do: runtime_freshness(false)
+  defp landing_runtime_freshness(_settings, _queue, cached), do: cached
+
+  defp landing_execution_action(%{landing: %{execute_enabled: false}}, _queue, _freshness), do: :execute
+  defp landing_execution_action(_settings, [], _freshness), do: :execute
+
+  defp landing_execution_action(_settings, _queue, freshness) do
+    case runtime_freshness_status(freshness) do
+      "fresh" ->
+        :execute
+
+      "stale" ->
+        Logger.warning("Blocking Approved to Land execution because runtime is stale: #{runtime_freshness_message(freshness)}")
+        :block
+
+      _unknown ->
+        Logger.warning("Skipping Approved to Land execution because runtime freshness is unknown: #{runtime_freshness_message(freshness)}")
+        :skip
+    end
+  end
+
+  defp block_stale_landing_execution(settings, queue, freshness) do
+    LandingWorker.block_runtime_stale(settings, tracker_module(), queue, freshness)
+  end
+
+  defp skip_indeterminate_landing_execution(settings, _queue, _freshness) do
+    %{
+      enabled: settings.landing.enabled and settings.landing.execute_enabled,
+      attempted: 0,
+      merged: 0,
+      blocked: 0,
+      repair_requested: 0,
+      repair_entries: [],
+      skipped: 0,
+      errors: 0
+    }
   end
 
   defp landing_plan_due?(_state, %{landing: %{enabled: false}}), do: false
@@ -1368,6 +1476,7 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       not candidate_issue?(issue, active_states, terminal_states) ->
         Logger.info("Skipping immediate landing repair dispatch; issue is not active/routable: #{issue_context(issue)} state=#{inspect(issue.state)}")
+        comment_landing_repair_dispatch_skipped(issue, "issue is not active/routable", pr)
         state
 
       MapSet.member?(state.claimed, issue.id) or Map.has_key?(state.running, issue.id) or Map.has_key?(state.blocked, issue.id) ->
@@ -1380,10 +1489,12 @@ defmodule SymphonyElixir.Orchestrator do
             "pr=#{pr_url(pr)} mergeability=#{inspect(pr_merge_state(pr))}"
         )
 
+        comment_landing_repair_dispatch_deferred(issue, "PR mergeability is still pending", pr)
         state
 
       not landing_repair_dispatch_capacity?(state, issue) ->
         Logger.info("Skipping immediate landing repair dispatch; no worker capacity for #{issue_context(issue)}")
+        comment_landing_repair_dispatch_deferred(issue, "no worker capacity is currently available", pr)
         state
 
       true ->
@@ -1393,6 +1504,42 @@ defmodule SymphonyElixir.Orchestrator do
         )
 
         do_dispatch_issue(state, issue, nil, nil, put_landing_repair_prompt([], issue, pr))
+    end
+  end
+
+  defp comment_landing_repair_dispatch_skipped(%Issue{} = issue, reason, pr) do
+    comment_landing_repair_dispatch_status(issue, "Symphony Approved to Land repair dispatch skipped", reason, pr)
+  end
+
+  defp comment_landing_repair_dispatch_deferred(%Issue{} = issue, reason, pr) do
+    comment_landing_repair_dispatch_status(issue, "Symphony Approved to Land repair dispatch deferred", reason, pr)
+  end
+
+  defp comment_landing_repair_dispatch_status(%Issue{} = issue, title, reason, pr) do
+    module = tracker_module()
+
+    if module_exports?(module, :create_comment, 2) do
+      body =
+        """
+        #{title}
+
+        Issue: #{issue.identifier || issue.id}
+        PR: #{pr_url(pr)}
+        Reason: #{reason}
+        Mergeability: #{pr_merge_state(pr) || "unknown"}
+
+        The repair request was recorded, but no implementation worker was started in this poll cycle. Symphony will re-check the issue on the next poll; if this message repeats, restart the runtime after pulling the latest code.
+        """
+        |> String.trim()
+
+      case module.create_comment(issue.id, body) do
+        :ok -> :ok
+        {:ok, _value} -> :ok
+        {:error, comment_reason} -> Logger.warning("Failed to comment on landing repair dispatch status for #{issue_context(issue)}: #{inspect(comment_reason)}")
+        other -> Logger.warning("Unexpected landing repair dispatch status comment result for #{issue_context(issue)}: #{inspect(other)}")
+      end
+    else
+      Logger.debug("Skipping landing repair dispatch status comment for #{issue_context(issue)}; tracker does not support comments")
     end
   end
 
@@ -5398,6 +5545,7 @@ defmodule SymphonyElixir.Orchestrator do
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        dirty_workspace_cleanup: Map.get(state, :last_dirty_workspace_cleanup),
+       runtime_freshness: Map.get(state, :runtime_freshness),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),

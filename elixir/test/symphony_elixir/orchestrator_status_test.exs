@@ -83,6 +83,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       :ok
     end
+
+    def add_issue_labels(issue_id, labels) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:landing_labels_added, issue_id, labels})
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
+
+    def remove_issue_labels(_issue_id, _labels), do: :ok
   end
 
   defmodule FakeLandingWorker do
@@ -1295,6 +1309,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
     previous_tracker = Application.get_env(:symphony_elixir, :tracker_module)
     previous_worker = Application.get_env(:symphony_elixir, :landing_worker)
+    previous_runtime_freshness = Application.get_env(:symphony_elixir, :runtime_freshness_check)
     previous_comment_recipient = Application.get_env(:symphony_elixir, :tracker_comment_recipient)
     previous_landing_issues = Application.get_env(:symphony_elixir, :landing_planner_issues)
     orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
@@ -1318,6 +1333,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       if is_nil(previous_worker),
         do: Application.delete_env(:symphony_elixir, :landing_worker),
         else: Application.put_env(:symphony_elixir, :landing_worker, previous_worker)
+
+      if is_nil(previous_runtime_freshness),
+        do: Application.delete_env(:symphony_elixir, :runtime_freshness_check),
+        else: Application.put_env(:symphony_elixir, :runtime_freshness_check, previous_runtime_freshness)
 
       if is_nil(previous_comment_recipient),
         do: Application.delete_env(:symphony_elixir, :tracker_comment_recipient),
@@ -1351,6 +1370,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     Application.put_env(:symphony_elixir, :github_pr_lookup, FakeLandingPrLookup)
     Application.put_env(:symphony_elixir, :tracker_module, FakeLandingTracker)
     Application.put_env(:symphony_elixir, :landing_worker, FakeLandingWorker)
+    Application.put_env(:symphony_elixir, :runtime_freshness_check, fresh_runtime_check())
     Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
     Application.put_env(:symphony_elixir, :landing_planner_issues, [issue])
 
@@ -1371,6 +1391,201 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_receive {:landing_fetch_states, ["Approved to Land"]}, 200
   end
 
+  test "Approved to Land execution blocks instead of merging when runtime is stale" do
+    previous_env =
+      for key <- [
+            :github_pr_lookup,
+            :tracker_module,
+            :landing_worker,
+            :landing_planner_issues,
+            :runtime_freshness_check,
+            :tracker_comment_recipient
+          ],
+          do: {key, Application.get_env(:symphony_elixir, key)}
+
+    on_exit(fn ->
+      Enum.each(previous_env, fn
+        {key, nil} -> Application.delete_env(:symphony_elixir, key)
+        {key, value} -> Application.put_env(:symphony_elixir, key, value)
+      end)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true,
+      landing_blocked_state: "Merge Blocked",
+      poll_interval_ms: 50,
+      landing_interval_ms: 1_000,
+      repository_default: "octo/repo"
+    )
+
+    issue = %Issue{
+      id: "issue-landing-stale-runtime",
+      identifier: "LAB-STALE",
+      title: "Ready but runtime stale",
+      state: "Approved to Land",
+      branch_name: "lab-stale-runtime"
+    }
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeLandingPrLookup)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeLandingTracker)
+    Application.put_env(:symphony_elixir, :landing_worker, FakeLandingWorker)
+    Application.put_env(:symphony_elixir, :landing_planner_issues, [issue])
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    Application.put_env(:symphony_elixir, :runtime_freshness_check, fn fetch? ->
+      send(self(), {:runtime_freshness_checked, fetch?})
+
+      %{
+        status: :stale,
+        checked_at: DateTime.utc_now(),
+        repo_path: "/repo",
+        current_sha: "1111111111111111111111111111111111111111",
+        upstream_ref: "origin/main",
+        upstream_sha: "2222222222222222222222222222222222222222",
+        message: "runtime HEAD does not contain origin/main; pull/restart required"
+      }
+    end)
+
+    state = Orchestrator.plan_approved_landings_for_test(%Orchestrator.State{})
+
+    assert_receive {:runtime_freshness_checked, true}
+    assert_receive {:landing_fetch_states, ["Approved to Land"]}
+    assert_receive {:landing_pr_lookup, "octo/repo", "LAB-STALE", "lab-stale-runtime"}
+    assert_receive {:landing_comment, "issue-landing-stale-runtime", dry_run_body}
+    assert dry_run_body =~ "Symphony Approved to Land dry-run plan"
+
+    assert_receive {:landing_state_update, "issue-landing-stale-runtime", "Merge Blocked"}
+    assert_receive {:landing_labels_added, "issue-landing-stale-runtime", labels}
+    assert "landing-blocked" in labels
+    assert "landing-stale-runtime" in labels
+    assert_receive {:landing_comment, "issue-landing-stale-runtime", stale_body}
+    assert stale_body =~ "Symphony Approved to Land execution blocked"
+    assert stale_body =~ "Runtime HEAD: 1111111111111111111111111111111111111111"
+    assert stale_body =~ "origin/main 2222222222222222222222222222222222222222"
+    assert stale_body =~ "Pull the latest code, restart the runtime"
+
+    refute_receive {:landing_worker_execute, _enabled, _count}, 100
+    assert %{status: :stale} = state.runtime_freshness
+  end
+
+  test "Approved to Land execution skips non-destructively when runtime freshness is unknown" do
+    previous_env =
+      for key <- [
+            :github_pr_lookup,
+            :tracker_module,
+            :landing_worker,
+            :landing_planner_issues,
+            :runtime_freshness_check,
+            :tracker_comment_recipient
+          ],
+          do: {key, Application.get_env(:symphony_elixir, key)}
+
+    on_exit(fn ->
+      Enum.each(previous_env, fn
+        {key, nil} -> Application.delete_env(:symphony_elixir, key)
+        {key, value} -> Application.put_env(:symphony_elixir, key, value)
+      end)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true,
+      landing_blocked_state: "Merge Blocked",
+      poll_interval_ms: 50,
+      landing_interval_ms: 1_000,
+      repository_default: "octo/repo"
+    )
+
+    issue = %Issue{
+      id: "issue-landing-unknown-runtime",
+      identifier: "LAB-UNKNOWN",
+      title: "Ready but runtime freshness unknown",
+      state: "Approved to Land",
+      branch_name: "lab-unknown-runtime"
+    }
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeLandingPrLookup)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeLandingTracker)
+    Application.put_env(:symphony_elixir, :landing_worker, FakeLandingWorker)
+    Application.put_env(:symphony_elixir, :landing_planner_issues, [issue])
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    Application.put_env(:symphony_elixir, :runtime_freshness_check, fn fetch? ->
+      send(self(), {:runtime_freshness_checked, fetch?})
+
+      %{
+        status: :unknown,
+        checked_at: DateTime.utc_now(),
+        repo_path: nil,
+        current_sha: nil,
+        upstream_ref: "origin/main",
+        upstream_sha: nil,
+        message: "could not discover a Git repository for the running runtime"
+      }
+    end)
+
+    state = Orchestrator.plan_approved_landings_for_test(%Orchestrator.State{})
+
+    assert_receive {:runtime_freshness_checked, true}
+    assert_receive {:landing_fetch_states, ["Approved to Land"]}
+    assert_receive {:landing_pr_lookup, "octo/repo", "LAB-UNKNOWN", "lab-unknown-runtime"}
+    assert_receive {:landing_comment, "issue-landing-unknown-runtime", dry_run_body}
+    assert dry_run_body =~ "Symphony Approved to Land dry-run plan"
+
+    refute_receive {:landing_state_update, "issue-landing-unknown-runtime", _state}, 100
+    refute_receive {:landing_labels_added, "issue-landing-unknown-runtime", _labels}, 100
+    refute_receive {:landing_worker_execute, _enabled, _count}, 100
+    assert %{status: :unknown} = state.runtime_freshness
+  end
+
+  test "Approved to Land planning does not fetch runtime freshness for an empty queue" do
+    previous_env =
+      for key <- [
+            :github_pr_lookup,
+            :tracker_module,
+            :landing_worker,
+            :landing_planner_issues,
+            :runtime_freshness_check,
+            :tracker_comment_recipient
+          ],
+          do: {key, Application.get_env(:symphony_elixir, key)}
+
+    on_exit(fn ->
+      Enum.each(previous_env, fn
+        {key, nil} -> Application.delete_env(:symphony_elixir, key)
+        {key, value} -> Application.put_env(:symphony_elixir, key, value)
+      end)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true,
+      poll_interval_ms: 50,
+      landing_interval_ms: 1_000,
+      repository_default: "octo/repo"
+    )
+
+    cached_freshness = fresh_runtime_check().(false)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeLandingPrLookup)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeLandingTracker)
+    Application.put_env(:symphony_elixir, :landing_worker, FakeLandingWorker)
+    Application.put_env(:symphony_elixir, :landing_planner_issues, [])
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    Application.put_env(:symphony_elixir, :runtime_freshness_check, fn fetch? ->
+      send(self(), {:runtime_freshness_checked, fetch?})
+      cached_freshness
+    end)
+
+    state = Orchestrator.plan_approved_landings_for_test(%Orchestrator.State{runtime_freshness: cached_freshness})
+
+    assert_receive {:landing_fetch_states, ["Approved to Land"]}
+    refute_receive {:runtime_freshness_checked, _fetch?}, 100
+    assert state.runtime_freshness == cached_freshness
+  end
+
   test "Approved to Land repair requests immediately dispatch repair workers" do
     previous_env =
       for key <- [
@@ -1380,6 +1595,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
             :landing_planner_issues,
             :landing_worker_result,
             :landing_repair_refreshed_issues,
+            :runtime_freshness_check,
             :agent_runner,
             :agent_runner_recipient,
             :tracker_comment_recipient
@@ -1445,6 +1661,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     Application.put_env(:symphony_elixir, :landing_worker, FakeLandingWorker)
     Application.put_env(:symphony_elixir, :landing_planner_issues, [approved_issue])
     Application.put_env(:symphony_elixir, :landing_repair_refreshed_issues, [refreshed_issue])
+    Application.put_env(:symphony_elixir, :runtime_freshness_check, fresh_runtime_check())
     Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
     Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
     Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
@@ -1481,6 +1698,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
             :landing_planner_issues,
             :landing_worker_result,
             :landing_repair_refreshed_issues,
+            :runtime_freshness_check,
             :agent_runner,
             :agent_runner_recipient,
             :tracker_comment_recipient
@@ -1534,19 +1752,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     repair_entries =
       Enum.map(issue_specs, fn {issue_id, identifier, mergeability} ->
-        %{
-          issue_id: issue_id,
-          issue_identifier: identifier,
-          title: "Repair dispatch pending mergeability",
-          repository: "octo/repo",
-          pr_url: "https://github.com/octo/repo/pull/206",
-          pr_state: "OPEN",
-          draft: false,
-          mergeability: mergeability,
-          head_branch: "#{String.downcase(identifier)}-pending-mergeability",
-          head_sha: "abc123",
-          repair_reason: "PR mergeability is #{inspect(mergeability)}"
-        }
+        RepairEntry.new!(
+          %{
+            issue_id: issue_id,
+            issue_identifier: identifier,
+            title: "Repair dispatch pending mergeability",
+            repository: "octo/repo",
+            pr_url: "https://github.com/octo/repo/pull/206",
+            pr_state: "OPEN",
+            draft: false,
+            mergeability: mergeability,
+            head_branch: "#{String.downcase(identifier)}-pending-mergeability",
+            head_sha: "abc123"
+          },
+          "PR mergeability is #{inspect(mergeability)}"
+        )
       end)
 
     Application.put_env(:symphony_elixir, :github_pr_lookup, FakeLandingPrLookup)
@@ -1554,6 +1774,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     Application.put_env(:symphony_elixir, :landing_worker, FakeLandingWorker)
     Application.put_env(:symphony_elixir, :landing_planner_issues, approved_issues)
     Application.put_env(:symphony_elixir, :landing_repair_refreshed_issues, refreshed_issues)
+    Application.put_env(:symphony_elixir, :runtime_freshness_check, fresh_runtime_check())
     Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
     Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
     Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
@@ -1586,6 +1807,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
             :landing_planner_issues,
             :landing_worker_result,
             :landing_repair_refreshed_issues,
+            :runtime_freshness_check,
             :agent_runner,
             :agent_runner_recipient,
             :tracker_comment_recipient
@@ -1641,6 +1863,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     Application.put_env(:symphony_elixir, :landing_worker, FakeLandingWorker)
     Application.put_env(:symphony_elixir, :landing_planner_issues, [approved_issue])
     Application.put_env(:symphony_elixir, :landing_repair_refreshed_issues, [%{id: issue_id, state: "In Progress"}])
+    Application.put_env(:symphony_elixir, :runtime_freshness_check, fresh_runtime_check())
     Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
     Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
     Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
@@ -2680,7 +2903,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         receive do
           :stop -> :ok
         after
-          5_000 -> :ok
+          30_000 -> :ok
         end
       end)
 
@@ -4104,6 +4327,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       assert "landing-needs-review" in labels
       assert "landing-draft" in labels
       assert "landing-stale-pr" in labels
+      assert "landing-stale-runtime" in labels
     end
 
     assert_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", close_comment}, 200
@@ -9555,6 +9779,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         Process.sleep(5)
         do_wait_for_snapshot(pid, predicate, deadline_ms)
       end
+    end
+  end
+
+  defp fresh_runtime_check do
+    fn _fetch? ->
+      %{
+        status: :fresh,
+        checked_at: DateTime.utc_now(),
+        repo_path: "/repo",
+        current_sha: "2222222222222222222222222222222222222222",
+        upstream_ref: "origin/main",
+        upstream_sha: "2222222222222222222222222222222222222222",
+        message: nil
+      }
     end
   end
 
