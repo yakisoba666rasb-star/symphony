@@ -2611,7 +2611,8 @@ defmodule SymphonyElixir.CoreTest do
       assert dirty_status =~ "agent-output.txt"
       assert File.dir?(quarantine_workspace)
       refute File.exists?(Path.join(workspace, "agent-output.txt"))
-      assert File.exists?(Path.join(workspace_root, "MT-DIRTY-RUNNER.dirty-reason.log"))
+      assert File.exists?(Path.join(quarantine_workspace, ".dirty-reason.log"))
+      refute File.exists?(Path.join(workspace_root, "MT-DIRTY-RUNNER.dirty-reason.log"))
       assert File.read!(trace_file) =~ "RUN"
     after
       System.delete_env("SYMP_TEST_CODEX_TRACE")

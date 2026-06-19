@@ -1476,14 +1476,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert File.read!(Path.join(workspace, "README.md")) == "first\n"
       refute File.exists?(Path.join(workspace, "local-progress.txt"))
 
-      reason_log = Path.join(workspace_root, "MT-DIRTY.dirty-reason.log")
-      assert File.exists?(reason_log)
-      reason = File.read!(reason_log)
-      assert reason =~ "dirty workspace detected"
-      assert reason =~ "README.md"
-      assert reason =~ "local-progress.txt"
-      refute File.exists?(Path.join(workspace, "_reason.log"))
-
       [quarantined_workspace] =
         workspace_root
         |> Path.join("MT-DIRTY.dirty-*")
@@ -1493,6 +1485,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert quarantine_info.quarantine == quarantined_workspace
       assert File.read!(Path.join(quarantined_workspace, "README.md")) == "changed\n"
       assert File.read!(Path.join(quarantined_workspace, "local-progress.txt")) == "untracked\n"
+
+      reason_log = Path.join(quarantined_workspace, ".dirty-reason.log")
+      assert File.exists?(reason_log)
+      refute File.exists?(Path.join(workspace_root, "MT-DIRTY.dirty-reason.log"))
+      reason = File.read!(reason_log)
+      assert reason =~ "dirty workspace detected"
+      assert reason =~ "README.md"
+      assert reason =~ "local-progress.txt"
     after
       File.rm_rf(workspace_root)
     end
@@ -3337,6 +3337,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       trace = File.read!(trace_file)
       assert trace =~ "quarantine_workspace"
       assert trace =~ ".dirty-$(date -u +%Y%m%d-%H%M%S)"
+      assert trace =~ ~s(} > "$workspace/.dirty-reason.log")
       assert trace =~ ~s(mv "$workspace" "$quarantine_workspace")
       assert trace =~ "__SYMPHONY_WORKSPACE_QUARANTINE__"
     after
