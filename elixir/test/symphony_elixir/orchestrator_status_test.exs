@@ -1472,6 +1472,111 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert Map.has_key?(state.running, issue_id)
   end
 
+  test "Approved to Land repair dispatch defers pending PR mergeability" do
+    previous_env =
+      for key <- [
+            :github_pr_lookup,
+            :tracker_module,
+            :landing_worker,
+            :landing_planner_issues,
+            :landing_worker_result,
+            :landing_repair_refreshed_issues,
+            :agent_runner,
+            :agent_runner_recipient,
+            :tracker_comment_recipient
+          ],
+          do: {key, Application.get_env(:symphony_elixir, key)}
+
+    on_exit(fn ->
+      Enum.each(previous_env, fn
+        {key, nil} -> Application.delete_env(:symphony_elixir, key)
+        {key, value} -> Application.put_env(:symphony_elixir, key, value)
+      end)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true,
+      landing_blocked_state: "Merge Blocked",
+      landing_repair_enabled: true,
+      landing_repair_state: "In Progress",
+      poll_interval_ms: 50,
+      landing_interval_ms: 1_000,
+      repository_default: "octo/repo"
+    )
+
+    issue_specs = [
+      {"issue-landing-repair-immediate-unknown", "LAB-495", "UNKNOWN"},
+      {"issue-landing-repair-immediate-missing", "LAB-496", nil}
+    ]
+
+    approved_issues =
+      Enum.map(issue_specs, fn {issue_id, identifier, _mergeability} ->
+        %Issue{
+          id: issue_id,
+          identifier: identifier,
+          title: "Repair dispatch pending mergeability",
+          state: "Approved to Land",
+          url: "https://linear.app/example/issue/#{identifier}/pending-mergeability",
+          branch_name: "#{String.downcase(identifier)}-pending-mergeability"
+        }
+      end)
+
+    refreshed_issues =
+      Enum.map(approved_issues, fn issue ->
+        %{
+          issue
+          | state: "In Progress",
+            labels: ["landing-blocked"],
+            attachment_urls: ["https://github.com/octo/repo/pull/206"]
+        }
+      end)
+
+    repair_entries =
+      Enum.map(issue_specs, fn {issue_id, identifier, mergeability} ->
+        %{
+          issue_id: issue_id,
+          issue_identifier: identifier,
+          title: "Repair dispatch pending mergeability",
+          repository: "octo/repo",
+          pr_url: "https://github.com/octo/repo/pull/206",
+          pr_state: "OPEN",
+          draft: false,
+          mergeability: mergeability,
+          head_branch: "#{String.downcase(identifier)}-pending-mergeability",
+          head_sha: "abc123",
+          repair_reason: "PR mergeability is #{inspect(mergeability)}"
+        }
+      end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeLandingPrLookup)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeLandingTracker)
+    Application.put_env(:symphony_elixir, :landing_worker, FakeLandingWorker)
+    Application.put_env(:symphony_elixir, :landing_planner_issues, approved_issues)
+    Application.put_env(:symphony_elixir, :landing_repair_refreshed_issues, refreshed_issues)
+    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
+    Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    Application.put_env(:symphony_elixir, :landing_worker_result, %{
+      attempted: 2,
+      blocked: 2,
+      repair_requested: 2,
+      repair_entries: repair_entries
+    })
+
+    state = Orchestrator.plan_approved_landings_for_test(%Orchestrator.State{})
+
+    assert_receive {:landing_worker_execute, true, 2}
+    assert_receive {:landing_repair_issue_refresh, issue_ids}
+
+    assert Enum.sort(issue_ids) ==
+             Enum.sort(Enum.map(issue_specs, fn {issue_id, _identifier, _mergeability} -> issue_id end))
+
+    refute_receive {:agent_runner_called, _issue, _opts}, 300
+    assert state.running == %{}
+  end
+
   test "Approved to Land repair dispatch skips non-Issue refresh results" do
     previous_env =
       for key <- [
