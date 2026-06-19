@@ -198,6 +198,7 @@ defmodule SymphonyElixir.LandingWorkerTest do
              merged: 0,
              blocked: 0,
              repair_requested: 0,
+             repair_entries: [],
              skipped: 0,
              errors: 0
            }
@@ -220,6 +221,7 @@ defmodule SymphonyElixir.LandingWorkerTest do
              merged: 0,
              blocked: 0,
              repair_requested: 0,
+             repair_entries: [],
              skipped: 0,
              errors: 0
            }
