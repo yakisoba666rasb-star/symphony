@@ -841,6 +841,18 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       :ok
     end
+
+    def remove_issue_labels(issue_id, labels) do
+      case Application.get_env(:symphony_elixir, :tracker_state_update_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:tracker_remove_labels_called, issue_id, labels})
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
   end
 
   defmodule FakeTrackerAlreadyDoneSourceIssue do
@@ -3126,6 +3138,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_receive {:tracker_state_update_called, "issue-body-linked-merged", "Done"}, 200
     assert_receive {:tracker_state_update_called, "issue-identifier-url-only", "Done"}, 200
 
+    for issue_id <- [
+          "issue-review-merged",
+          "issue-progress-merged",
+          "issue-body-linked-merged",
+          "issue-identifier-url-only"
+        ] do
+      assert_receive {:tracker_remove_labels_called, ^issue_id, labels}, 200
+      assert "landing-blocked" in labels
+      assert "landing-conflict" in labels
+      assert "landing-checks-failing" in labels
+      assert "landing-needs-review" in labels
+      assert "landing-draft" in labels
+      assert "landing-stale-pr" in labels
+    end
+
     assert_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", close_comment}, 200
     assert close_comment =~ "https://github.com/octo/repo/pull/201"
     assert close_comment =~ "MT-381"
@@ -3223,6 +3250,19 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              state.done_source_github_issue_closes,
              {"issue-already-done-source", "https://github.com/octo/repo/issues/381"}
            )
+
+    flush_done_source_close_messages = fn flush ->
+      receive do
+        {:post_merge_fetch_states, _state_names} -> flush.(flush)
+        {:github_issue_closed_at_called, _repo, _issue_url} -> flush.(flush)
+        {:merged_issue_pr_lookup_called, _identifier, _issue_url, _branch_name} -> flush.(flush)
+        {:github_issue_close_called, _repo, _issue_url, _comment} -> flush.(flush)
+      after
+        0 -> :ok
+      end
+    end
+
+    flush_done_source_close_messages.(flush_done_source_close_messages)
 
     due_state = %{state | last_done_sync_ms: nil}
     _state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(due_state)

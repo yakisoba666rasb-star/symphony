@@ -195,14 +195,17 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert :ok = SymphonyElixir.Tracker.create_comment("issue-1", "comment")
     assert :ok = SymphonyElixir.Tracker.update_issue_state("issue-1", "Done")
     assert :ok = SymphonyElixir.Tracker.add_issue_labels("issue-1", ["landing-blocked"])
+    assert :ok = SymphonyElixir.Tracker.remove_issue_labels("issue-1", ["landing-blocked"])
     assert_receive {:memory_tracker_comment, "issue-1", "comment"}
     assert_receive {:memory_tracker_state_update, "issue-1", "Done"}
     assert_receive {:memory_tracker_labels, "issue-1", ["landing-blocked"]}
+    assert_receive {:memory_tracker_remove_labels, "issue-1", ["landing-blocked"]}
 
     Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
     assert :ok = Memory.create_comment("issue-1", "quiet")
     assert :ok = Memory.update_issue_state("issue-1", "Quiet")
     assert :ok = Memory.add_issue_labels("issue-1", ["quiet"])
+    assert :ok = Memory.remove_issue_labels("issue-1", ["quiet"])
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
     assert SymphonyElixir.Tracker.adapter() == Adapter
@@ -283,7 +286,15 @@ defmodule SymphonyElixir.ExtensionsTest do
              "issue" => %{"team" => %{"states" => %{"nodes" => [%{"id" => "state-1"}]}}}
            }
          }},
-        {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}}
+        {:ok,
+         %{
+           "data" => %{
+             "issueUpdate" => %{
+               "success" => true,
+               "issue" => %{"id" => "issue-1", "identifier" => "LAB-1", "state" => %{"id" => "state-1", "name" => "Done", "type" => "completed"}}
+             }
+           }
+         }}
       ]
     )
 
@@ -294,6 +305,41 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert_receive {:graphql_called, update_issue_query, %{issueId: "issue-1", stateId: "state-1"}}
 
     assert update_issue_query =~ "issueUpdate"
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{"team" => %{"states" => %{"nodes" => [%{"id" => "state-done"}]}}}
+           }
+         }},
+        {:ok,
+         %{
+           "data" => %{
+             "issueUpdate" => %{
+               "success" => true,
+               "issue" => %{
+                 "id" => "issue-1",
+                 "identifier" => "LAB-1",
+                 "state" => %{"id" => "state-progress", "name" => "In Progress", "type" => "started"}
+               }
+             }
+           }
+         }}
+      ]
+    )
+
+    assert {:error,
+            {:issue_state_mismatch,
+             %{
+               expected_id: "state-done",
+               expected_name: "Done",
+               actual_id: "state-progress",
+               actual_name: "In Progress",
+               actual_type: "started"
+             }}} = Adapter.update_issue_state("issue-1", "Done")
 
     Process.put(
       {FakeLinearClient, :graphql_results},
@@ -653,6 +699,10 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     flush_graphql_calls()
 
+    assert :ok = Adapter.add_issue_labels("issue-1", ["", nil])
+    assert :ok = Adapter.remove_issue_labels("issue-1", ["", nil])
+    refute_receive {:graphql_called, _query, _variables}, 100
+
     Process.put(
       {FakeLinearClient, :graphql_results},
       [
@@ -701,6 +751,126 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert_receive {:graphql_called, update_labels_query, %{issueId: "issue-1", labelIds: label_ids}}
     assert update_labels_query =~ "SymphonyUpdateIssueLabels"
     assert label_ids == ["label-bug", "label-blocked", "label-conflict"]
+
+    flush_graphql_calls()
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "team" => %{
+                 "id" => "team-1",
+                 "labels" => %{"nodes" => []}
+               },
+               "labels" => %{
+                 "nodes" => [
+                   %{"id" => "label-bug", "name" => "Bug"},
+                   %{"id" => "label-blocked", "name" => "landing-blocked"},
+                   %{"id" => "label-conflict", "name" => "landing-conflict"}
+                 ]
+               }
+             }
+           }
+         }},
+        {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}}
+      ]
+    )
+
+    assert :ok = Adapter.remove_issue_labels("issue-1", ["landing-blocked", "landing-conflict", "landing-draft"])
+    assert_receive {:graphql_called, remove_target_query, %{issueId: "issue-1", first: 250}}
+    assert remove_target_query =~ "SymphonyIssueLabelsTarget"
+    assert_receive {:graphql_called, remove_labels_query, %{issueId: "issue-1", labelIds: ["label-bug"]}}
+    assert remove_labels_query =~ "SymphonyUpdateIssueLabels"
+
+    flush_graphql_calls()
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "team" => %{
+                 "id" => "team-1",
+                 "labels" => %{"nodes" => []}
+               },
+               "labels" => %{
+                 "nodes" => [
+                   %{"id" => "label-bug", "name" => "Bug"},
+                   %{"id" => "label-blocked", "name" => "landing-blocked"}
+                 ]
+               }
+             }
+           }
+         }},
+        {:ok, %{"data" => %{"issueUpdate" => %{"success" => false}}}}
+      ]
+    )
+
+    assert {:error, :issue_label_update_failed} = Adapter.remove_issue_labels("issue-1", ["landing-blocked"])
+    assert_receive {:graphql_called, _remove_target_query, %{issueId: "issue-1", first: 250}}
+    assert_receive {:graphql_called, _remove_labels_query, %{issueId: "issue-1", labelIds: ["label-bug"]}}
+
+    flush_graphql_calls()
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "team" => %{
+               "id" => "team-1",
+               "labels" => %{"nodes" => []}
+             },
+             "labels" => %{
+               "nodes" => [
+                 %{"id" => "label-bug", "name" => "Bug"}
+               ]
+             }
+           }
+         }
+       }}
+    )
+
+    assert :ok = Adapter.remove_issue_labels("issue-1", ["landing-blocked"])
+    assert_receive {:graphql_called, _remove_target_query, %{issueId: "issue-1", first: 250}}
+    refute_receive {:graphql_called, _remove_labels_query, %{issueId: "issue-1", labelIds: _label_ids}}, 100
+
+    flush_graphql_calls()
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "team" => %{
+                 "id" => "team-1",
+                 "labels" => %{"nodes" => []}
+               },
+               "labels" => %{
+                 "nodes" => [
+                   %{"id" => "label-bug", "name" => "Bug"},
+                   %{"id" => "label-blocked", "name" => "landing-blocked"}
+                 ]
+               }
+             }
+           }
+         }},
+        {:error, :label_update_down}
+      ]
+    )
+
+    assert {:error, :label_update_down} = Adapter.remove_issue_labels("issue-1", ["landing-blocked"])
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :label_target_down})
+    assert {:error, :label_target_down} = Adapter.remove_issue_labels("issue-1", ["landing-blocked"])
 
     Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{"issue" => nil}}})
     assert {:error, :issue_label_target_not_found} = Adapter.add_issue_labels("issue-missing", ["landing-blocked"])
