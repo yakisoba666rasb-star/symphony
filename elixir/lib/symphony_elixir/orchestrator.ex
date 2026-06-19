@@ -162,6 +162,11 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, state}
   end
 
+  def handle_info({:dirty_workspace_cleanup_completed, cleanup_result}, state) do
+    notify_dashboard()
+    {:noreply, %{state | last_dirty_workspace_cleanup: cleanup_result}}
+  end
+
   def handle_info({ref, {result, attempts}}, %{github_intake_task: %Task{ref: ref}} = state)
       when is_reference(ref) and is_map(attempts) do
     Process.demonitor(ref, [:flush])
@@ -4835,6 +4840,30 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp run_dirty_workspace_cleanup do
+    case Process.whereis(SymphonyElixir.TaskSupervisor) do
+      nil ->
+        Logger.warning("Skipping dirty workspace cleanup; task supervisor is not running")
+        dirty_workspace_cleanup_status(:error, {:error, :task_supervisor_not_running})
+
+      _pid ->
+        start_dirty_workspace_cleanup_task(self())
+    end
+  end
+
+  defp start_dirty_workspace_cleanup_task(parent) do
+    case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+           send(parent, {:dirty_workspace_cleanup_completed, do_run_dirty_workspace_cleanup()})
+         end) do
+      {:ok, _pid} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Skipping dirty workspace cleanup; failed to start cleanup task: #{inspect(reason)}")
+        dirty_workspace_cleanup_status(:error, {:error, {:task_start_failed, reason}})
+    end
+  end
+
+  defp do_run_dirty_workspace_cleanup do
     case Workspace.cleanup_dirty_workspaces() do
       {:ok, result} ->
         log_dirty_workspace_cleanup_result(result)

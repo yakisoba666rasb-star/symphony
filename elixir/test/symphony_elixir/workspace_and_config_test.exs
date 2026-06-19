@@ -1927,8 +1927,72 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert trace =~ ~s([[ "${BASH_REMATCH[1]}" < "$cutoff" ]])
       assert trace =~ ~s([[ "$dirty_workspace_name" == *.dirty-reason.log ]])
       assert trace =~ ~s(stat -c %Y "$dirty_workspace")
+      assert trace =~ ~s(stat -f %m "$dirty_workspace")
       assert trace =~ ~s([ "$dirty_reason_log_mtime" -lt "$cutoff_epoch" ])
       assert trace =~ ~s(rm -rf -- "$dirty_workspace")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace cleanup starts remote dirty cleanup for worker hosts concurrently" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-dirty-cleanup-concurrent-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+    previous_release = System.get_env("SYMP_TEST_SSH_RELEASE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+      restore_env("SYMP_TEST_SSH_RELEASE", previous_release)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      release_file = Path.join(test_root, "release")
+      fake_ssh = Path.join(test_root, "ssh")
+      local_workspace_root = Path.join(test_root, "local-workspaces")
+
+      File.mkdir_p!(test_root)
+      File.mkdir_p!(local_workspace_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("SYMP_TEST_SSH_RELEASE", release_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      release_file="${SYMP_TEST_SSH_RELEASE:?}"
+      printf 'START:%s\\n' "$*" >> "$trace_file"
+      while [ ! -f "$release_file" ]; do
+        sleep 0.05
+      done
+      printf 'END:%s\\n' "$*" >> "$trace_file"
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: local_workspace_root,
+        dirty_workspace_retention_days: 7,
+        worker_ssh_hosts: ["worker-01", "worker-02", "worker-03"]
+      )
+
+      cleanup_task = Task.async(fn -> Workspace.cleanup_dirty_workspaces(now: ~U[2026-05-26 00:00:00Z]) end)
+
+      assert wait_for_trace_count(trace_file, "START:", 3)
+      refute Task.yield(cleanup_task, 0)
+
+      File.write!(release_file, "release")
+      assert {:ok, {:ok, %{removed: [], kept: []}}} = Task.yield(cleanup_task, 2_000)
+
+      assert wait_for_trace_count(trace_file, "END:", 3)
     after
       File.rm_rf(test_root)
     end
@@ -3633,4 +3697,34 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
   defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
+
+  defp wait_for_trace_count(trace_file, prefix, expected_count, deadline_ms \\ 1_000) do
+    deadline = System.monotonic_time(:millisecond) + deadline_ms
+    do_wait_for_trace_count(trace_file, prefix, expected_count, deadline)
+  end
+
+  defp do_wait_for_trace_count(trace_file, prefix, expected_count, deadline) do
+    count =
+      case File.read(trace_file) do
+        {:ok, trace} ->
+          trace
+          |> String.split("\n", trim: true)
+          |> Enum.count(&String.starts_with?(&1, prefix))
+
+        {:error, _reason} ->
+          0
+      end
+
+    cond do
+      count >= expected_count ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        false
+
+      true ->
+        Process.sleep(20)
+        do_wait_for_trace_count(trace_file, prefix, expected_count, deadline)
+    end
+  end
 end
