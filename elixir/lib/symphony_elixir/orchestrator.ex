@@ -1344,7 +1344,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp dispatch_refreshed_landing_repair_issue(issue, %State{} = state, repair_entries_by_id) do
+  defp dispatch_refreshed_landing_repair_issue(%Issue{} = issue, %State{} = state, repair_entries_by_id) do
     case Map.fetch(repair_entries_by_id, issue.id) do
       {:ok, repair_entry} ->
         maybe_dispatch_landing_repair_request(state, issue, repair_entry)
@@ -1352,6 +1352,11 @@ defmodule SymphonyElixir.Orchestrator do
       :error ->
         state
     end
+  end
+
+  defp dispatch_refreshed_landing_repair_issue(issue, %State{} = state, _repair_entries_by_id) do
+    Logger.warning("Skipping immediate landing repair dispatch; refreshed issue is not a Linear issue: #{inspect(issue)}")
+    state
   end
 
   defp maybe_dispatch_landing_repair_request(%State{} = state, %Issue{} = issue, %{} = repair_entry) do
@@ -1386,8 +1391,9 @@ defmodule SymphonyElixir.Orchestrator do
     available_slots(state) > 0 and state_slots_available?(issue, state.running) and worker_slots_available?(state)
   end
 
-  defp valid_landing_repair_entry?(%{issue_id: issue_id}) when is_binary(issue_id) do
-    String.trim(issue_id) != ""
+  defp valid_landing_repair_entry?(%{issue_id: issue_id, pr_url: pr_url})
+       when is_binary(issue_id) and is_binary(pr_url) do
+    String.trim(issue_id) != "" and String.trim(pr_url) != ""
   end
 
   defp valid_landing_repair_entry?(_entry), do: false
