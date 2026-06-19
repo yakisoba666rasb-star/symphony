@@ -31,6 +31,63 @@ defmodule SymphonyElixir.LandingWorkerTest do
     def create_comment(_issue_id, _body), do: :ok
   end
 
+  defmodule FakeTrackerRemoveLabelsError do
+    def update_issue_state(issue_id, state_name) do
+      send(test_pid(), {:landing_state_update, issue_id, state_name})
+      :ok
+    end
+
+    def create_comment(issue_id, body) do
+      send(test_pid(), {:landing_comment, issue_id, body})
+      :ok
+    end
+
+    def remove_issue_labels(issue_id, labels) do
+      send(test_pid(), {:landing_remove_labels, issue_id, labels})
+      {:error, :label_cleanup_down}
+    end
+
+    defp test_pid, do: Application.fetch_env!(:symphony_elixir, :landing_worker_test_pid)
+  end
+
+  defmodule FakeTrackerRemoveLabelsOkTuple do
+    def update_issue_state(issue_id, state_name) do
+      send(test_pid(), {:landing_state_update, issue_id, state_name})
+      :ok
+    end
+
+    def create_comment(issue_id, body) do
+      send(test_pid(), {:landing_comment, issue_id, body})
+      :ok
+    end
+
+    def remove_issue_labels(issue_id, labels) do
+      send(test_pid(), {:landing_remove_labels, issue_id, labels})
+      {:ok, :removed}
+    end
+
+    defp test_pid, do: Application.fetch_env!(:symphony_elixir, :landing_worker_test_pid)
+  end
+
+  defmodule FakeTrackerRemoveLabelsUnexpected do
+    def update_issue_state(issue_id, state_name) do
+      send(test_pid(), {:landing_state_update, issue_id, state_name})
+      :ok
+    end
+
+    def create_comment(issue_id, body) do
+      send(test_pid(), {:landing_comment, issue_id, body})
+      :ok
+    end
+
+    def remove_issue_labels(issue_id, labels) do
+      send(test_pid(), {:landing_remove_labels, issue_id, labels})
+      :unexpected
+    end
+
+    defp test_pid, do: Application.fetch_env!(:symphony_elixir, :landing_worker_test_pid)
+  end
+
   defmodule FakeTrackerNoComment do
     def update_issue_state(_issue_id, _state_name), do: :ok
   end
@@ -531,6 +588,62 @@ defmodule SymphonyElixir.LandingWorkerTest do
     assert_receive {:landing_state_update, "issue-1", "Done"}
     assert_receive {:landing_comment, "issue-1", success_body}
     assert success_body =~ "execution completed"
+  end
+
+  test "counts merged PRs and reports cleanup failures after Done verification" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true
+    )
+
+    assert %{enabled: true, attempted: 1, merged: 1, blocked: 0, errors: 1} =
+             LandingWorker.execute(Config.settings!(), FakeTrackerRemoveLabelsError, [ready_entry()], deps())
+
+    assert_receive {:landing_state_update, "issue-1", "Landing"}
+    assert_receive {:landing_state_update, "issue-1", "Done"}
+    assert_receive {:landing_remove_labels, "issue-1", labels}
+    assert "landing-blocked" in labels
+    assert_receive {:landing_comment, "issue-1", start_body}
+    assert start_body =~ "execution started"
+    assert_receive {:landing_comment, "issue-1", success_body}
+    assert success_body =~ "execution completed"
+    assert success_body =~ "Labels: cleanup failed: :label_cleanup_down"
+  end
+
+  test "accepts successful cleanup tuples after Done verification" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true
+    )
+
+    assert %{enabled: true, attempted: 1, merged: 1, blocked: 0, errors: 0} =
+             LandingWorker.execute(Config.settings!(), FakeTrackerRemoveLabelsOkTuple, [ready_entry()], deps())
+
+    assert_receive {:landing_state_update, "issue-1", "Done"}
+    assert_receive {:landing_remove_labels, "issue-1", labels}
+    assert "landing-blocked" in labels
+    assert_receive {:landing_comment, "issue-1", start_body}
+    assert start_body =~ "execution started"
+    assert_receive {:landing_comment, "issue-1", success_body}
+    assert success_body =~ "Labels: removed landing blocking labels"
+  end
+
+  test "counts merged PRs and reports unexpected cleanup results after Done verification" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true
+    )
+
+    assert %{enabled: true, attempted: 1, merged: 1, blocked: 0, errors: 1} =
+             LandingWorker.execute(Config.settings!(), FakeTrackerRemoveLabelsUnexpected, [ready_entry()], deps())
+
+    assert_receive {:landing_state_update, "issue-1", "Done"}
+    assert_receive {:landing_remove_labels, "issue-1", labels}
+    assert "landing-blocked" in labels
+    assert_receive {:landing_comment, "issue-1", start_body}
+    assert start_body =~ "execution started"
+    assert_receive {:landing_comment, "issue-1", success_body}
+    assert success_body =~ "Labels: cleanup failed: {:linear_label_cleanup_unexpected, :unexpected}"
   end
 
   test "blocks merged PRs when Done transition verification fails after merge" do

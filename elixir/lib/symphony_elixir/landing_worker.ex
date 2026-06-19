@@ -438,27 +438,25 @@ defmodule SymphonyElixir.LandingWorker do
   end
 
   defp remove_blocked_labels(tracker, entry) do
-    cond do
-      not module_exports?(tracker, :remove_issue_labels, 2) ->
-        Logger.warning("Skipping Approved to Land blocked label cleanup for #{entry_context(entry)}; #{inspect(tracker)} does not export remove_issue_labels/2")
-        :unsupported
+    if module_exports?(tracker, :remove_issue_labels, 2) do
+      case tracker.remove_issue_labels(Map.fetch!(entry, :issue_id), @blocking_labels) do
+        :ok ->
+          :ok
 
-      true ->
-        case tracker.remove_issue_labels(Map.fetch!(entry, :issue_id), @blocking_labels) do
-          :ok ->
-            :ok
+        {:ok, _value} ->
+          :ok
 
-          {:ok, _value} ->
-            :ok
+        {:error, reason} ->
+          Logger.warning("Failed to clean Approved to Land blocked labels for #{entry_context(entry)}: #{inspect(reason)}")
+          {:error, reason}
 
-          {:error, reason} ->
-            Logger.warning("Failed to clean Approved to Land blocked labels for #{entry_context(entry)}: #{inspect(reason)}")
-            {:error, reason}
-
-          other ->
-            Logger.warning("Unexpected blocked label cleanup result for #{entry_context(entry)}: #{inspect(other)}")
-            {:error, {:linear_label_cleanup_unexpected, other}}
-        end
+        other ->
+          Logger.warning("Unexpected blocked label cleanup result for #{entry_context(entry)}: #{inspect(other)}")
+          {:error, {:linear_label_cleanup_unexpected, other}}
+      end
+    else
+      Logger.warning("Skipping Approved to Land blocked label cleanup for #{entry_context(entry)}; #{inspect(tracker)} does not export remove_issue_labels/2")
+      :unsupported
     end
   end
 

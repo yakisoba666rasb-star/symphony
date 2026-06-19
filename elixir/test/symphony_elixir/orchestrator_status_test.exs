@@ -3251,6 +3251,19 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              {"issue-already-done-source", "https://github.com/octo/repo/issues/381"}
            )
 
+    flush_done_source_close_messages = fn flush ->
+      receive do
+        {:post_merge_fetch_states, _state_names} -> flush.(flush)
+        {:github_issue_closed_at_called, _repo, _issue_url} -> flush.(flush)
+        {:merged_issue_pr_lookup_called, _identifier, _issue_url, _branch_name} -> flush.(flush)
+        {:github_issue_close_called, _repo, _issue_url, _comment} -> flush.(flush)
+      after
+        0 -> :ok
+      end
+    end
+
+    flush_done_source_close_messages.(flush_done_source_close_messages)
+
     due_state = %{state | last_done_sync_ms: nil}
     _state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(due_state)
 

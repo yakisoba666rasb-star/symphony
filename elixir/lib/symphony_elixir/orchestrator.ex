@@ -1644,27 +1644,25 @@ defmodule SymphonyElixir.Orchestrator do
   defp cleanup_landing_blocking_labels(%Issue{} = issue) do
     module = tracker_module()
 
-    cond do
-      not function_exported?(module, :remove_issue_labels, 2) ->
-        Logger.debug("Skipping landing blocking label cleanup for #{issue_context(issue)}; tracker does not support label removal")
-        :ok
+    if function_exported?(module, :remove_issue_labels, 2) do
+      case module.remove_issue_labels(issue.id, @landing_blocking_labels) do
+        :ok ->
+          :ok
 
-      true ->
-        case module.remove_issue_labels(issue.id, @landing_blocking_labels) do
-          :ok ->
-            :ok
+        {:ok, _value} ->
+          :ok
 
-          {:ok, _value} ->
-            :ok
+        {:error, reason} ->
+          Logger.warning("Failed to clean landing blocking labels for #{issue_context(issue)} after Done sync: #{inspect(reason)}")
+          {:error, reason}
 
-          {:error, reason} ->
-            Logger.warning("Failed to clean landing blocking labels for #{issue_context(issue)} after Done sync: #{inspect(reason)}")
-            {:error, reason}
-
-          other ->
-            Logger.warning("Unexpected landing blocking label cleanup result for #{issue_context(issue)} after Done sync: #{inspect(other)}")
-            {:error, {:linear_label_cleanup_unexpected, other}}
-        end
+        other ->
+          Logger.warning("Unexpected landing blocking label cleanup result for #{issue_context(issue)} after Done sync: #{inspect(other)}")
+          {:error, {:linear_label_cleanup_unexpected, other}}
+      end
+    else
+      Logger.debug("Skipping landing blocking label cleanup for #{issue_context(issue)}; tracker does not support label removal")
+      :ok
     end
   end
 

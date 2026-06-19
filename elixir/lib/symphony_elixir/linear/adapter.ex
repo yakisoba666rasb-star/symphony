@@ -353,12 +353,13 @@ defmodule SymphonyElixir.Linear.Adapter do
     if normalized_labels == [] do
       :ok
     else
-      with {:ok, target} <- fetch_issue_label_target(issue_id),
-           remaining_label_ids = remove_label_ids(target.current_labels, normalized_labels) do
-        update_remaining_issue_labels(issue_id, target.current_label_ids, remaining_label_ids)
-      else
-        {:error, reason} -> {:error, reason}
-        _ -> {:error, :issue_label_update_failed}
+      case fetch_issue_label_target(issue_id) do
+        {:ok, target} ->
+          remaining_label_ids = remove_label_ids(target.current_labels, normalized_labels)
+          update_remaining_issue_labels(issue_id, target.current_label_ids, remaining_label_ids)
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
