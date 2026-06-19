@@ -1373,6 +1373,14 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("Skipping immediate landing repair dispatch; issue already tracked: #{issue_context(issue)}")
         state
 
+      landing_repair_pr_pending_mergeability?(issue, pr) ->
+        Logger.info(
+          "Skipping immediate landing repair dispatch; PR mergeability is pending for #{issue_context(issue)} " <>
+            "pr=#{pr_url(pr)} mergeability=#{inspect(pr_merge_state(pr))}"
+        )
+
+        state
+
       not landing_repair_dispatch_capacity?(state, issue) ->
         Logger.info("Skipping immediate landing repair dispatch; no worker capacity for #{issue_context(issue)}")
         state
