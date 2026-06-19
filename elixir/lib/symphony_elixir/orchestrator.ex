@@ -76,6 +76,7 @@ defmodule SymphonyElixir.Orchestrator do
       landing_queue: [],
       last_review_rework_sync_ms: nil,
       last_dirty_workspace_cleanup_ms: nil,
+      last_dirty_workspace_cleanup: nil,
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -100,13 +101,14 @@ defmodule SymphonyElixir.Orchestrator do
       tick_timer_ref: nil,
       tick_token: nil,
       last_dirty_workspace_cleanup_ms: now_ms,
+      last_dirty_workspace_cleanup: nil,
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil
     }
 
-    run_dirty_workspace_cleanup()
+    cleanup_result = run_dirty_workspace_cleanup()
     run_terminal_workspace_cleanup()
-    state = schedule_tick(state, 0)
+    state = state |> Map.put(:last_dirty_workspace_cleanup, cleanup_result) |> schedule_tick(0)
 
     {:ok, state}
   end
@@ -158,6 +160,11 @@ defmodule SymphonyElixir.Orchestrator do
     state = finish_poll_cycle(state)
 
     {:noreply, state}
+  end
+
+  def handle_info({:dirty_workspace_cleanup_completed, cleanup_result}, state) do
+    notify_dashboard()
+    {:noreply, %{state | last_dirty_workspace_cleanup: cleanup_result}}
   end
 
   def handle_info({ref, {result, attempts}}, %{github_intake_task: %Task{ref: ref}} = state)
@@ -2413,8 +2420,22 @@ defmodule SymphonyElixir.Orchestrator do
   defp reconcile_active_open_pr_handoff(%Issue{} = issue, %State{} = state) do
     case lookup_open_pr_for_dispatch(issue) do
       {:ok, %{} = pr} ->
-        {:handoff, state} = start_reconciled_open_pr_handoff(state, issue, pr)
-        state
+        cond do
+          landing_repair_pr_needs_implementation?(issue, pr) ->
+            reconcile_landing_repair_open_pr(state, issue, pr)
+
+          landing_repair_pr_pending_mergeability?(issue, pr) ->
+            Logger.info(
+              "Deferring active landing repair reconcile for #{issue_context(issue)}; " <>
+                "PR mergeability is still pending pr=#{pr_url(pr)}"
+            )
+
+            state
+
+          true ->
+            {:handoff, state} = start_reconciled_open_pr_handoff(state, issue, pr)
+            state
+        end
 
       {:ok, nil} ->
         state
@@ -2428,6 +2449,26 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.warning("Continuing active issue reconcile for #{issue_context(issue)}; open PR guard lookup failed: #{inspect(reason)}")
 
         state
+    end
+  end
+
+  defp reconcile_landing_repair_open_pr(%State{} = state, %Issue{} = issue, %{} = pr) do
+    if Map.has_key?(state.running, issue.id) do
+      Logger.info(
+        "Open PR discovered during active landing repair reconcile for #{issue_context(issue)}; " <>
+          "keeping implementation worker running pr=#{pr_url(pr)} mergeability=#{inspect(pr_merge_state(pr))}"
+      )
+
+      state
+    else
+      Logger.info(
+        "Open PR discovered during active landing repair reconcile for #{issue_context(issue)}; " <>
+          "dispatching implementation worker pr=#{pr_url(pr)} mergeability=#{inspect(pr_merge_state(pr))}"
+      )
+
+      # Repair states are validated as active states, so the normal dispatch path
+      # permits reusing the existing dirty workspace for the repair attempt.
+      do_dispatch_issue(state, issue, nil, nil, put_landing_repair_prompt([], issue, pr))
     end
   end
 
@@ -4234,9 +4275,18 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
-        case maybe_start_existing_open_pr_handoff(state, refreshed_issue) do
-          {:handoff, state} -> state
-          :dispatch -> do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host, agent_opts)
+        case maybe_start_existing_open_pr_handoff(state, refreshed_issue, agent_opts) do
+          {:handoff, state} ->
+            state
+
+          {:dispatch, updated_agent_opts} ->
+            do_dispatch_issue(
+              state,
+              refreshed_issue,
+              attempt,
+              preferred_worker_host,
+              updated_agent_opts
+            )
         end
 
       {:skip, :missing} ->
@@ -4283,13 +4333,33 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp maybe_start_existing_open_pr_handoff(%State{} = state, %Issue{} = issue) do
+  defp maybe_start_existing_open_pr_handoff(%State{} = state, %Issue{} = issue, agent_opts) do
     case lookup_open_pr_for_dispatch(issue) do
       {:ok, %{} = pr} ->
-        start_existing_open_pr_handoff(state, issue, pr)
+        cond do
+          landing_repair_pr_needs_implementation?(issue, pr) ->
+            Logger.info(
+              "Open PR discovered for landing repair #{issue_context(issue)}; " <>
+                "dispatching implementation worker instead of review handoff pr=#{pr_url(pr)} " <>
+                "mergeability=#{inspect(pr_merge_state(pr))}"
+            )
+
+            {:dispatch, put_landing_repair_prompt(agent_opts, issue, pr)}
+
+          landing_repair_pr_pending_mergeability?(issue, pr) ->
+            Logger.info(
+              "Deferring landing repair dispatch for #{issue_context(issue)}; " <>
+                "PR mergeability is still pending pr=#{pr_url(pr)}"
+            )
+
+            {:handoff, state}
+
+          true ->
+            start_existing_open_pr_handoff(state, issue, pr)
+        end
 
       {:ok, nil} ->
-        :dispatch
+        {:dispatch, agent_opts}
 
       {:error, {:ambiguous_open_issue_pull_requests, _urls} = reason} ->
         error = "ambiguous open GitHub PRs found before dispatch: #{inspect(reason)}"
@@ -4299,8 +4369,68 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         Logger.warning("Continuing dispatch for #{issue_context(issue)}; open PR guard lookup failed: #{inspect(reason)}")
 
-        :dispatch
+        {:dispatch, agent_opts}
     end
+  end
+
+  defp landing_repair_pr_needs_implementation?(%Issue{} = issue, %{} = pr) do
+    landing_repair_issue?(issue) and
+      not landing_repair_pr_pending_mergeability?(issue, pr) and
+      not review_handoff_ready_pr?(pr)
+  end
+
+  defp landing_repair_pr_pending_mergeability?(%Issue{} = issue, %{} = pr) do
+    landing_repair_issue?(issue) and
+      pr_state(pr) == "OPEN" and
+      pr_draft?(pr) != true and
+      pr_merge_state(pr) in [nil, "UNKNOWN"]
+  end
+
+  defp landing_repair_issue?(%Issue{state: state, labels: labels}) when is_list(labels) do
+    settings = Config.settings!()
+
+    settings.landing.enabled and
+      settings.landing.repair_enabled and
+      normalize_issue_state(state) == normalize_issue_state(settings.landing.repair_state) and
+      Enum.any?(labels, &landing_blocking_label?/1)
+  end
+
+  defp landing_repair_issue?(_issue), do: false
+
+  defp landing_blocking_label?(label) when is_binary(label) do
+    normalized = String.downcase(String.trim(label))
+    normalized in @landing_blocking_labels
+  end
+
+  defp landing_blocking_label?(_label), do: false
+
+  defp review_handoff_ready_pr?(%{} = pr) do
+    pr_state(pr) == "OPEN" and pr_draft?(pr) != true and pr_merge_state(pr) == "CLEAN"
+  end
+
+  defp put_landing_repair_prompt(agent_opts, %Issue{} = issue, %{} = pr) when is_list(agent_opts) do
+    prompt = landing_repair_prompt(issue, pr)
+
+    Keyword.update(agent_opts, :extra_prompt, prompt, fn
+      existing when is_binary(existing) and existing != "" -> String.trim_trailing(existing) <> "\n\n" <> prompt
+      _existing -> prompt
+    end)
+  end
+
+  defp landing_repair_prompt(%Issue{} = issue, %{} = pr) do
+    settings = Config.settings!()
+    labels = issue.labels |> Enum.filter(&is_binary/1) |> Enum.join(", ")
+
+    """
+    Landing repair context:
+    - This issue was returned from #{settings.landing.blocked_state} to #{settings.landing.repair_state} with landing blocking labels: #{labels}.
+    - Existing PR: #{pr_url(pr)}
+    - PR state: state=#{pr_state(pr) || "unknown"} draft=#{inspect(pr_draft?(pr))} mergeability=#{pr_merge_state(pr) || "unknown"}.
+    - Repair the existing PR branch when possible, resolving the landing blocker without opening a replacement PR.
+    - After pushing the repair, return the Linear issue to #{settings.tracker.review_state} for review.
+    - Do not merge the PR and do not move the issue back to #{settings.landing.approval_state}; a human owns that final gate.
+    """
+    |> String.trim()
   end
 
   defp lookup_open_pr_for_dispatch(%Issue{} = issue) do
@@ -4332,6 +4462,18 @@ defmodule SymphonyElixir.Orchestrator do
     github_pr_lookup_module()
     |> module_exports?(:lookup_open_issue_pull_request, 5)
   end
+
+  defp pr_state(%{"state" => state}) when is_binary(state), do: String.upcase(state)
+  defp pr_state(%{state: state}) when is_binary(state), do: String.upcase(state)
+  defp pr_state(_pr), do: nil
+
+  defp pr_draft?(%{"isDraft" => draft}), do: draft
+  defp pr_draft?(%{isDraft: draft}), do: draft
+  defp pr_draft?(_pr), do: nil
+
+  defp pr_merge_state(%{"mergeStateStatus" => state}) when is_binary(state), do: String.upcase(state)
+  defp pr_merge_state(%{mergeStateStatus: state}) when is_binary(state), do: String.upcase(state)
+  defp pr_merge_state(_pr), do: nil
 
   defp start_existing_open_pr_handoff(%State{} = state, %Issue{} = issue, %{} = pr, opts \\ []) do
     case Workspace.create_for_issue(issue, nil, allow_dirty_existing_workspace: true) do
@@ -4698,29 +4840,38 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp run_dirty_workspace_cleanup do
-    if Process.whereis(SymphonyElixir.TaskSupervisor) do
-      case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, &do_run_dirty_workspace_cleanup/0) do
-        {:ok, _pid} ->
-          :ok
+    case Process.whereis(SymphonyElixir.TaskSupervisor) do
+      nil ->
+        Logger.warning("Skipping dirty workspace cleanup; task supervisor is not running")
+        dirty_workspace_cleanup_status(:error, {:error, :task_supervisor_not_running})
 
-        {:error, reason} ->
-          Logger.warning("Skipping dirty workspace cleanup; failed to start cleanup task: #{inspect(reason)}")
-      end
-    else
-      Logger.warning("Skipping dirty workspace cleanup; task supervisor is not running")
+      _pid ->
+        start_dirty_workspace_cleanup_task(self())
+    end
+  end
+
+  defp start_dirty_workspace_cleanup_task(parent) do
+    case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+           send(parent, {:dirty_workspace_cleanup_completed, do_run_dirty_workspace_cleanup()})
+         end) do
+      {:ok, _pid} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Skipping dirty workspace cleanup; failed to start cleanup task: #{inspect(reason)}")
+        dirty_workspace_cleanup_status(:error, {:error, {:task_start_failed, reason}})
     end
   end
 
   defp do_run_dirty_workspace_cleanup do
     case Workspace.cleanup_dirty_workspaces() do
-      {:ok, %{removed: removed}} when removed != [] ->
-        Logger.info("Cleaned expired dirty workspaces count=#{length(removed)}")
+      {:ok, result} ->
+        log_dirty_workspace_cleanup_result(result)
+        dirty_workspace_cleanup_status(:ok, result)
 
-      {:ok, _result} ->
-        :ok
-
-      {:error, reason} ->
+      {:error, reason} = error ->
         Logger.warning("Skipping dirty workspace cleanup: #{inspect(reason)}")
+        dirty_workspace_cleanup_status(:error, error)
     end
   end
 
@@ -4732,10 +4883,56 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       _last_ms ->
-        run_dirty_workspace_cleanup()
-        %{state | last_dirty_workspace_cleanup_ms: now_ms}
+        cleanup_result = run_dirty_workspace_cleanup()
+        %{state | last_dirty_workspace_cleanup_ms: now_ms, last_dirty_workspace_cleanup: cleanup_result}
     end
   end
+
+  defp log_dirty_workspace_cleanup_result(%{removed: removed} = result) do
+    if removed != [] do
+      Logger.info("Cleaned expired dirty workspaces count=#{length(removed)}")
+    end
+
+    failed = Map.get(result, :failed, [])
+    remote_failed = Enum.filter(Map.get(result, :remote, []), &(Map.get(&1, :status) == :error))
+    failed_count = length(failed) + length(remote_failed)
+
+    if failed_count > 0 do
+      Logger.warning("Dirty workspace cleanup completed with failures failed_count=#{failed_count} local_failed=#{length(failed)} remote_failed=#{length(remote_failed)}")
+    end
+
+    :ok
+  end
+
+  defp dirty_workspace_cleanup_status(status, result) do
+    %{
+      status: status,
+      checked_at: DateTime.utc_now() |> DateTime.truncate(:second),
+      removed_count: cleanup_count(result, :removed),
+      kept_count: cleanup_count(result, :kept),
+      failed_count: cleanup_failed_count(result),
+      local_failed: cleanup_local_failed(result),
+      remote: cleanup_remote_results(result),
+      error: cleanup_error(result)
+    }
+  end
+
+  defp cleanup_count(result, key) when is_map(result), do: result |> Map.get(key, []) |> length()
+  defp cleanup_count(_result, _key), do: 0
+
+  defp cleanup_failed_count(result) do
+    length(cleanup_local_failed(result)) +
+      (result |> cleanup_remote_results() |> Enum.count(&(Map.get(&1, :status) == :error)))
+  end
+
+  defp cleanup_local_failed(result) when is_map(result), do: Map.get(result, :failed, [])
+  defp cleanup_local_failed(_result), do: []
+
+  defp cleanup_remote_results(result) when is_map(result), do: Map.get(result, :remote, [])
+  defp cleanup_remote_results(_result), do: []
+
+  defp cleanup_error({:error, reason}), do: inspect(reason)
+  defp cleanup_error(_result), do: nil
 
   defp notify_dashboard do
     StatusDashboard.notify_update()
@@ -5084,6 +5281,7 @@ defmodule SymphonyElixir.Orchestrator do
        unroutable: state.unroutable,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
+       dirty_workspace_cleanup: Map.get(state, :last_dirty_workspace_cleanup),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),

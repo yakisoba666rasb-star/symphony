@@ -144,6 +144,34 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule FakeGitHubPrLookupDirtyOpenIssuePr do
+    def lookup_open_issue_pull_request(repo, issue_identifier, issue_url, branch_name, attachment_urls) do
+      merge_state = Application.get_env(:symphony_elixir, :fake_open_issue_pr_merge_state, "DIRTY")
+
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(
+            recipient,
+            {:open_issue_pr_lookup_called, repo, issue_identifier, issue_url, branch_name, attachment_urls}
+          )
+
+        _ ->
+          :ok
+      end
+
+      {:ok,
+       %{
+         "number" => 200,
+         "url" => "https://github.com/octo/repo/pull/200",
+         "headRefName" => branch_name,
+         "isDraft" => false,
+         "mergeStateStatus" => merge_state,
+         "state" => "OPEN",
+         "__symphonyLookupSource" => "open_issue_pull_request"
+       }}
+    end
+  end
+
   defmodule FakeGitHubPrLookupError do
     def lookup_workspace_head(_workspace_path, _branch_name), do: {:error, :missing_auth}
   end
@@ -2549,10 +2577,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           wait_for_orchestrator_state(pid, fn
             %{
               poll_check_in_progress: false,
+              tick_token: observed_tick_token,
               running: %{"issue-tick-guard" => _running_entry},
               retry_attempts: %{"issue-tick-guard" => %{attempt: 1}}
             } ->
-              true
+              observed_tick_token != tick_token
 
             _ ->
               false
@@ -2629,6 +2658,95 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     refute File.exists?(expired_dirty)
+  end
+
+  test "orchestrator snapshot exposes latest dirty workspace cleanup failures" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-periodic-dirty-cleanup-status-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+      File.rm_rf(test_root)
+    end)
+
+    trace_file = Path.join(test_root, "ssh.trace")
+    fake_ssh = Path.join(test_root, "ssh")
+    workspace_root = Path.join(test_root, "workspaces")
+
+    File.mkdir_p!(test_root)
+    File.mkdir_p!(workspace_root)
+    System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+    System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+    File.write!(fake_ssh, """
+    #!/bin/sh
+    trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+    printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+    printf 'remote cleanup failed\\n'
+    exit 23
+    """)
+
+    File.chmod!(fake_ssh, 0o755)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      poll_interval_ms: 5_000,
+      workspace_root: workspace_root,
+      dirty_workspace_retention_days: 7,
+      worker_ssh_hosts: ["worker-01"]
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    orchestrator_name = Module.concat(__MODULE__, :PeriodicDirtyCleanupStatusOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      %{state | last_dirty_workspace_cleanup_ms: System.monotonic_time(:millisecond) - :timer.hours(25)}
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    snapshot =
+      wait_for_orchestrator_state(pid, fn state ->
+        cleanup = Map.get(state, :last_dirty_workspace_cleanup)
+
+        match?(
+          %{status: :ok, failed_count: 1, remote: [%{worker_host: "worker-01", status: :error}]},
+          cleanup
+        ) and state.poll_check_in_progress == false
+      end)
+      |> then(fn _state -> Orchestrator.snapshot(orchestrator_name, 15_000) end)
+
+    assert %{
+             dirty_workspace_cleanup: %{
+               status: :ok,
+               failed_count: 1,
+               remote: [%{worker_host: "worker-01", status: :error}]
+             }
+           } = snapshot
+
+    assert %{
+             dirty_workspace_cleanup: %{
+               status: :ok,
+               failed_count: 1,
+               remote: [%{worker_host: "worker-01", status: :error}]
+             }
+           } = SymphonyElixirWeb.Presenter.state_payload(orchestrator_name, 15_000)
   end
 
   test "orchestrator snapshot keeps unroutable issues when agent slots are full" do
@@ -2794,6 +2912,264 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert state.running == %{}
     assert state.blocked == %{}
     assert MapSet.member?(state.completed, issue_id)
+  end
+
+  test "orchestrator dispatches landing repair issues instead of handing off dirty PRs" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      poll_interval_ms: 5_000,
+      repository_default: "octo/repo",
+      landing_enabled: true,
+      landing_execute_enabled: false,
+      landing_blocked_state: "Merge Blocked",
+      landing_repair_enabled: true,
+      landing_repair_state: "In Progress"
+    )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_agent_runner = Application.get_env(:symphony_elixir, :agent_runner)
+    previous_agent_runner_recipient = Application.get_env(:symphony_elixir, :agent_runner_recipient)
+    previous_tracker_comment_recipient = Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+
+      if is_nil(previous_agent_runner) do
+        Application.delete_env(:symphony_elixir, :agent_runner)
+      else
+        Application.put_env(:symphony_elixir, :agent_runner, previous_agent_runner)
+      end
+
+      if is_nil(previous_agent_runner_recipient) do
+        Application.delete_env(:symphony_elixir, :agent_runner_recipient)
+      else
+        Application.put_env(:symphony_elixir, :agent_runner_recipient, previous_agent_runner_recipient)
+      end
+
+      if is_nil(previous_tracker_comment_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+      else
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_comment_recipient,
+          previous_tracker_comment_recipient
+        )
+      end
+
+      if is_nil(previous_memory_issues) do
+        Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      else
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_memory_issues)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupDirtyOpenIssuePr)
+    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
+    Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-landing-repair-dirty-pr"
+    issue_url = "https://linear.app/example/issue/LAB-490/async-dirty-cleanup"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "LAB-490",
+      title: "Async dirty cleanup repair",
+      state: "In Progress",
+      url: issue_url,
+      branch_name: "lab-490-async-dirty-cleanup",
+      description: "Repo: octo/repo",
+      labels: ["landing-blocked", "landing-conflict"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :LandingRepairDirtyPrOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    assert_receive {:open_issue_pr_lookup_called, "octo/repo", "LAB-490", ^issue_url, "lab-490-async-dirty-cleanup", []},
+                   1_000
+
+    assert_receive {:agent_runner_called, %{id: ^issue_id, state: "In Progress"}, opts}, 1_000
+    assert opts[:extra_prompt] =~ "Landing repair context"
+    assert opts[:extra_prompt] =~ "https://github.com/octo/repo/pull/200"
+    assert opts[:extra_prompt] =~ "mergeability=DIRTY"
+    assert opts[:extra_prompt] =~ "return the Linear issue to In Review"
+    assert opts[:extra_prompt] =~ "Do not merge the PR"
+  end
+
+  test "orchestrator reconciles landing repair issues by dispatching dirty PRs" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      poll_interval_ms: 5_000,
+      repository_default: "octo/repo",
+      landing_enabled: true,
+      landing_execute_enabled: false,
+      landing_blocked_state: "Merge Blocked",
+      landing_repair_enabled: true,
+      landing_repair_state: "In Progress"
+    )
+
+    previous_env =
+      for key <- [
+            :github_pr_lookup,
+            :agent_runner,
+            :agent_runner_recipient,
+            :tracker_module,
+            :tracker_comment_recipient,
+            :active_open_pr_reconcile_issues,
+            :memory_tracker_issues,
+            :fake_open_issue_pr_merge_state
+          ],
+          do: {key, Application.get_env(:symphony_elixir, key)}
+
+    on_exit(fn ->
+      Enum.each(previous_env, fn
+        {key, nil} -> Application.delete_env(:symphony_elixir, key)
+        {key, value} -> Application.put_env(:symphony_elixir, key, value)
+      end)
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupDirtyOpenIssuePr)
+    Application.put_env(:symphony_elixir, :fake_open_issue_pr_merge_state, "DIRTY")
+    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
+    Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerActiveOpenPrReconcile)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-landing-repair-reconcile-dirty-pr"
+    issue_url = "https://linear.app/example/issue/LAB-490/async-dirty-cleanup"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "LAB-490",
+      title: "Async dirty cleanup repair",
+      state: "In Progress",
+      url: issue_url,
+      branch_name: "lab-490-async-dirty-cleanup",
+      description: "Repo: octo/repo",
+      labels: ["landing-blocked", "landing-conflict"]
+    }
+
+    Application.put_env(:symphony_elixir, :active_open_pr_reconcile_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    orchestrator_name = Module.concat(__MODULE__, :LandingRepairReconcileDirtyPrOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    assert_receive {:active_open_pr_reconcile_fetch_called, ["In Progress"]}, 1_000
+
+    assert_receive {:open_issue_pr_lookup_called, "octo/repo", "LAB-490", ^issue_url, "lab-490-async-dirty-cleanup", []},
+                   1_000
+
+    assert_receive {:agent_runner_called, %{id: ^issue_id, state: "In Progress"}, opts}, 1_000
+    assert opts[:extra_prompt] =~ "Landing repair context"
+    assert opts[:extra_prompt] =~ "https://github.com/octo/repo/pull/200"
+    assert opts[:extra_prompt] =~ "mergeability=DIRTY"
+    assert opts[:extra_prompt] =~ "return the Linear issue to In Review"
+    assert opts[:extra_prompt] =~ "Do not merge the PR"
+  end
+
+  test "orchestrator defers landing repair reconcile while PR mergeability is unknown" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      poll_interval_ms: 5_000,
+      repository_default: "octo/repo",
+      landing_enabled: true,
+      landing_execute_enabled: false,
+      landing_blocked_state: "Merge Blocked",
+      landing_repair_enabled: true,
+      landing_repair_state: "In Progress"
+    )
+
+    previous_env =
+      for key <- [
+            :github_pr_lookup,
+            :review_runner,
+            :agent_runner,
+            :agent_runner_recipient,
+            :tracker_module,
+            :tracker_state_update_recipient,
+            :tracker_comment_recipient,
+            :active_open_pr_reconcile_issues,
+            :memory_tracker_issues,
+            :fake_open_issue_pr_merge_state
+          ],
+          do: {key, Application.get_env(:symphony_elixir, key)}
+
+    on_exit(fn ->
+      Enum.each(previous_env, fn
+        {key, nil} -> Application.delete_env(:symphony_elixir, key)
+        {key, value} -> Application.put_env(:symphony_elixir, key, value)
+      end)
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupDirtyOpenIssuePr)
+    Application.put_env(:symphony_elixir, :fake_open_issue_pr_merge_state, "UNKNOWN")
+    Application.put_env(:symphony_elixir, :review_runner, FakeReviewRunnerApproved)
+    Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
+    Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerActiveOpenPrReconcile)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-landing-repair-reconcile-unknown-pr"
+    issue_url = "https://linear.app/example/issue/LAB-490/async-dirty-cleanup"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "LAB-490",
+      title: "Async dirty cleanup repair",
+      state: "In Progress",
+      url: issue_url,
+      branch_name: "lab-490-async-dirty-cleanup",
+      description: "Repo: octo/repo",
+      labels: ["landing-blocked"]
+    }
+
+    Application.put_env(:symphony_elixir, :active_open_pr_reconcile_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    orchestrator_name = Module.concat(__MODULE__, :LandingRepairReconcileUnknownPrOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    assert_receive {:active_open_pr_reconcile_fetch_called, ["In Progress"]}, 1_000
+
+    assert_receive {:open_issue_pr_lookup_called, "octo/repo", "LAB-490", ^issue_url, "lab-490-async-dirty-cleanup", []},
+                   1_000
+
+    refute_receive {:agent_runner_called, %{id: ^issue_id}, _opts}, 300
+    refute_receive {:tracker_state_update_called, ^issue_id, _state}, 300
+
+    state = :sys.get_state(pid, 15_000)
+    assert state.running == %{}
+    refute MapSet.member?(state.completed, issue_id)
   end
 
   test "orchestrator reconciles in-progress issues with existing open PRs after restart" do

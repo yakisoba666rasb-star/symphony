@@ -41,6 +41,7 @@ defmodule SymphonyElixirWeb.Presenter do
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits
         }
+        |> maybe_put_dirty_workspace_cleanup(snapshot)
 
       :timeout ->
         %{generated_at: generated_at, error: %{code: "snapshot_timeout", message: "Snapshot timed out"}}
@@ -86,6 +87,13 @@ defmodule SymphonyElixirWeb.Presenter do
       blocked: Enum.find(Map.get(snapshot, :blocked, []), &(&1.identifier == issue_identifier)),
       unroutable: Enum.find(Map.get(snapshot, :unroutable, []), &(&1.identifier == issue_identifier))
     }
+  end
+
+  defp maybe_put_dirty_workspace_cleanup(payload, snapshot) do
+    case Map.get(snapshot, :dirty_workspace_cleanup) do
+      nil -> payload
+      cleanup -> Map.put(payload, :dirty_workspace_cleanup, cleanup)
+    end
   end
 
   defp issue_entries_empty?(entries) do
