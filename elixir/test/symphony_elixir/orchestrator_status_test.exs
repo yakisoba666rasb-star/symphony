@@ -1966,7 +1966,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert state == %{
              initial_state
              | last_landing_plan_ms: state.last_landing_plan_ms,
-               landing_queue: state.landing_queue
+               landing_queue: state.landing_queue,
+               runtime_freshness: state.runtime_freshness
            }
 
     assert is_integer(state.last_landing_plan_ms)
@@ -1986,7 +1987,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert state == %{
              initial_state
              | last_landing_plan_ms: state.last_landing_plan_ms,
-               landing_queue: state.landing_queue
+               landing_queue: state.landing_queue,
+               runtime_freshness: state.runtime_freshness
            }
 
     assert is_integer(state.last_landing_plan_ms)
@@ -2006,7 +2008,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert state == %{
              initial_state
              | last_landing_plan_ms: state.last_landing_plan_ms,
-               landing_queue: state.landing_queue
+               landing_queue: state.landing_queue,
+               runtime_freshness: state.runtime_freshness
            }
 
     assert is_integer(state.last_landing_plan_ms)
@@ -9898,6 +9901,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     Application.put_env(:symphony_elixir, :landing_worker, FakeLandingWorker)
     Application.put_env(:symphony_elixir, :landing_planner_issues, [approved_issue])
     Application.put_env(:symphony_elixir, :landing_repair_refreshed_issues, [refreshed_issue])
+    Application.put_env(:symphony_elixir, :runtime_freshness_check, fresh_runtime_check())
     Application.put_env(:symphony_elixir, :agent_runner, FakeAgentRunnerRecords)
     Application.put_env(:symphony_elixir, :agent_runner_recipient, self())
     Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
@@ -9959,6 +9963,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       :landing_worker_result,
       :landing_repair_refreshed_issues,
       :landing_repair_refresh_result,
+      :runtime_freshness_check,
       :agent_runner,
       :agent_runner_recipient,
       :tracker_comment_recipient
@@ -9978,6 +9983,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   defp landing_repair_entry(issue_id, issue_identifier \\ "LAB-491") do
+    landing_repair_entry_attrs(issue_id, issue_identifier)
+    |> RepairEntry.new!("PR mergeability is UNSTABLE")
+  end
+
+  defp landing_repair_entry_attrs(issue_id, issue_identifier) do
     %{
       issue_id: issue_id,
       issue_identifier: issue_identifier,
