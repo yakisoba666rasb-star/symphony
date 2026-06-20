@@ -218,6 +218,12 @@ defmodule SymphonyElixir.GitHubIssue do
       {:ok, :skipped} ->
         {:ok, %{acc | skipped: acc.skipped + 1}, clear_attempt(attempts, issue), mark_seen_url(seen_urls, issue)}
 
+      {:ok, {:deferred, reason}} ->
+        attempts = record_failed_attempt(attempts, issue, reason, context.now_ms)
+        seen_urls = mark_seen_url(seen_urls, issue)
+
+        {:ok, %{acc | skipped: acc.skipped + 1}, attempts, seen_urls}
+
       {:error, reason} ->
         Logger.warning(
           "Skipping GitHub issue intake for repo=#{context.repo} url=#{Map.get(issue, :url)}; " <>
@@ -279,6 +285,7 @@ defmodule SymphonyElixir.GitHubIssue do
   defp sync_single_open_issue(repo, %{url: url} = issue, settings, target, linear_adapter) when is_binary(url) do
     with {:ok, false} <- linear_adapter.github_issue_synced?(url),
          {:ok, nil} <- linear_adapter.find_github_issue_by_description(url),
+         :ok <- maybe_defer_linear_issue_create(settings, repo, url),
          {:ok, label_ids} <- github_intake_label_ids(settings, issue, target, linear_adapter),
          {:ok, linear_issue} <-
            linear_adapter.create_github_backlog_issue(github_intake_create_attrs(repo, issue, target, label_ids)),
@@ -297,6 +304,14 @@ defmodule SymphonyElixir.GitHubIssue do
       {:ok, %{} = existing_issue} ->
         repair_github_issue_attachment(repo, issue, existing_issue, linear_adapter)
 
+      {:defer, reason} ->
+        Logger.info(
+          "Deferring GitHub issue intake Linear issue creation for repo=#{repo} " <>
+            "github_issue=#{url} reason=#{inspect(reason)}"
+        )
+
+        {:ok, {:deferred, reason}}
+
       {:error, :github_issue_description_lookup_failed} ->
         {:error, :github_issue_description_lookup_failed}
 
@@ -309,6 +324,25 @@ defmodule SymphonyElixir.GitHubIssue do
   end
 
   defp sync_single_open_issue(_repo, _issue, _settings, _target, _linear_adapter), do: {:ok, :skipped}
+
+  defp maybe_defer_linear_issue_create(settings, repo, _url) do
+    if linear_issue_create_disabled_repo?(settings, repo) do
+      {:defer, {:linear_official_sync_pending, repo}}
+    else
+      :ok
+    end
+  end
+
+  defp linear_issue_create_disabled_repo?(%{github_intake: %{linear_issue_create_disabled_repos: repos}}, repo)
+       when is_list(repos) and is_binary(repo) do
+    normalized_repo = normalize_repo_slug(repo)
+    Enum.any?(repos, &(normalize_repo_slug(&1) == normalized_repo))
+  end
+
+  defp linear_issue_create_disabled_repo?(_settings, _repo), do: false
+
+  defp normalize_repo_slug(repo) when is_binary(repo), do: repo |> String.trim() |> String.downcase()
+  defp normalize_repo_slug(_repo), do: ""
 
   defp github_intake_create_attrs(repo, issue, target, label_ids) do
     %{

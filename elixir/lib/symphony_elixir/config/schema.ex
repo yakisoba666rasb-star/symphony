@@ -103,7 +103,16 @@ defmodule SymphonyElixir.Config.Schema do
     use Ecto.Schema
     import Ecto.Changeset
 
-    @fields [:enabled, :mirror_labels, :state, :todo_labels, :interval_ms, :retry_ttl_ms, :limit]
+    @fields [
+      :enabled,
+      :mirror_labels,
+      :state,
+      :todo_labels,
+      :linear_issue_create_disabled_repos,
+      :interval_ms,
+      :retry_ttl_ms,
+      :limit
+    ]
 
     @primary_key false
     embedded_schema do
@@ -111,6 +120,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:mirror_labels, :boolean, default: true)
       field(:state, :string, default: "Backlog")
       field(:todo_labels, {:array, :string}, default: [])
+      field(:linear_issue_create_disabled_repos, {:array, :string}, default: [])
       field(:interval_ms, :integer, default: 300_000)
       field(:retry_ttl_ms, :integer, default: 3_600_000)
       field(:limit, :integer, default: 100)
@@ -126,6 +136,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:limit, greater_than: 0, less_than_or_equal_to: 500)
       |> validate_change(:state, &validate_non_blank/2)
       |> validate_change(:todo_labels, &validate_label_names/2)
+      |> validate_change(:linear_issue_create_disabled_repos, &validate_repository_slugs/2)
       |> validate_retry_ttl_ms()
     end
 
@@ -142,6 +153,24 @@ defmodule SymphonyElixir.Config.Schema do
         [{field, "must contain only non-blank strings"}]
       end
     end
+
+    defp validate_label_names(field, _labels), do: [{field, "must contain only non-blank strings"}]
+
+    defp validate_repository_slugs(field, repos) when is_list(repos) do
+      if Enum.all?(repos, &valid_repository_slug?/1) do
+        []
+      else
+        [{field, "must contain GitHub repository slugs like owner/name"}]
+      end
+    end
+
+    defp validate_repository_slugs(field, _repos), do: [{field, "must contain GitHub repository slugs like owner/name"}]
+
+    defp valid_repository_slug?(value) when is_binary(value) do
+      Regex.match?(~r/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, String.trim(value))
+    end
+
+    defp valid_repository_slug?(_value), do: false
 
     defp validate_retry_ttl_ms(changeset) do
       interval_ms = get_field(changeset, :interval_ms)

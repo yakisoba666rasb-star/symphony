@@ -811,7 +811,7 @@ defmodule SymphonyElixir.Orchestrator do
         )
 
         state
-        |> move_issue_to_review_after_approval(issue_id, running_entry, session_id, tracker)
+        |> move_issue_to_review_after_approval(issue_id, running_entry, session_id, tracker, pr)
         |> maybe_release_completed_review_handoff_claim(issue_id, metadata)
 
       {:error, reason} ->
@@ -842,7 +842,7 @@ defmodule SymphonyElixir.Orchestrator do
         )
 
         state
-        |> move_issue_to_review_after_approval(issue.id, running_entry, session_id, tracker)
+        |> move_issue_to_review_after_approval(issue.id, running_entry, session_id, tracker, pr)
         |> maybe_release_completed_review_handoff_claim(issue.id, metadata)
 
       {:error, reason} ->
@@ -1063,8 +1063,8 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp move_issue_to_review_after_approval(state, issue_id, running_entry, session_id, tracker) do
-    target_state = Config.review_handoff_state()
+  defp move_issue_to_review_after_approval(state, issue_id, running_entry, session_id, tracker, pr) do
+    target_state = review_handoff_approval_target_state(running_entry, pr)
 
     case tracker.update_issue_state(issue_id, target_state) do
       :ok ->
@@ -1082,6 +1082,18 @@ defmodule SymphonyElixir.Orchestrator do
         error = "failed to move issue to #{target_state} after PR discovery: #{inspect(other)}"
         Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
         block_issue_from_entry(state, issue_id, running_entry, error)
+    end
+  end
+
+  defp review_handoff_approval_target_state(running_entry, pr) do
+    settings = Config.settings!()
+
+    if Map.get(running_entry, :auto_approve_landing_after_review) == true and
+         settings.landing.enabled and settings.landing.repair_enabled and
+         review_handoff_ready_pr?(pr) do
+      settings.landing.approval_state
+    else
+      Config.review_handoff_state()
     end
   end
 
@@ -4695,7 +4707,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp put_landing_repair_prompt(agent_opts, %Issue{} = issue, %{} = pr) when is_list(agent_opts) do
     prompt = landing_repair_prompt(issue, pr)
 
-    Keyword.update(agent_opts, :extra_prompt, prompt, fn
+    agent_opts
+    |> Keyword.put(:auto_approve_landing_after_review, true)
+    |> Keyword.update(:extra_prompt, prompt, fn
       existing when is_binary(existing) and existing != "" -> String.trim_trailing(existing) <> "\n\n" <> prompt
       _existing -> prompt
     end)
@@ -4711,8 +4725,8 @@ defmodule SymphonyElixir.Orchestrator do
     - Existing PR: #{pr_url(pr)}
     - PR state: state=#{pr_state(pr) || "unknown"} draft=#{inspect(pr_draft?(pr))} mergeability=#{pr_merge_state(pr) || "unknown"}.
     - Repair the existing PR branch when possible, resolving the landing blocker without opening a replacement PR.
-    - After pushing the repair, return the Linear issue to #{settings.tracker.review_state} for review.
-    - Do not merge the PR and do not move the issue back to #{settings.landing.approval_state}; a human owns that final gate.
+    - After pushing the repair, let Symphony run review handoff.
+    - Do not merge the PR. If review is approve-equivalent and the PR is clean, Symphony can move the issue back to #{settings.landing.approval_state}.
     """
     |> String.trim()
   end
@@ -4850,6 +4864,7 @@ defmodule SymphonyElixir.Orchestrator do
       turn_count: 0,
       retry_attempt: normalize_retry_attempt(attempt),
       continuation_count: normalize_continuation_count(Keyword.get(agent_opts, :continuation_count)),
+      auto_approve_landing_after_review: Keyword.get(agent_opts, :auto_approve_landing_after_review, false),
       started_at: DateTime.utc_now(),
       last_progress_ms: now_ms,
       stall_comment_posted?: false

@@ -197,6 +197,12 @@ repository:
       - runtime
     your-org/worker-app:
       - Worker App
+github_intake:
+  # For repositories where Linear's official GitHub integration already creates
+  # Linear issues, Symphony will only detect/repair existing issues and wait for
+  # the official integration instead of creating duplicates.
+  linear_issue_create_disabled_repos:
+    - your-org/symphony
 ```
 
 - For path values, `~` is expanded to the home directory.

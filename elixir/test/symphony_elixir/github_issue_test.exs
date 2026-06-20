@@ -524,6 +524,98 @@ defmodule SymphonyElixir.GitHubIssueTest do
     refute_received {:create_github_backlog_issue, _attrs}
   end
 
+  test "sync defers Linear issue creation for repos handled by official Linear integration" do
+    settings =
+      intake_settings(%{
+        "github_intake" => %{
+          "enabled" => true,
+          "state" => "Backlog",
+          "limit" => 25,
+          "linear_issue_create_disabled_repos" => ["octo/repo"],
+          "interval_ms" => 10_000,
+          "retry_ttl_ms" => 10_000
+        }
+      })
+
+    assert {:ok, %{created: 0, skipped: 1, errors: 0}, attempts} =
+             GitHubIssue.sync_open_issues_to_linear(
+               settings,
+               FakeLinearIntakeAdapter,
+               %{},
+               single_issue_list_deps(1_000)
+             )
+
+    assert attempts["https://github.com/octo/repo/issues/67"] == %{
+             reason: {:linear_official_sync_pending, "octo/repo"},
+             attempts: 1,
+             last_attempt_ms: 1_000
+           }
+
+    assert_received {:github_issue_synced?, "https://github.com/octo/repo/issues/67"}
+    assert_received {:find_github_issue_by_description, "https://github.com/octo/repo/issues/67"}
+    refute_received {:create_github_backlog_issue, _attrs}
+    refute_received {:create_issue_attachment, _, _, _}
+  end
+
+  test "sync creates Linear issues when disabled repos do not match" do
+    settings =
+      intake_settings(%{
+        "github_intake" => %{
+          "enabled" => true,
+          "state" => "Backlog",
+          "limit" => 25,
+          "linear_issue_create_disabled_repos" => ["octo/other"]
+        }
+      })
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(settings, FakeLinearIntakeAdapter, single_issue_list_deps())
+
+    assert_received {:create_github_backlog_issue, attrs}
+    assert attrs.description =~ "GitHub Issue: https://github.com/octo/repo/issues/67"
+  end
+
+  test "sync still processes issues when GitHub list reaches configured limit" do
+    settings =
+      intake_settings(%{
+        "github_intake" => %{
+          "enabled" => true,
+          "state" => "Backlog",
+          "limit" => 1
+        }
+      })
+
+    assert {:ok, %{created: 1, skipped: 0, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(settings, FakeLinearIntakeAdapter, single_issue_list_deps())
+
+    assert_received {:create_github_backlog_issue, %{title: "Fix source sync"}}
+  end
+
+  test "sync still repairs official-integration issues when Linear created them without attachments" do
+    Application.put_env(
+      :symphony_elixir,
+      :github_intake_description_issue,
+      {:ok, %{"id" => "linear-existing", "identifier" => "LAB-901", "url" => "https://linear.app/example/LAB-901"}}
+    )
+
+    settings =
+      intake_settings(%{
+        "github_intake" => %{
+          "enabled" => true,
+          "state" => "Backlog",
+          "limit" => 25,
+          "linear_issue_create_disabled_repos" => ["octo/repo"]
+        }
+      })
+
+    assert {:ok, %{created: 0, skipped: 1, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(settings, FakeLinearIntakeAdapter, single_issue_list_deps())
+
+    assert_received {:create_issue_attachment, "linear-existing", "GitHub issue #67: Fix source sync", "https://github.com/octo/repo/issues/67"}
+
+    refute_received {:create_github_backlog_issue, _attrs}
+  end
+
   test "sync reports existing URL-described Linear issues that cannot be repaired" do
     Application.put_env(:symphony_elixir, :github_intake_description_issue, {:ok, %{"identifier" => "LAB-901"}})
 
