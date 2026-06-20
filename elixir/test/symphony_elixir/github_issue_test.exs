@@ -283,6 +283,49 @@ defmodule SymphonyElixir.GitHubIssueTest do
     assert_received {:resolve_github_intake_target, "LAB", "Backlog", ["Symphony", "symphony"]}
   end
 
+  test "sync skips duplicate GitHub issue URLs seen through multiple repository routes" do
+    settings =
+      intake_settings(%{
+        "repository" => %{
+          "default" => "octo/repo",
+          "project_routes" => %{
+            "octo/repo" => ["Symphony"],
+            "octo/other" => ["Other"]
+          }
+        }
+      })
+
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", args, _opts ->
+        repo = Enum.at(args, 3)
+        send(self(), {:listed_repo, repo})
+
+        {:ok,
+         {Jason.encode!([
+            %{
+              "number" => 67,
+              "title" => "Fix source sync",
+              "body" => "",
+              "url" => "https://github.com/octo/repo/issues/67"
+            }
+          ]), 0}}
+      end
+    }
+
+    assert {:ok, %{created: 1, skipped: 1, errors: 0}} =
+             GitHubIssue.sync_open_issues_to_linear(settings, FakeLinearIntakeAdapter, deps)
+
+    assert_received {:listed_repo, "octo/repo"}
+    assert_received {:listed_repo, "octo/other"}
+
+    assert_received {:github_issue_synced?, "https://github.com/octo/repo/issues/67"}
+    refute_received {:github_issue_synced?, "https://github.com/octo/repo/issues/67"}
+
+    assert_received {:create_github_backlog_issue, %{title: "Fix source sync"}}
+    refute_received {:create_github_backlog_issue, _attrs}
+  end
+
   test "sync imports configured label matches into the first active tracker state" do
     deps = %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,
