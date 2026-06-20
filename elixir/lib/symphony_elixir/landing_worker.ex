@@ -859,15 +859,11 @@ defmodule SymphonyElixir.LandingWorker do
     end
   end
 
-  defp runtime_stale_reason(_freshness), do: "Symphony runtime freshness is unknown; pull/restart required before landing"
-
   defp freshness_value(freshness, key) when is_map(freshness) do
     freshness
     |> Map.get(key)
     |> blank_fallback("unknown")
   end
-
-  defp freshness_value(_freshness, _key), do: "unknown"
 
   @spec runtime_deps() :: deps()
   defp runtime_deps do

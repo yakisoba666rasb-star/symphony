@@ -1016,6 +1016,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
+             "runtime_freshness" => nil,
              "counts" => %{
                "running" => 1,
                "reviewing" => 1,

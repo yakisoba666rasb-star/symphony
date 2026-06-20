@@ -256,6 +256,105 @@ defmodule SymphonyElixir.LandingWorkerTest do
              LandingWorker.execute(Config.settings!(), FakeTrackerNoComment, [ready_entry()], deps())
   end
 
+  test "stale runtime blocking is inert while landing execution is disabled" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: false
+    )
+
+    assert %{enabled: false, attempted: 0, merged: 0, blocked: 0, skipped: 0, errors: 0} =
+             LandingWorker.block_runtime_stale(Config.settings!(), FakeTracker, [ready_entry()], stale_freshness())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: false,
+      landing_execute_enabled: true
+    )
+
+    assert %{enabled: false, attempted: 0, merged: 0, blocked: 0, skipped: 0, errors: 0} =
+             LandingWorker.block_runtime_stale(Config.settings!(), FakeTracker, [ready_entry()], stale_freshness())
+
+    refute_receive {:landing_state_update, _issue_id, _state_name}, 100
+  end
+
+  test "stale runtime blocking reports tracker capability errors before mutating Linear" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true
+    )
+
+    assert %{enabled: true, attempted: 0, merged: 0, blocked: 0, skipped: 0, errors: 1} =
+             LandingWorker.block_runtime_stale(
+               Config.settings!(),
+               FakeTrackerNoState,
+               [ready_entry()],
+               stale_freshness()
+             )
+
+    assert %{enabled: true, attempted: 0, merged: 0, blocked: 0, skipped: 0, errors: 1} =
+             LandingWorker.block_runtime_stale(
+               Config.settings!(),
+               FakeTrackerNoComment,
+               [ready_entry()],
+               stale_freshness()
+             )
+  end
+
+  test "stale runtime blocking moves landing items to blocked with a visible restart reason" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true,
+      landing_blocked_state: "Needs Human"
+    )
+
+    result =
+      LandingWorker.block_runtime_stale(
+        Config.settings!(),
+        FakeTracker,
+        [ready_entry(), :invalid],
+        stale_freshness()
+      )
+
+    assert %{enabled: true, attempted: 0, merged: 0, blocked: 1, skipped: 0, errors: 0} = result
+    assert_receive {:landing_state_update, "issue-1", "Needs Human"}
+    assert_receive {:landing_labels, "issue-1", labels}
+    assert labels == ["landing-blocked", "landing-stale-runtime"]
+    assert_receive {:landing_comment, "issue-1", body}
+    assert body =~ "execution blocked"
+    assert body =~ "Symphony runtime freshness is stale"
+    assert body =~ "Runtime HEAD: runtime-sha"
+    assert body =~ "Upstream: origin/main upstream-sha"
+    assert body =~ "Labels: landing-blocked, landing-stale-runtime"
+    assert body =~ "No merge was attempted"
+    refute_receive {:gh_command, _args}, 100
+  end
+
+  test "stale runtime blocking comments when the blocked transition fails" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true,
+      landing_blocked_state: "Blocked"
+    )
+
+    result =
+      LandingWorker.block_runtime_stale(
+        Config.settings!(),
+        FakeTrackerBlockedStateMissing,
+        [ready_entry()],
+        stale_freshness()
+      )
+
+    assert %{enabled: true, attempted: 0, merged: 0, blocked: 0, skipped: 0, errors: 1} = result
+    assert_receive {:landing_state_update, "issue-1", "Blocked"}
+    assert_receive {:landing_labels, "issue-1", labels}
+    assert labels == ["landing-blocked", "landing-stale-runtime"]
+    assert_receive {:landing_comment, "issue-1", body}
+    assert body =~ "could not mark the item blocked"
+    assert body =~ "Original blocker: Symphony runtime freshness is stale"
+    assert body =~ "Target blocked state: Blocked"
+    assert body =~ "state_not_found"
+    assert body =~ "Pull the latest code, restart the runtime"
+  end
+
   test "revalidates and merges the first ready queue entry" do
     write_workflow_file!(Workflow.workflow_file_path(),
       landing_enabled: true,
@@ -783,6 +882,18 @@ defmodule SymphonyElixir.LandingWorkerTest do
       mergeability: "CLEAN",
       head_branch: "lab-1",
       head_sha: "abc123"
+    }
+  end
+
+  defp stale_freshness do
+    %{
+      status: :stale,
+      checked_at: DateTime.utc_now() |> DateTime.truncate(:second),
+      repo_path: "/tmp/symphony",
+      current_sha: "runtime-sha",
+      upstream_ref: "origin/main",
+      upstream_sha: "upstream-sha",
+      message: "runtime HEAD does not contain origin/main; pull/restart required"
     }
   end
 
