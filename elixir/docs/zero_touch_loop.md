@@ -219,6 +219,9 @@ github_intake:
   retry_ttl_ms: 3600000      # W1
   mirror_labels: true        # LAB-422
   todo_labels: []            # W5
+  linear_issue_create_disabled_repos: []
+                              # Repos where Linear's official GitHub
+                              # integration creates Linear issues first.
 done_sync:
   interval_ms: 120000        # W3
 landing:

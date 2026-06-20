@@ -1697,8 +1697,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert opts[:extra_prompt] =~ "Landing repair context"
     assert opts[:extra_prompt] =~ "https://github.com/octo/repo/pull/206"
     assert opts[:extra_prompt] =~ "mergeability=UNSTABLE"
-    assert opts[:extra_prompt] =~ "return the Linear issue to In Review"
+    assert opts[:extra_prompt] =~ "let Symphony run review handoff"
+    assert opts[:extra_prompt] =~ "Symphony can move the issue back to Approved to Land"
     assert opts[:extra_prompt] =~ "Do not merge the PR"
+    assert opts[:auto_approve_landing_after_review] == true
 
     assert Map.has_key?(state.running, issue_id)
   end
@@ -3713,8 +3715,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert opts[:extra_prompt] =~ "Landing repair context"
     assert opts[:extra_prompt] =~ "https://github.com/octo/repo/pull/200"
     assert opts[:extra_prompt] =~ "mergeability=DIRTY"
-    assert opts[:extra_prompt] =~ "return the Linear issue to In Review"
+    assert opts[:extra_prompt] =~ "let Symphony run review handoff"
+    assert opts[:extra_prompt] =~ "Symphony can move the issue back to Approved to Land"
     assert opts[:extra_prompt] =~ "Do not merge the PR"
+    assert opts[:auto_approve_landing_after_review] == true
   end
 
   test "orchestrator reconciles landing repair issues by dispatching dirty PRs" do
@@ -3792,8 +3796,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert opts[:extra_prompt] =~ "Landing repair context"
     assert opts[:extra_prompt] =~ "https://github.com/octo/repo/pull/200"
     assert opts[:extra_prompt] =~ "mergeability=DIRTY"
-    assert opts[:extra_prompt] =~ "return the Linear issue to In Review"
+    assert opts[:extra_prompt] =~ "let Symphony run review handoff"
+    assert opts[:extra_prompt] =~ "Symphony can move the issue back to Approved to Land"
     assert opts[:extra_prompt] =~ "Do not merge the PR"
+    assert opts[:auto_approve_landing_after_review] == true
   end
 
   test "orchestrator preserves running landing repair workers during dirty PR reconcile" do
@@ -4693,11 +4699,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(%Orchestrator.State{})
 
-    assert_receive {:post_merge_fetch_states, active_state_names}, 200
-    assert "In Progress" in active_state_names
-    refute "Done" in active_state_names
+    active_state_names =
+      receive_post_merge_fetch_states(fn state_names ->
+        "In Progress" in state_names and "Done" not in state_names
+      end)
 
-    assert_receive {:post_merge_fetch_states, done_state_names}, 200
+    assert "In Progress" in active_state_names
+
+    done_state_names = receive_post_merge_fetch_states(&(&1 == ["Done"]))
     assert done_state_names == ["Done"]
 
     assert_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/381"}, 200
@@ -4733,8 +4742,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     due_state = %{state | last_done_sync_ms: nil}
     _state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(due_state)
 
-    assert_receive {:post_merge_fetch_states, _active_state_names}, 200
-    assert_receive {:post_merge_fetch_states, ["Done"]}, 200
+    receive_post_merge_fetch_states(fn state_names ->
+      "In Progress" in state_names and "Done" not in state_names
+    end)
+
+    receive_post_merge_fetch_states(&(&1 == ["Done"]))
     refute_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/381"}, 100
     refute_receive {:merged_issue_pr_lookup_called, "MT-381", _issue_url, _branch_name}, 100
     refute_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", _close_comment}, 100
@@ -4776,8 +4788,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(%Orchestrator.State{})
 
-    assert_receive {:post_merge_fetch_states, _active_state_names}, 200
-    assert_receive {:post_merge_fetch_states, ["Done"]}, 200
+    receive_post_merge_fetch_states(fn state_names ->
+      "In Progress" in state_names and "Done" not in state_names
+    end)
+
+    receive_post_merge_fetch_states(&(&1 == ["Done"]))
     assert_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/381"}, 200
     refute_receive {:merged_issue_pr_lookup_called, "MT-381", _issue_url, _branch_name}, 100
     refute_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", _close_comment}, 100
@@ -6999,6 +7014,202 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     state = :sys.get_state(pid, 15_000)
     assert state.pending_review_handoffs == %{}
     assert %{reviewing: []} = Orchestrator.snapshot(orchestrator_name, 5_000)
+  end
+
+  test "orchestrator returns clean approved landing repair handoffs to Approved to Land" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      landing_enabled: true,
+      landing_repair_enabled: true,
+      landing_approval_state: "Approved to Land",
+      tracker_review_state: "In Review"
+    )
+
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+
+    previous_tracker_state_update_recipient =
+      Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
+
+    previous_tracker_comment_recipient = Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+
+      if is_nil(previous_tracker_state_update_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_state_update_recipient)
+      else
+        Application.put_env(:symphony_elixir, :tracker_state_update_recipient, previous_tracker_state_update_recipient)
+      end
+
+      if is_nil(previous_tracker_comment_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+      else
+        Application.put_env(:symphony_elixir, :tracker_comment_recipient, previous_tracker_comment_recipient)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-reviewing-repair-approved"
+    orchestrator_name = Module.concat(__MODULE__, :ReviewingApprovedLandingRepairOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    review_ref = make_ref()
+
+    running_entry = %{
+      issue_id: issue_id,
+      identifier: "LAB-REPAIR-OK",
+      issue: %Issue{id: issue_id, identifier: "LAB-REPAIR-OK", state: "In Progress"},
+      session_id: "thread-repair-ok",
+      auto_approve_landing_after_review: true,
+      last_codex_message: nil,
+      last_codex_event: nil,
+      last_codex_timestamp: nil
+    }
+
+    initial_state = :sys.get_state(pid, 15_000)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+      |> Map.put(:pending_review_handoffs, %{
+        review_ref => %{
+          mode: :normal,
+          issue_id: issue_id,
+          running_entry: running_entry,
+          session_id: "thread-repair-ok",
+          pr: %{
+            "url" => "https://github.com/acme/repo/pull/202",
+            "state" => "OPEN",
+            "isDraft" => false,
+            "mergeStateStatus" => "CLEAN"
+          },
+          tracker: FakeTrackerUpdateInReview,
+          started_at: DateTime.utc_now()
+        }
+      })
+    end)
+
+    send(pid, {
+      review_ref,
+      {:ok, %{approved_equivalent: true, blocking_findings: [], tests_required: [], residual_risk: ""}}
+    })
+
+    assert_receive {:tracker_state_update_called, ^issue_id, "Approved to Land"}
+
+    state = :sys.get_state(pid, 15_000)
+    assert state.pending_review_handoffs == %{}
+    assert MapSet.member?(state.completed, issue_id)
+  end
+
+  test "orchestrator keeps approved landing repair handoffs in review when PR is not clean" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      landing_enabled: true,
+      landing_repair_enabled: true,
+      landing_approval_state: "Approved to Land",
+      tracker_review_state: "In Review"
+    )
+
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+
+    previous_tracker_state_update_recipient =
+      Application.get_env(:symphony_elixir, :tracker_state_update_recipient)
+
+    previous_tracker_comment_recipient = Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+
+      if is_nil(previous_tracker_state_update_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_state_update_recipient)
+      else
+        Application.put_env(:symphony_elixir, :tracker_state_update_recipient, previous_tracker_state_update_recipient)
+      end
+
+      if is_nil(previous_tracker_comment_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+      else
+        Application.put_env(:symphony_elixir, :tracker_comment_recipient, previous_tracker_comment_recipient)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-reviewing-repair-dirty"
+    orchestrator_name = Module.concat(__MODULE__, :ReviewingApprovedLandingRepairDirtyOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    review_ref = make_ref()
+
+    running_entry = %{
+      issue_id: issue_id,
+      identifier: "LAB-REPAIR-DIRTY",
+      issue: %Issue{id: issue_id, identifier: "LAB-REPAIR-DIRTY", state: "In Progress"},
+      session_id: "thread-repair-dirty",
+      auto_approve_landing_after_review: true,
+      last_codex_message: nil,
+      last_codex_event: nil,
+      last_codex_timestamp: nil
+    }
+
+    initial_state = :sys.get_state(pid, 15_000)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+      |> Map.put(:pending_review_handoffs, %{
+        review_ref => %{
+          mode: :normal,
+          issue_id: issue_id,
+          running_entry: running_entry,
+          session_id: "thread-repair-dirty",
+          pr: %{
+            "url" => "https://github.com/acme/repo/pull/203",
+            "state" => "OPEN",
+            "isDraft" => false,
+            "mergeStateStatus" => "DIRTY"
+          },
+          tracker: FakeTrackerUpdateInReview,
+          started_at: DateTime.utc_now()
+        }
+      })
+    end)
+
+    send(pid, {
+      review_ref,
+      {:ok, %{approved_equivalent: true, blocking_findings: [], tests_required: [], residual_risk: ""}}
+    })
+
+    assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}
+
+    state = :sys.get_state(pid, 15_000)
+    assert state.pending_review_handoffs == %{}
+    assert MapSet.member?(state.completed, issue_id)
   end
 
   test "orchestrator removes pending review handoff when task DOWN is not normal" do
