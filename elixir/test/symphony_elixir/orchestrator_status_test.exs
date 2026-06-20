@@ -4699,11 +4699,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(%Orchestrator.State{})
 
-    assert_receive {:post_merge_fetch_states, active_state_names}, 200
-    assert "In Progress" in active_state_names
-    refute "Done" in active_state_names
+    active_state_names =
+      receive_post_merge_fetch_states(fn state_names ->
+        "In Progress" in state_names and "Done" not in state_names
+      end)
 
-    assert_receive {:post_merge_fetch_states, done_state_names}, 200
+    assert "In Progress" in active_state_names
+
+    done_state_names = receive_post_merge_fetch_states(&(&1 == ["Done"]))
     assert done_state_names == ["Done"]
 
     assert_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/381"}, 200
@@ -4739,8 +4742,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     due_state = %{state | last_done_sync_ms: nil}
     _state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(due_state)
 
-    assert_receive {:post_merge_fetch_states, _active_state_names}, 200
-    assert_receive {:post_merge_fetch_states, ["Done"]}, 200
+    receive_post_merge_fetch_states(fn state_names ->
+      "In Progress" in state_names and "Done" not in state_names
+    end)
+
+    receive_post_merge_fetch_states(&(&1 == ["Done"]))
     refute_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/381"}, 100
     refute_receive {:merged_issue_pr_lookup_called, "MT-381", _issue_url, _branch_name}, 100
     refute_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", _close_comment}, 100
@@ -4782,8 +4788,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(%Orchestrator.State{})
 
-    assert_receive {:post_merge_fetch_states, _active_state_names}, 200
-    assert_receive {:post_merge_fetch_states, ["Done"]}, 200
+    receive_post_merge_fetch_states(fn state_names ->
+      "In Progress" in state_names and "Done" not in state_names
+    end)
+
+    receive_post_merge_fetch_states(&(&1 == ["Done"]))
     assert_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/381"}, 200
     refute_receive {:merged_issue_pr_lookup_called, "MT-381", _issue_url, _branch_name}, 100
     refute_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", _close_comment}, 100
