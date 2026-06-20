@@ -318,6 +318,7 @@ defmodule SymphonyElixir.StatusDashboard do
              unroutable: Map.get(snapshot, :unroutable, []),
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
+             runtime_freshness: Map.get(snapshot, :runtime_freshness),
              polling: Map.get(snapshot, :polling)
            }},
           update_token_samples(token_samples, now_ms, total_tokens)
@@ -335,6 +336,7 @@ defmodule SymphonyElixir.StatusDashboard do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
         rate_limits = Map.get(snapshot, :rate_limits)
+        runtime_freshness = Map.get(snapshot, :runtime_freshness)
         unroutable = Map.get(snapshot, :unroutable, [])
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
@@ -374,6 +376,7 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize(" | ", @ansi_gray) <>
              colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
+           colorize("│ Runtime Freshness: ", @ansi_bold) <> format_runtime_freshness(runtime_freshness),
            project_link_lines,
            project_refresh_line,
            colorize("├─ Running", @ansi_bold),
@@ -395,6 +398,7 @@ defmodule SymphonyElixir.StatusDashboard do
           colorize("╭─ SYMPHONY STATUS", @ansi_bold),
           colorize("│ Orchestrator snapshot unavailable", @ansi_red),
           colorize("│ Throughput: ", @ansi_bold) <> colorize("#{format_tps(tps)} tps", @ansi_cyan),
+          colorize("│ Runtime Freshness: ", @ansi_bold) <> colorize("unknown", @ansi_red),
           format_project_link_lines(),
           format_project_refresh_line(nil),
           closing_border()
@@ -1026,6 +1030,49 @@ defmodule SymphonyElixir.StatusDashboard do
     |> truncate(80)
     |> colorize(@ansi_gray)
   end
+
+  defp format_runtime_freshness(%{status: status} = freshness) do
+    color =
+      case normalize_runtime_freshness_status(status) do
+        "fresh" -> @ansi_green
+        _ -> @ansi_red
+      end
+
+    status_text =
+      status
+      |> normalize_runtime_freshness_status()
+      |> String.upcase()
+
+    current = freshness |> map_value(["current_sha", :current_sha]) |> short_sha()
+    upstream_ref = freshness |> map_value(["upstream_ref", :upstream_ref]) |> to_display_value("upstream")
+    upstream = freshness |> map_value(["upstream_sha", :upstream_sha]) |> short_sha()
+    message = freshness |> map_value(["message", :message])
+
+    suffix =
+      if is_binary(message) and String.trim(message) != "" do
+        colorize(" #{truncate(message, 72)}", @ansi_gray)
+      else
+        ""
+      end
+
+    colorize(status_text, color) <>
+      colorize(" #{current} / #{upstream_ref} #{upstream}", @ansi_gray) <>
+      suffix
+  end
+
+  defp format_runtime_freshness(_freshness), do: colorize("UNKNOWN", @ansi_red)
+
+  defp normalize_runtime_freshness_status(status) do
+    status
+    |> to_string()
+    |> String.downcase()
+  end
+
+  defp short_sha(sha) when is_binary(sha) and byte_size(sha) >= 7, do: binary_part(sha, 0, 7)
+  defp short_sha(_sha), do: "unknown"
+
+  defp to_display_value(value, _fallback) when is_binary(value) and value != "", do: value
+  defp to_display_value(_value, fallback), do: fallback
 
   defp format_rate_limit_bucket(nil), do: "n/a"
 

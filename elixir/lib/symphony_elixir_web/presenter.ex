@@ -39,7 +39,8 @@ defmodule SymphonyElixirWeb.Presenter do
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
           unroutable: Enum.map(Map.get(snapshot, :unroutable, []), &unroutable_entry_payload/1),
           codex_totals: snapshot.codex_totals,
-          rate_limits: snapshot.rate_limits
+          rate_limits: snapshot.rate_limits,
+          runtime_freshness: Map.get(snapshot, :runtime_freshness)
         }
         |> maybe_put_dirty_workspace_cleanup(snapshot)
 

@@ -128,6 +128,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
             <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
           </article>
+
+          <article class="metric-card">
+            <p class="metric-label">Runtime freshness</p>
+            <p class={runtime_freshness_value_class(@payload.runtime_freshness)}>
+              <%= runtime_freshness_status(@payload.runtime_freshness) %>
+            </p>
+            <p class="metric-detail mono" title={runtime_freshness_title(@payload.runtime_freshness)}>
+              <%= runtime_freshness_summary(@payload.runtime_freshness) %>
+            </p>
+          </article>
         </section>
 
         <section class="section-card">
@@ -610,6 +620,38 @@ defmodule SymphonyElixirWeb.DashboardLive do
       true -> base
     end
   end
+
+  defp runtime_freshness_value_class(%{status: :fresh}), do: "metric-value numeric"
+  defp runtime_freshness_value_class(%{status: "fresh"}), do: "metric-value numeric"
+  defp runtime_freshness_value_class(_freshness), do: "metric-value numeric state-badge-danger"
+
+  defp runtime_freshness_status(%{status: status}), do: status |> to_string() |> String.upcase()
+  defp runtime_freshness_status(_freshness), do: "UNKNOWN"
+
+  defp runtime_freshness_summary(%{} = freshness) do
+    current = short_sha(Map.get(freshness, :current_sha))
+    upstream_ref = Map.get(freshness, :upstream_ref) || "upstream"
+    upstream = short_sha(Map.get(freshness, :upstream_sha))
+    "#{current} / #{upstream_ref} #{upstream}"
+  end
+
+  defp runtime_freshness_summary(_freshness), do: "unknown"
+
+  defp runtime_freshness_title(%{} = freshness) do
+    [
+      "repo=#{Map.get(freshness, :repo_path) || "unknown"}",
+      "current=#{Map.get(freshness, :current_sha) || "unknown"}",
+      "upstream=#{Map.get(freshness, :upstream_ref) || "unknown"} #{Map.get(freshness, :upstream_sha) || "unknown"}",
+      Map.get(freshness, :message)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" ")
+  end
+
+  defp runtime_freshness_title(_freshness), do: "Runtime freshness is unknown"
+
+  defp short_sha(sha) when is_binary(sha) and byte_size(sha) >= 7, do: binary_part(sha, 0, 7)
+  defp short_sha(_sha), do: "unknown"
 
   defp schedule_runtime_tick do
     Process.send_after(self(), :runtime_tick, @runtime_tick_ms)
