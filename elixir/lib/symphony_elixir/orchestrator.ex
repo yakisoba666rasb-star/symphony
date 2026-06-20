@@ -841,7 +841,9 @@ defmodule SymphonyElixir.Orchestrator do
             "verdict=#{inspect(verdict)}"
         )
 
-        move_issue_to_review_after_approval(state, issue.id, running_entry, session_id, tracker)
+        state
+        |> move_issue_to_review_after_approval(issue.id, running_entry, session_id, tracker)
+        |> maybe_release_completed_review_handoff_claim(issue.id, metadata)
 
       {:error, reason} ->
         error =
@@ -1479,7 +1481,7 @@ defmodule SymphonyElixir.Orchestrator do
         comment_landing_repair_dispatch_skipped(issue, "issue is not active/routable", pr)
         state
 
-      MapSet.member?(state.claimed, issue.id) or Map.has_key?(state.running, issue.id) or Map.has_key?(state.blocked, issue.id) ->
+      landing_repair_issue_tracked?(state, issue.id) ->
         Logger.info("Skipping immediate landing repair dispatch; issue already tracked: #{issue_context(issue)}")
         state
 
@@ -1498,12 +1500,31 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       true ->
+        state = release_stale_landing_repair_claim(state, issue.id)
+
         Logger.info(
           "Dispatching immediate landing repair worker for #{issue_context(issue)} " <>
             "pr=#{pr_url(pr)} mergeability=#{inspect(pr_merge_state(pr))}"
         )
 
         do_dispatch_issue(state, issue, nil, nil, put_landing_repair_prompt([], issue, pr))
+    end
+  end
+
+  defp landing_repair_issue_tracked?(%State{} = state, issue_id) do
+    Map.has_key?(state.running, issue_id) or Map.has_key?(state.blocked, issue_id) or
+      (MapSet.member?(state.claimed, issue_id) and not MapSet.member?(state.completed, issue_id))
+  end
+
+  defp release_stale_landing_repair_claim(%State{} = state, issue_id) do
+    if MapSet.member?(state.claimed, issue_id) and MapSet.member?(state.completed, issue_id) do
+      Logger.info("Releasing stale completed landing repair claim for issue_id=#{issue_id}")
+
+      state
+      |> release_issue_claim(issue_id)
+      |> Map.update!(:completed, &MapSet.delete(&1, issue_id))
+    else
+      state
     end
   end
 
@@ -2764,7 +2785,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> terminate_running_issue(issue.id, false)
       |> Map.update!(:claimed, &MapSet.put(&1, issue.id))
 
-    {:handoff, start_review_handoff_task(state, :normal, issue.id, running_entry, session_id, pr, nil)}
+    {:handoff, start_review_handoff_task(state, :normal, issue.id, running_entry, session_id, pr, nil, release_claim_on_completion: true)}
   end
 
   defp reconcile_running_issues(%State{} = state) do
@@ -4757,7 +4778,7 @@ defmodule SymphonyElixir.Orchestrator do
               retry_attempts: Map.delete(state.retry_attempts, issue.id)
           }
 
-        {:handoff, start_review_handoff_task(state, :normal, issue.id, running_entry, session_id, pr, nil, release_claim_on_completion: Keyword.get(opts, :release_claim_on_completion, false))}
+        {:handoff, start_review_handoff_task(state, :normal, issue.id, running_entry, session_id, pr, nil, release_claim_on_completion: Keyword.get(opts, :release_claim_on_completion, true))}
 
       {:error, reason} ->
         error = "failed to prepare workspace for existing open PR before dispatch: #{inspect(reason)}"

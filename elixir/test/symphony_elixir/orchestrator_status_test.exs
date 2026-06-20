@@ -1942,6 +1942,26 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  test "Approved to Land repair dispatch releases stale completed claims" do
+    %{issue_id: issue_id} = setup_landing_repair_dispatch_test!()
+
+    initial_state = %Orchestrator.State{
+      claimed: MapSet.new([issue_id]),
+      completed: MapSet.new([issue_id])
+    }
+
+    state = Orchestrator.plan_approved_landings_for_test(initial_state)
+
+    assert_receive {:landing_worker_execute, true, 1}
+    assert_receive {:landing_repair_issue_refresh, [^issue_id]}
+    assert_receive {:agent_runner_called, %{id: ^issue_id, state: "In Progress"}, opts}, 1_000
+
+    assert opts[:extra_prompt] =~ "Landing repair context"
+    assert Map.has_key?(state.running, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+    refute MapSet.member?(state.completed, issue_id)
+  end
+
   test "Approved to Land repair dispatch skips when worker capacity is exhausted" do
     %{issue_id: issue_id} = setup_landing_repair_dispatch_test!()
 
@@ -3597,6 +3617,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert state.running == %{}
     assert state.blocked == %{}
+    refute MapSet.member?(state.claimed, issue_id)
     assert MapSet.member?(state.completed, issue_id)
   end
 
@@ -3901,6 +3922,128 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     state = :sys.get_state(pid, 15_000)
     assert Map.has_key?(state.running, issue_id)
+  end
+
+  test "orchestrator releases running open PR handoff claim after review approval" do
+    stop_default_orchestrator_for_direct_landing_repair_test!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      poll_interval_ms: 5_000,
+      repository_default: "octo/repo",
+      landing_enabled: true,
+      landing_execute_enabled: false,
+      landing_blocked_state: "Merge Blocked",
+      landing_repair_enabled: true,
+      landing_repair_state: "In Progress"
+    )
+
+    previous_env =
+      for key <- [
+            :github_pr_lookup,
+            :review_runner,
+            :tracker_module,
+            :tracker_state_update_recipient,
+            :tracker_comment_recipient,
+            :active_open_pr_reconcile_issues,
+            :memory_tracker_issues
+          ],
+          do: {key, Application.get_env(:symphony_elixir, key)}
+
+    on_exit(fn ->
+      Enum.each(previous_env, fn
+        {key, nil} -> Application.delete_env(:symphony_elixir, key)
+        {key, value} -> Application.put_env(:symphony_elixir, key, value)
+      end)
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupOpenIssuePr)
+    Application.put_env(:symphony_elixir, :review_runner, FakeReviewRunnerApproved)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerActiveOpenPrReconcile)
+    Application.put_env(:symphony_elixir, :tracker_state_update_recipient, self())
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-running-open-pr-handoff-release-claim"
+    issue_url = "https://linear.app/example/issue/LAB-391/retry-policy"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "LAB-391",
+      title: "Unify retry policy",
+      state: "In Progress",
+      url: issue_url,
+      branch_name: "LAB-391-retry-policy",
+      description: "Repo: octo/repo"
+    }
+
+    Application.put_env(:symphony_elixir, :active_open_pr_reconcile_issues, [])
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    orchestrator_name = Module.concat(__MODULE__, :RunningOpenPrHandoffReleaseClaimOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        after
+          5_000 -> :ok
+        end
+      end)
+
+    on_exit(fn ->
+      if Process.alive?(worker_pid) do
+        send(worker_pid, :stop)
+      end
+    end)
+
+    worker_ref = Process.monitor(worker_pid)
+    initial_state = :sys.get_state(pid, 15_000)
+
+    running_entry =
+      issue
+      |> Orchestrator.running_entry_for_test(pid: worker_pid, ref: worker_ref)
+      |> Map.merge(%{
+        workspace_path: "/tmp/lab-391-running-open-pr-handoff",
+        session_id: "thread-running-open-pr-handoff-release-claim"
+      })
+
+    :sys.replace_state(pid, fn _state ->
+      %{
+        initial_state
+        | running: Map.put(initial_state.running, issue_id, running_entry),
+          claimed: MapSet.put(initial_state.claimed, issue_id)
+      }
+    end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :active_open_pr_reconcile_issues, [issue])
+
+    send(pid, :run_poll_cycle)
+
+    assert_receive {:active_open_pr_reconcile_fetch_called, ["In Progress"]}, 1_000
+
+    assert_receive {:open_issue_pr_lookup_called, "octo/repo", "LAB-391", ^issue_url, "LAB-391-retry-policy", []},
+                   1_000
+
+    assert_receive {:tracker_state_update_called, ^issue_id, "In Review"}, 1_000
+
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        MapSet.member?(state.completed, issue_id)
+      end)
+
+    assert state.running == %{}
+    assert state.blocked == %{}
+    refute MapSet.member?(state.claimed, issue_id)
+    assert MapSet.member?(state.completed, issue_id)
   end
 
   test "orchestrator defers landing repair reconcile while PR mergeability is unknown" do
@@ -8044,6 +8187,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert comment =~ "review loop did not approve PR"
 
     refute MapSet.member?(state.completed, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
 
     assert %{identifier: "MT-REVIEW-BLOCKED", error: error} = state.blocked[issue_id]
@@ -8169,6 +8313,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     state = :sys.get_state(pid, 15_000)
     refute Process.alive?(agent_pid)
     refute MapSet.member?(state.completed, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
 
     assert %{
              identifier: "MT-PREMATURE-REVIEW",
@@ -8299,6 +8444,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     state = :sys.get_state(pid, 15_000)
     refute Process.alive?(agent_pid)
     assert MapSet.member?(state.completed, issue_id)
+    refute MapSet.member?(state.claimed, issue_id)
     refute Map.has_key?(state.blocked, issue_id)
   end
 
