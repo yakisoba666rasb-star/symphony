@@ -1295,6 +1295,18 @@ defmodule SymphonyElixir.GitHubIssueTest do
     assert {:ok, nil} = GitHubIssue.closed_at("octo/repo", nil, deps)
   end
 
+  test "closed timestamp lookup treats merged pull request issue endpoints as not applicable" do
+    deps = %{
+      find_gh_bin: fn -> "/tmp/fake-gh" end,
+      run_command: fn "/tmp/fake-gh", ["issue", "view", "67", "--repo", "octo/repo", "--json", "state,closedAt"], _opts ->
+        {:ok, {Jason.encode!(%{"state" => "MERGED", "closedAt" => "2026-06-11T00:46:00Z"}), 0}}
+      end
+    }
+
+    assert {:ok, :not_applicable} =
+             GitHubIssue.closed_at("octo/repo", "https://github.com/octo/repo/issues/67", deps)
+  end
+
   test "closed timestamp lookup returns GitHub command and payload errors" do
     command_failure_deps = %{
       find_gh_bin: fn -> "/tmp/fake-gh" end,

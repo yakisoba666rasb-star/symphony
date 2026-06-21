@@ -80,10 +80,10 @@ defmodule SymphonyElixir.GitHubIssue do
 
   def close_if_open(_repo, _issue_url, _comment, _deps), do: {:ok, :not_applicable}
 
-  @spec closed_at(String.t(), String.t() | nil) :: {:ok, String.t() | nil} | {:error, term()}
+  @spec closed_at(String.t(), String.t() | nil) :: {:ok, String.t() | nil | :not_applicable} | {:error, term()}
   def closed_at(repo, issue_url), do: closed_at(repo, issue_url, runtime_deps())
 
-  @spec closed_at(String.t(), String.t() | nil, deps()) :: {:ok, String.t() | nil} | {:error, term()}
+  @spec closed_at(String.t(), String.t() | nil, deps()) :: {:ok, String.t() | nil | :not_applicable} | {:error, term()}
   def closed_at(repo, issue_url, deps) when is_binary(repo) and is_binary(issue_url) do
     with {:ok, number} <- issue_number_for_repo(repo, issue_url),
          {:ok, gh_bin} <- find_gh_binary(deps) do
@@ -656,12 +656,24 @@ defmodule SymphonyElixir.GitHubIssue do
 
   defp parse_issue_closed_at(output) do
     case Jason.decode(output) do
-      {:ok, %{"closedAt" => closed_at}} when is_binary(closed_at) -> {:ok, closed_at}
-      {:ok, %{"state" => state}} when is_binary(state) -> {:ok, nil}
-      {:ok, other} -> {:error, {:invalid_issue_payload, other}}
-      {:error, reason} -> {:error, {:gh_json_error, reason}}
+      {:ok, %{"state" => state} = payload} when is_binary(state) ->
+        parse_issue_closed_at_payload(String.upcase(state), payload)
+
+      {:ok, other} ->
+        {:error, {:invalid_issue_payload, other}}
+
+      {:error, reason} ->
+        {:error, {:gh_json_error, reason}}
     end
   end
+
+  # GitHub exposes PRs through the issue endpoint; MERGED means this URL is a
+  # pull request endpoint, not a source issue that should be closed.
+  defp parse_issue_closed_at_payload("MERGED", _payload), do: {:ok, :not_applicable}
+
+  defp parse_issue_closed_at_payload(_state, %{"closedAt" => closed_at}) when is_binary(closed_at), do: {:ok, closed_at}
+
+  defp parse_issue_closed_at_payload(_state, _payload), do: {:ok, nil}
 
   defp parse_issue_state(output) do
     case Jason.decode(output) do

@@ -1673,7 +1673,7 @@ defmodule SymphonyElixir.Orchestrator do
     close_candidate_count =
       Enum.count(issues, fn issue ->
         match?(%Issue{}, issue) and issue_has_done_sync_evidence?(issue) and
-          present_string?(RepositoryResolver.source_github_issue_url(issue))
+          RepositoryResolver.source_github_issue_urls(issue) != []
       end)
 
     if close_candidate_count > 0 do
@@ -1686,25 +1686,30 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_close_done_issue_source_github_issue(%Issue{} = issue, %State{} = state) do
-    issue_url = RepositoryResolver.source_github_issue_url(issue)
-    close_key = done_source_github_issue_close_key(issue, issue_url)
-
-    cond do
-      MapSet.member?(state.done_source_github_issue_closes, close_key) ->
-        state
-
-      !issue_has_done_sync_evidence?(issue) ->
-        state
-
-      !present_string?(issue_url) ->
-        state
-
-      true ->
-        do_maybe_close_done_issue_source_github_issue(issue, issue_url, close_key, state)
-    end
+    issue
+    |> done_source_github_issue_urls()
+    |> Enum.reduce(state, &maybe_close_done_issue_source_github_issue_url(issue, &1, &2))
   end
 
   defp maybe_close_done_issue_source_github_issue(_issue, %State{} = state), do: state
+
+  defp done_source_github_issue_urls(%Issue{} = issue) do
+    if issue_has_done_sync_evidence?(issue) do
+      RepositoryResolver.source_github_issue_urls(issue)
+    else
+      []
+    end
+  end
+
+  defp maybe_close_done_issue_source_github_issue_url(%Issue{} = issue, issue_url, %State{} = state) do
+    close_key = done_source_github_issue_close_key(issue, issue_url)
+
+    if MapSet.member?(state.done_source_github_issue_closes, close_key) do
+      state
+    else
+      do_maybe_close_done_issue_source_github_issue(issue, issue_url, close_key, state)
+    end
+  end
 
   defp do_maybe_close_done_issue_source_github_issue(%Issue{} = issue, issue_url, close_key, %State{} = state) do
     attachment_urls = issue_attachment_urls(issue)
@@ -1720,8 +1725,23 @@ defmodule SymphonyElixir.Orchestrator do
 
             mark_done_source_github_issue_close(state, close_key)
 
+          {:ok, :not_applicable} ->
+            Logger.info(
+              "Merged PR Done sync skipping non-source GitHub issue endpoint for #{issue_context(issue)} " <>
+                "repo=#{repo} issue=#{issue_url}"
+            )
+
+            mark_done_source_github_issue_close(state, close_key)
+
           {:ok, false} ->
-            close_done_issue_source_github_issue_with_merged_pr(issue, repo, attachment_urls, close_key, state)
+            close_done_issue_source_github_issue_with_merged_pr(
+              issue,
+              repo,
+              issue_url,
+              attachment_urls,
+              close_key,
+              state
+            )
 
           {:error, reason} ->
             Logger.warning(
@@ -1730,7 +1750,14 @@ defmodule SymphonyElixir.Orchestrator do
                 "continuing with merged PR lookup"
             )
 
-            close_done_issue_source_github_issue_with_merged_pr(issue, repo, attachment_urls, close_key, state)
+            close_done_issue_source_github_issue_with_merged_pr(
+              issue,
+              repo,
+              issue_url,
+              attachment_urls,
+              close_key,
+              state
+            )
         end
 
       {:ok, other} ->
@@ -1759,6 +1786,9 @@ defmodule SymphonyElixir.Orchestrator do
         {:ok, closed_at} when is_binary(closed_at) ->
           {:ok, String.trim(closed_at) != ""}
 
+        {:ok, :not_applicable} ->
+          {:ok, :not_applicable}
+
         {:ok, _open_or_unknown} ->
           {:ok, false}
 
@@ -1773,7 +1803,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp close_done_issue_source_github_issue_with_merged_pr(issue, repo, attachment_urls, close_key, state) do
+  defp close_done_issue_source_github_issue_with_merged_pr(issue, repo, issue_url, attachment_urls, close_key, state) do
     case lookup_merged_pull_request_for_done(issue, repo, attachment_urls) do
       {:ok, %{} = pr} ->
         Logger.info(
@@ -1781,7 +1811,7 @@ defmodule SymphonyElixir.Orchestrator do
             "#{issue_context(issue)} repo=#{repo} pr=#{pr_url(pr)}"
         )
 
-        case close_source_github_issue_after_done(issue, repo, pr) do
+        case close_source_github_issue_after_done(issue, repo, issue_url, pr) do
           {:ok, _status} ->
             mark_done_source_github_issue_close(state, close_key)
 
@@ -1922,7 +1952,7 @@ defmodule SymphonyElixir.Orchestrator do
         )
 
         cleanup_landing_blocking_labels(issue)
-        close_source_github_issue_after_done(issue, repo, pr)
+        close_source_github_issues_after_done(issue, repo, pr)
         post_zero_touch_evidence_after_done(issue, repo, pr)
 
         state
@@ -2325,8 +2355,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp pr_head_ref(%{headRefName: branch}) when is_binary(branch), do: String.trim(branch)
   defp pr_head_ref(_pr), do: nil
 
-  defp close_source_github_issue_after_done(%Issue{} = issue, repo, pr) do
-    issue_url = RepositoryResolver.source_github_issue_url(issue)
+  defp close_source_github_issues_after_done(%Issue{} = issue, repo, pr) do
+    issue
+    |> RepositoryResolver.source_github_issue_urls()
+    |> Enum.each(&close_source_github_issue_after_done(issue, repo, &1, pr))
+  end
+
+  defp close_source_github_issue_after_done(%Issue{} = issue, repo, issue_url, pr) do
     module = github_issue_module()
     comment = source_github_issue_close_comment(issue, pr)
 

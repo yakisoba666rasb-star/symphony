@@ -306,15 +306,15 @@ defmodule SymphonyElixir.GitHubPrPublisher do
   defp source_issue_lines(nil), do: ""
 
   defp source_issue_lines(url) do
-    case github_issue_number(url) do
+    case github_issue_reference(url) do
       nil -> "- Source GitHub issue: #{url}\n"
-      number -> "- Source GitHub issue: #{url}\n- Fixes ##{number}\n"
+      reference -> "- Source GitHub issue: #{url}\n- Closes #{reference}\n"
     end
   end
 
-  defp github_issue_number(url) when is_binary(url) do
-    case Regex.run(~r{https://github\.com/[^/]+/[^/]+/issues/(\d+)(?:[/?#].*)?$}i, String.trim(url)) do
-      [_, number] -> number
+  defp github_issue_reference(url) when is_binary(url) do
+    case Regex.run(~r{https://github\.com/([^/]+/[^/]+)/issues/(\d+)(?:[/?#].*)?$}i, String.trim(url)) do
+      [_, repo, number] -> "#{repo}##{number}"
       _other -> nil
     end
   end
@@ -332,7 +332,7 @@ defmodule SymphonyElixir.GitHubPrPublisher do
   defp issue_value(_issue, _key), do: nil
 
   defp github_issue_url(issue) do
-    RepositoryResolver.source_github_issue_url(issue)
+    RepositoryResolver.labeled_source_github_issue_url(issue)
   end
 
   defp extract_pr_url(output) do

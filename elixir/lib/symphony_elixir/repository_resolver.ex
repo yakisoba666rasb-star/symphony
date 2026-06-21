@@ -14,6 +14,7 @@ defmodule SymphonyElixir.RepositoryResolver do
   @slug_regex ~r/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
   @repo_line_regex ~r/(?im)^\s*(?:repo|repository)\s*:\s*<?((?:https:\/\/(?:www\.)?github\.com\/)?[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?(?:[?#][^\s>]*)?)>?\s*$/
   @source_github_url_regex ~r/(?im)^\s*(?:source|github issue|github pull request|github pr)\s*:\s*(https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(?:issues|pull)\/\d+)\s*$/
+  @source_github_issue_url_regex ~r/(?im)^\s*(?:source|github issue)\s*:\s*(https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+)\s*$/
   @github_url_regex ~r/(?i)https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:\/(?:issues|pull)\/\d+)?/
   @github_issue_url_regex ~r/(?i)https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+/
   @non_repository_github_owners MapSet.new([
@@ -88,10 +89,40 @@ defmodule SymphonyElixir.RepositoryResolver do
     end
   end
 
+  @doc false
   @spec source_github_issue_url(map() | String.t() | nil) :: String.t() | nil
   def source_github_issue_url(issue_or_identifier) do
+    issue_or_identifier
+    |> source_github_issue_urls()
+    |> List.first()
+  end
+
+  @doc """
+  Returns only explicitly labeled source GitHub issue URLs.
+  """
+  @spec labeled_source_github_issue_url(map() | String.t() | nil) :: String.t() | nil
+  def labeled_source_github_issue_url(issue_or_identifier) do
+    issue_or_identifier
+    |> issue_text()
+    |> labeled_github_issue_urls()
+    |> List.first()
+  end
+
+  @doc """
+  Returns candidate source issue URLs in deterministic order.
+
+  Labeled source issue URLs are preferred, then generic GitHub issue URLs from
+  issue text and attachments are included for historical Linear data. Callers
+  that may see pull request issue endpoints must verify candidates with
+  `SymphonyElixir.GitHubIssue.closed_at/2`; merged PR endpoints return
+  `:not_applicable`.
+  """
+  @spec source_github_issue_urls(map() | String.t() | nil) :: [String.t()]
+  def source_github_issue_urls(issue_or_identifier) do
     text = issue_text(issue_or_identifier)
-    source_github_url(text) || first_github_issue_url(text)
+
+    (labeled_github_issue_urls(text) ++ github_issue_urls(text))
+    |> Enum.uniq()
   end
 
   @spec repository_hint?(map() | String.t() | nil) :: boolean()
@@ -255,12 +286,25 @@ defmodule SymphonyElixir.RepositoryResolver do
     end
   end
 
-  defp first_github_issue_url(text) when is_binary(text) do
-    case Regex.run(@github_issue_url_regex, text) do
-      [url | _] -> url
-      _ -> nil
-    end
+  defp labeled_github_issue_urls(text) when is_binary(text) do
+    @source_github_issue_url_regex
+    |> Regex.scan(text, capture: :all_but_first)
+    |> Enum.flat_map(fn
+      [url] -> [url]
+      _other -> []
+    end)
   end
+
+  defp github_issue_urls(text) when is_binary(text) do
+    @github_issue_url_regex
+    |> Regex.scan(text)
+    |> Enum.flat_map(fn
+      [url | _] -> [url]
+      _other -> []
+    end)
+  end
+
+  defp first_github_issue_url(text) when is_binary(text), do: text |> github_issue_urls() |> List.first()
 
   defp validate_source_consistency(nil, _github_slug), do: :ok
   defp validate_source_consistency(_explicit_slug, nil), do: :ok

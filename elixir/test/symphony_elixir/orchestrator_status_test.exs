@@ -551,6 +551,38 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule FakeGitHubIssueCloserWithPrEndpoint do
+    def closed_at(repo, issue_url) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:github_issue_closed_at_called, repo, issue_url})
+
+        _ ->
+          :ok
+      end
+
+      case issue_url do
+        "https://github.com/octo/repo/issues/16" -> {:ok, :not_applicable}
+        _ -> {:ok, nil}
+      end
+    end
+
+    def close_if_open(repo, issue_url, comment) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:github_issue_close_called, repo, issue_url, comment})
+
+        _ ->
+          :ok
+      end
+
+      case issue_url do
+        "https://github.com/octo/repo/issues/16" -> {:ok, :not_applicable}
+        _ -> {:ok, :closed}
+      end
+    end
+  end
+
   defmodule FakeGitHubPrPublisherError do
     def publish_workspace(_workspace_path, _branch_name, _issue), do: {:error, :publish_blocked}
   end
@@ -981,6 +1013,47 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  defmodule FakeTrackerAlreadyDoneSourceIssueWithPrEndpoint do
+    alias SymphonyElixir.Linear.Issue
+
+    def fetch_issues_by_states(state_names) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:post_merge_fetch_states, state_names})
+
+        _ ->
+          :ok
+      end
+
+      if "Done" in state_names do
+        {:ok,
+         [
+           %Issue{
+             id: "issue-already-done-source-pr-endpoint",
+             identifier: "MT-381",
+             title: "Already Done issue with PR endpoint and source GitHub issue",
+             state: "Done",
+             url: "https://linear.app/example/issue/MT-381/body-linked-merged-pr",
+             branch_name: "lab-381-body-linked",
+             project_name: "repo",
+             description: "Repo: https://github.com/octo/repo",
+             attachment_urls: [
+               "https://github.com/octo/repo/issues/16",
+               "https://github.com/octo/repo/issues/381"
+             ]
+           }
+         ]}
+      else
+        {:ok, []}
+      end
+    end
+
+    def fetch_candidate_issues, do: {:ok, []}
+
+    def update_issue_state(_issue_id, _state_name), do: :ok
+    def remove_issue_labels(_issue_id, _labels), do: :ok
+  end
+
   defmodule FakeTrackerDoneSyncImplementationIssue do
     alias SymphonyElixir.Linear.Issue
 
@@ -1003,7 +1076,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            url: "https://linear.app/example/issue/LAB-396/implementation",
            branch_name: "lab-396-implementation",
            project_name: "repo",
-           description: "Repo: https://github.com/octo/repo",
+           description: """
+           GitHub Issue: https://github.com/octo/repo/issues/396
+           Repo: https://github.com/octo/repo
+           """,
            attachment_urls: ["https://github.com/octo/repo/pull/87"]
          }
        ]}
@@ -4752,6 +4828,92 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", _close_comment}, 100
   end
 
+  test "Done sync skips PR issue endpoints and closes later source GitHub issue candidates" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      poll_interval_ms: 50
+    )
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+    previous_github_issue = Application.get_env(:symphony_elixir, :github_issue)
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_tracker_comment_recipient = Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup),
+        do: Application.delete_env(:symphony_elixir, :github_pr_lookup),
+        else: Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+
+      if is_nil(previous_github_issue),
+        do: Application.delete_env(:symphony_elixir, :github_issue),
+        else: Application.put_env(:symphony_elixir, :github_issue, previous_github_issue)
+
+      if is_nil(previous_tracker_module),
+        do: Application.delete_env(:symphony_elixir, :tracker_module),
+        else: Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+
+      if is_nil(previous_tracker_comment_recipient),
+        do: Application.delete_env(:symphony_elixir, :tracker_comment_recipient),
+        else: Application.put_env(:symphony_elixir, :tracker_comment_recipient, previous_tracker_comment_recipient)
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupMergedLinkedPr)
+    Application.put_env(:symphony_elixir, :github_issue, FakeGitHubIssueCloserWithPrEndpoint)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerAlreadyDoneSourceIssueWithPrEndpoint)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(%Orchestrator.State{})
+
+    receive_post_merge_fetch_states(fn state_names ->
+      "In Progress" in state_names and "Done" not in state_names
+    end)
+
+    receive_post_merge_fetch_states(&(&1 == ["Done"]))
+
+    assert_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/16"}, 200
+    refute_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/16", _comment}, 100
+    assert_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/381"}, 200
+
+    assert_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", close_comment}, 200
+    assert close_comment =~ "https://github.com/octo/repo/pull/201"
+    assert close_comment =~ "MT-381"
+
+    assert MapSet.member?(
+             state.done_source_github_issue_closes,
+             {"issue-already-done-source-pr-endpoint", "https://github.com/octo/repo/issues/16"}
+           )
+
+    assert MapSet.member?(
+             state.done_source_github_issue_closes,
+             {"issue-already-done-source-pr-endpoint", "https://github.com/octo/repo/issues/381"}
+           )
+
+    flush_done_source_close_messages = fn flush ->
+      receive do
+        {:post_merge_fetch_states, _state_names} -> flush.(flush)
+        {:github_issue_closed_at_called, _repo, _issue_url} -> flush.(flush)
+        {:merged_issue_pr_lookup_called, _identifier, _issue_url, _branch_name} -> flush.(flush)
+        {:github_issue_close_called, _repo, _issue_url, _comment} -> flush.(flush)
+      after
+        0 -> :ok
+      end
+    end
+
+    flush_done_source_close_messages.(flush_done_source_close_messages)
+
+    due_state = %{state | last_done_sync_ms: nil}
+    _state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(due_state)
+
+    receive_post_merge_fetch_states(fn state_names ->
+      "In Progress" in state_names and "Done" not in state_names
+    end)
+
+    receive_post_merge_fetch_states(&(&1 == ["Done"]))
+    refute_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/16"}, 100
+    refute_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/381"}, 100
+    refute_receive {:github_issue_close_called, "octo/repo", _issue_url, _comment}, 100
+  end
+
   test "Done sync skips merged PR lookup when source GitHub issue is already closed" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -4887,7 +5049,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute_receive {:merged_pr_lookup_called, ["https://github.com/octo/repo/pull/87"]}, 100
     assert_receive {:tracker_state_update_called, "issue-lab-396", "Done"}, 200
 
-    assert_receive {:github_issue_close_called, "octo/repo", _source_issue_url, close_comment}, 200
+    assert_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/396", close_comment}, 200
     assert close_comment =~ "https://github.com/octo/repo/pull/88"
     refute close_comment =~ "https://github.com/octo/repo/pull/87"
 

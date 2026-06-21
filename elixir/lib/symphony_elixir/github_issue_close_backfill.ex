@@ -70,12 +70,14 @@ defmodule SymphonyElixir.GitHubIssueCloseBackfill do
   defp process_issue(%__MODULE__{} = summary, %Issue{} = issue, repo, execute?, github_issue) do
     summary = %{summary | inspected: summary.inspected + 1}
 
-    case source_issue_url_for_repo(issue, repo) do
-      nil ->
+    case source_issue_urls_for_repo(issue, repo) do
+      [] ->
         %{summary | skipped: summary.skipped + 1}
 
-      issue_url ->
-        classify_source_issue(summary, issue, repo, issue_url, execute?, github_issue)
+      issue_urls ->
+        Enum.reduce(issue_urls, summary, fn issue_url, acc ->
+          classify_source_issue(acc, issue, repo, issue_url, execute?, github_issue)
+        end)
     end
   end
 
@@ -87,6 +89,9 @@ defmodule SymphonyElixir.GitHubIssueCloseBackfill do
     case github_issue.closed_at(repo, issue_url) do
       {:ok, closed_at} when is_binary(closed_at) ->
         record_action(summary, issue, issue_url, :already_closed, closed_at)
+
+      {:ok, :not_applicable} ->
+        record_action(%{summary | not_applicable: summary.not_applicable + 1}, issue, issue_url, :not_applicable, nil)
 
       {:ok, nil} ->
         summary = %{summary | candidates: summary.candidates + 1}
@@ -118,10 +123,12 @@ defmodule SymphonyElixir.GitHubIssueCloseBackfill do
     end
   end
 
-  defp source_issue_url_for_repo(%Issue{} = issue, repo) do
+  defp source_issue_urls_for_repo(%Issue{} = issue, repo) do
     issue
-    |> RepositoryResolver.source_github_issue_url()
-    |> normalize_issue_url_for_repo(repo)
+    |> RepositoryResolver.source_github_issue_urls()
+    |> Enum.map(&normalize_issue_url_for_repo(&1, repo))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
   end
 
   defp normalize_issue_url_for_repo(url, repo) when is_binary(url) do

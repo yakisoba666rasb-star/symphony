@@ -98,7 +98,7 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
     assert body =~ "PR URL is required before In Review handoff"
     assert body =~ "https://linear.app/ryo-work/issue/LAB-236/test"
     assert body =~ "Source GitHub issue: https://github.com/octo/repo/issues/236"
-    assert body =~ "Fixes #236"
+    assert body =~ "Closes octo/repo#236"
     assert_runtime_pr_body_lints(body)
   end
 
@@ -243,7 +243,7 @@ defmodule SymphonyElixir.GitHubPrPublisherTest do
 
     assert body =~ "Linear: n/a"
     refute body =~ "Source GitHub issue:"
-    refute body =~ "Fixes #"
+    refute body =~ "Closes "
     assert_runtime_pr_body_lints(body)
   end
 
