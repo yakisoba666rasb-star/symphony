@@ -188,10 +188,24 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     text = "GitHub PR: https://github.com/kasotuosawari-design/auto_template/pull/339"
 
     assert RepositoryResolver.repository_hint?(text)
-    assert RepositoryResolver.source_github_issue_url(text) == "https://github.com/kasotuosawari-design/auto_template/pull/339"
+    assert RepositoryResolver.source_github_issue_url(text) == nil
     assert {:ok, repository} = RepositoryResolver.resolve(text, settings)
     assert repository.slug == "kasotuosawari-design/auto_template"
     assert repository.github_issue_url == "https://github.com/kasotuosawari-design/auto_template/pull/339"
+  end
+
+  test "repository resolver keeps labeled source issue URLs before generic issue URLs" do
+    text = """
+    https://github.com/octo/repo/issues/16
+    GitHub Issue: https://github.com/octo/repo/issues/27
+    """
+
+    assert RepositoryResolver.source_github_issue_url(text) == "https://github.com/octo/repo/issues/27"
+
+    assert RepositoryResolver.source_github_issue_urls(text) == [
+             "https://github.com/octo/repo/issues/27",
+             "https://github.com/octo/repo/issues/16"
+           ]
   end
 
   test "repository resolver raises for invalid string input through bang API" do
