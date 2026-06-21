@@ -667,6 +667,8 @@ defmodule SymphonyElixir.GitHubIssue do
     end
   end
 
+  # GitHub exposes PRs through the issue endpoint; MERGED means this URL is a
+  # pull request endpoint, not a source issue that should be closed.
   defp parse_issue_closed_at_payload("MERGED", _payload), do: {:ok, :not_applicable}
 
   defp parse_issue_closed_at_payload(_state, %{"closedAt" => closed_at}) when is_binary(closed_at), do: {:ok, closed_at}

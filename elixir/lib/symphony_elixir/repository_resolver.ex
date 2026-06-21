@@ -89,6 +89,7 @@ defmodule SymphonyElixir.RepositoryResolver do
     end
   end
 
+  @doc false
   @spec source_github_issue_url(map() | String.t() | nil) :: String.t() | nil
   def source_github_issue_url(issue_or_identifier) do
     issue_or_identifier
@@ -96,6 +97,9 @@ defmodule SymphonyElixir.RepositoryResolver do
     |> List.first()
   end
 
+  @doc """
+  Returns only explicitly labeled source GitHub issue URLs.
+  """
   @spec labeled_source_github_issue_url(map() | String.t() | nil) :: String.t() | nil
   def labeled_source_github_issue_url(issue_or_identifier) do
     issue_or_identifier
@@ -104,6 +108,15 @@ defmodule SymphonyElixir.RepositoryResolver do
     |> List.first()
   end
 
+  @doc """
+  Returns candidate source issue URLs in deterministic order.
+
+  Labeled source issue URLs are preferred, then generic GitHub issue URLs from
+  issue text and attachments are included for historical Linear data. Callers
+  that may see pull request issue endpoints must verify candidates with
+  `SymphonyElixir.GitHubIssue.closed_at/2`; merged PR endpoints return
+  `:not_applicable`.
+  """
   @spec source_github_issue_urls(map() | String.t() | nil) :: [String.t()]
   def source_github_issue_urls(issue_or_identifier) do
     text = issue_text(issue_or_identifier)

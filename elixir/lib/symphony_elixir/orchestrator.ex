@@ -1725,6 +1725,14 @@ defmodule SymphonyElixir.Orchestrator do
 
             mark_done_source_github_issue_close(state, close_key)
 
+          {:ok, :not_applicable} ->
+            Logger.info(
+              "Merged PR Done sync skipping non-source GitHub issue endpoint for #{issue_context(issue)} " <>
+                "repo=#{repo} issue=#{issue_url}"
+            )
+
+            mark_done_source_github_issue_close(state, close_key)
+
           {:ok, false} ->
             close_done_issue_source_github_issue_with_merged_pr(
               issue,
@@ -1779,7 +1787,7 @@ defmodule SymphonyElixir.Orchestrator do
           {:ok, String.trim(closed_at) != ""}
 
         {:ok, :not_applicable} ->
-          {:ok, false}
+          {:ok, :not_applicable}
 
         {:ok, _open_or_unknown} ->
           {:ok, false}

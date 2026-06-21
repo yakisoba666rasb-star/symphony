@@ -4871,7 +4871,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     receive_post_merge_fetch_states(&(&1 == ["Done"]))
 
     assert_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/16"}, 200
-    assert_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/16", _comment}, 200
+    refute_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/16", _comment}, 100
     assert_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/381"}, 200
 
     assert_receive {:github_issue_close_called, "octo/repo", "https://github.com/octo/repo/issues/381", close_comment}, 200
@@ -4887,6 +4887,31 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              state.done_source_github_issue_closes,
              {"issue-already-done-source-pr-endpoint", "https://github.com/octo/repo/issues/381"}
            )
+
+    flush_done_source_close_messages = fn flush ->
+      receive do
+        {:post_merge_fetch_states, _state_names} -> flush.(flush)
+        {:github_issue_closed_at_called, _repo, _issue_url} -> flush.(flush)
+        {:merged_issue_pr_lookup_called, _identifier, _issue_url, _branch_name} -> flush.(flush)
+        {:github_issue_close_called, _repo, _issue_url, _comment} -> flush.(flush)
+      after
+        0 -> :ok
+      end
+    end
+
+    flush_done_source_close_messages.(flush_done_source_close_messages)
+
+    due_state = %{state | last_done_sync_ms: nil}
+    _state = Orchestrator.sync_merged_linked_pull_requests_to_done_for_test(due_state)
+
+    receive_post_merge_fetch_states(fn state_names ->
+      "In Progress" in state_names and "Done" not in state_names
+    end)
+
+    receive_post_merge_fetch_states(&(&1 == ["Done"]))
+    refute_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/16"}, 100
+    refute_receive {:github_issue_closed_at_called, "octo/repo", "https://github.com/octo/repo/issues/381"}, 100
+    refute_receive {:github_issue_close_called, "octo/repo", _issue_url, _comment}, 100
   end
 
   test "Done sync skips merged PR lookup when source GitHub issue is already closed" do
