@@ -683,8 +683,13 @@ defmodule SymphonyElixir.GitHubPrLookup do
   end
 
   defp validate_linked_pull_request(%{"state" => state, "isDraft" => is_draft} = pr) do
+    normalized_state = String.upcase(to_string(state))
+
     cond do
-      String.upcase(to_string(state)) != "OPEN" ->
+      normalized_state == "MERGED" ->
+        {:error, {:linked_pull_request_merged, pr["number"]}}
+
+      normalized_state != "OPEN" ->
         {:error, {:linked_pull_request_not_open, pr["number"]}}
 
       is_draft == true ->
