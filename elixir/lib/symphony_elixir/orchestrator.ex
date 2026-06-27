@@ -1860,13 +1860,22 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp post_merge_done_sync_states do
-    Config.settings!().tracker.active_states
+    settings = Config.settings!()
+
+    settings.tracker.active_states
     |> Kernel.++([Config.review_handoff_state()])
+    |> Kernel.++(post_merge_done_sync_landing_states(settings))
     |> Enum.map(&to_string/1)
     |> Enum.map(&String.trim/1)
     |> Enum.reject(&(&1 == ""))
     |> Enum.uniq()
   end
+
+  defp post_merge_done_sync_landing_states(%{landing: %{enabled: true} = landing}) do
+    [landing.approval_state, landing.in_progress_state, landing.blocked_state]
+  end
+
+  defp post_merge_done_sync_landing_states(_settings), do: []
 
   defp done_sync_terminal_states do
     [done_state_name()]
@@ -2776,6 +2785,14 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.warning("Blocking active issue reconcile for #{issue_context(issue)}: #{error}")
         block_issue_before_dispatch(state, issue, error)
 
+      {:error, {:linked_pull_request_merged, number}} ->
+        Logger.info(
+          "Merged linked PR discovered during active issue reconcile for #{issue_context(issue)}; " <>
+            "moving issue to #{done_state_name()} instead of continuing worker pr=#{number}"
+        )
+
+        do_maybe_sync_merged_linked_pr_issue_to_done(issue, state)
+
       {:error, reason} ->
         Logger.warning("Continuing active issue reconcile for #{issue_context(issue)}; open PR guard lookup failed: #{inspect(reason)}")
 
@@ -3241,6 +3258,14 @@ defmodule SymphonyElixir.Orchestrator do
 
         {:ok, nil} ->
           :miss
+
+        {:error, {:linked_pull_request_merged, number}} ->
+          Logger.info(
+            "Recovering Done sync blocked issue after merged linked PR discovery: " <>
+              "#{issue_context(issue)} pr=#{number}"
+          )
+
+          {:ok, do_maybe_sync_merged_linked_pr_issue_to_done(issue, state)}
 
         {:error, reason} ->
           Logger.warning(
@@ -4696,6 +4721,14 @@ defmodule SymphonyElixir.Orchestrator do
         error = "ambiguous open GitHub PRs found before dispatch: #{inspect(reason)}"
         Logger.warning("Blocking dispatch for #{issue_context(issue)}: #{error}")
         {:handoff, block_issue_before_dispatch(state, issue, error)}
+
+      {:error, {:linked_pull_request_merged, number}} ->
+        Logger.info(
+          "Merged linked PR discovered before dispatch for #{issue_context(issue)}; " <>
+            "moving issue to #{done_state_name()} instead of starting a new worker pr=#{number}"
+        )
+
+        {:handoff, do_maybe_sync_merged_linked_pr_issue_to_done(issue, state)}
 
       {:error, reason} ->
         Logger.warning("Continuing dispatch for #{issue_context(issue)}; open PR guard lookup failed: #{inspect(reason)}")
