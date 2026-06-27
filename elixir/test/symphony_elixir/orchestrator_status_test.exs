@@ -4134,6 +4134,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert opts[:extra_prompt] =~ "Symphony can move the issue back to Approved to Land"
     assert opts[:extra_prompt] =~ "Do not merge the PR"
     assert opts[:auto_approve_landing_after_review] == true
+    assert opts[:allow_before_run_hook_failure] == true
   end
 
   test "orchestrator reconciles landing repair issues by dispatching dirty PRs" do

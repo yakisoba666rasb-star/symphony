@@ -4893,6 +4893,7 @@ defmodule SymphonyElixir.Orchestrator do
     prompt = landing_repair_prompt(issue, pr)
 
     agent_opts
+    |> Keyword.put(:allow_before_run_hook_failure, true)
     |> Keyword.put(:auto_approve_landing_after_review, true)
     |> Keyword.update(:extra_prompt, prompt, fn
       existing when is_binary(existing) and existing != "" -> String.trim_trailing(existing) <> "\n\n" <> prompt

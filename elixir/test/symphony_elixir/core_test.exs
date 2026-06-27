@@ -2692,6 +2692,129 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner can continue after before_run hook failure when explicitly allowed" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-allowed-before-run-failure-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+
+      File.mkdir_p!(test_root)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="#{trace_file}"
+      printf 'RUN\\n' >> "$trace_file"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-before-run-failure"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-before-run-failure-1"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git init -b main && git config user.name Test && git config user.email test@example.com && echo first > README.md && git add README.md && git commit -m initial",
+        hook_before_run:
+          ~S|printf '%s\n' 'CONFLICT (content): manual_search_api/search.py' 'https://user:supersecret@example.com/repo.git' '{"password":"json-secret"}' 'token=plain-secret'; i=0; while [ $i -lt 4100 ]; do printf '修'; i=$((i + 1)); done; printf '\n'; touch before-run-called && exit 17|,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-allowed-before-run-failure",
+        identifier: "MT-BEFORE-RUN-FAILURE",
+        title: "Allowed before_run failure",
+        description: "Landing repair should reach Codex after a rebase conflict",
+        state: "In Progress"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert :ok = AgentRunner.run(issue, nil, allow_before_run_hook_failure: true)
+
+      trace = File.read!(trace_file)
+      assert File.exists?(Path.join(workspace, "before-run-called"))
+      assert trace =~ "RUN"
+      assert trace =~ "Before-run hook failed before this repair turn"
+      assert trace =~ "CONFLICT (content): manual_search_api/search.py"
+      assert trace =~ "(truncated)"
+      refute trace =~ "supersecret"
+      refute trace =~ "json-secret"
+      refute trace =~ "plain-secret"
+      assert trace =~ "Do not merge the PR"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner does not continue after non-conflict before_run hook failure" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-non-conflict-before-run-failure-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+
+      File.mkdir_p!(test_root)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      printf 'RUN\\n' >> "#{trace_file}"
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git init -b main && git config user.name Test && git config user.email test@example.com && echo first > README.md && git add README.md && git commit -m initial",
+        hook_before_run: "printf '%s\\n' 'fatal: Authentication failed for remote' && touch before-run-called && exit 17",
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-non-conflict-before-run-failure",
+        identifier: "MT-BEFORE-RUN-NON-CONFLICT",
+        title: "Non-conflict before_run failure",
+        description: "Infra failures should not be handed to Codex as merge repair work",
+        state: "In Progress"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert_raise RuntimeError, ~r/Agent run failed/, fn ->
+        AgentRunner.run(issue, nil, allow_before_run_hook_failure: true)
+      end
+
+      assert File.exists?(Path.join(workspace, "before-run-called"))
+      refute File.exists?(trace_file)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner checks remote dirty resume on the worker before skipping before_run hook" do
     test_root =
       Path.join(
