@@ -11,6 +11,7 @@ defmodule SymphonyElixir.RetryPolicy do
           | :blocked_review_handoff
           | :handoff_pr_discovery
           | :review_handoff
+          | :landing_repair
           | :done_sync
 
   @type policy :: %{
@@ -97,6 +98,7 @@ defmodule SymphonyElixir.RetryPolicy do
               :blocked_review_handoff,
               :handoff_pr_discovery,
               :review_handoff,
+              :landing_repair,
               :done_sync
             ],
        do: context
@@ -123,6 +125,10 @@ defmodule SymphonyElixir.RetryPolicy do
     non_neg_int(Map.get(retry || %{}, :max_done_sync_attempts), Map.get(agent, :max_retry_attempts, 5))
   end
 
+  defp max_attempts(:landing_repair, retry, agent) do
+    non_neg_int(Map.get(retry || %{}, :max_landing_repair_attempts), Map.get(agent, :max_retry_attempts, 5))
+  end
+
   defp max_attempts(_context, retry, agent) do
     non_neg_int(Map.get(retry || %{}, :max_attempts), Map.get(agent, :max_retry_attempts, 5))
   end
@@ -146,6 +152,7 @@ defmodule SymphonyElixir.RetryPolicy do
   defp context_label(:blocked_review_handoff), do: "blocked review handoff"
   defp context_label(:handoff_pr_discovery), do: "handoff PR discovery"
   defp context_label(:review_handoff), do: "review handoff"
+  defp context_label(:landing_repair), do: "landing repair"
   defp context_label(:done_sync), do: "merged PR Done sync"
   defp context_label(context), do: to_string(context)
 

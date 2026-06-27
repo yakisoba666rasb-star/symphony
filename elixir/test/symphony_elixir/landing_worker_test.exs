@@ -460,11 +460,47 @@ defmodule SymphonyElixir.LandingWorkerTest do
     assert_receive {:landing_state_update, "issue-1", "In Progress"}
     assert_receive {:landing_comment, "issue-1", repair_body}
     assert repair_body =~ "repair requested"
+    assert repair_body =~ "Attempt: 1/5"
     assert repair_body =~ "https://github.com/octo/repo/pull/1"
     assert repair_body =~ "PR mergeability changed to DIRTY"
     assert repair_body =~ "In Review"
     assert repair_body =~ "Approved to Land"
     assert repair_body =~ "must not merge"
+    refute_receive {:gh_command, ["pr", "merge" | _args]}, 100
+  end
+
+  test "landing repair stops at retry policy cap and leaves issue blocked" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true,
+      landing_blocked_state: "Blocked",
+      landing_repair_enabled: true,
+      landing_repair_state: "In Progress",
+      retry_max_landing_repair_attempts: 2
+    )
+
+    entry =
+      ready_entry()
+      |> Map.put(:landing_repair_attempts, 2)
+
+    result =
+      LandingWorker.execute(
+        Config.settings!(),
+        FakeTracker,
+        [entry],
+        deps(%{"https://github.com/octo/repo/pull/1" => pr_view(%{"mergeStateStatus" => "DIRTY"})})
+      )
+
+    assert %{enabled: true, attempted: 1, merged: 0, blocked: 1, repair_requested: 0, errors: 0} = result
+    assert result.repair_entries == []
+    assert_receive {:landing_state_update, "issue-1", "Blocked"}
+    assert_receive {:landing_comment, "issue-1", blocked_body}
+    assert blocked_body =~ "PR mergeability changed to DIRTY"
+    assert_receive {:landing_comment, "issue-1", exhausted_body}
+    assert exhausted_body =~ "repair exhausted"
+    assert exhausted_body =~ "landing repair retry limit reached (2) after attempt 3"
+    assert exhausted_body =~ "leave this issue in Blocked"
+    refute_receive {:landing_state_update, "issue-1", "In Progress"}, 100
     refute_receive {:gh_command, ["pr", "merge" | _args]}, 100
   end
 

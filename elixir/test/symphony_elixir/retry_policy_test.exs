@@ -71,6 +71,22 @@ defmodule SymphonyElixir.RetryPolicyTest do
              "merged PR Done sync retry limit reached (2) after attempt 3; blocking issue: Linear update failed"
   end
 
+  test "landing repair policy has a dedicated configurable cap" do
+    policy =
+      RetryPolicy.policy(:landing_repair, %{
+        retry: %{max_landing_repair_attempts: 2},
+        agent: %{max_retry_attempts: 5, max_retry_backoff_ms: 300_000}
+      })
+
+    assert policy.context == :landing_repair
+    assert policy.max_attempts == 2
+    assert RetryPolicy.allow_attempt?(2, policy)
+    refute RetryPolicy.allow_attempt?(3, policy)
+
+    assert RetryPolicy.terminal_reason(policy, 3, "still dirty") ==
+             "landing repair retry limit reached (2) after attempt 3; blocking issue: still dirty"
+  end
+
   test "terminal block reason handles nil and non-string reasons" do
     assert RetryPolicy.terminal_reason(%{context: :max_turn_continuation, max_attempts: 3}, 4, nil) ==
              "agent.max_turns continuation retry limit reached (3) after attempt 4; blocking issue"

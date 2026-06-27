@@ -31,6 +31,22 @@ defmodule SymphonyElixir.Orchestrator do
   @handoff_pr_lookup_refresh_delay_ms 500
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @running_progress_comment_interval_ms :timer.minutes(5)
+  @agent_progress_methods [
+    "codex/event/agent_message_delta",
+    "codex/event/agent_message_content_delta",
+    "item/agentMessage/delta"
+  ]
+  @agent_progress_delta_paths [
+    ["params", "msg", "payload", "delta"],
+    [:params, :msg, :payload, :delta],
+    ["params", "msg", "delta"],
+    [:params, :msg, :delta],
+    ["params", "payload", "delta"],
+    [:params, :payload, :delta],
+    ["params", "delta"],
+    [:params, :delta]
+  ]
   @dirty_workspace_cleanup_interval_ms :timer.hours(24)
   @landing_blocking_labels [
     "landing-blocked",
@@ -78,6 +94,7 @@ defmodule SymphonyElixir.Orchestrator do
       last_done_sync_ms: nil,
       last_landing_plan_ms: nil,
       landing_queue: [],
+      landing_repair_attempts: %{},
       last_review_rework_sync_ms: nil,
       last_dirty_workspace_cleanup_ms: nil,
       last_dirty_workspace_cleanup: nil,
@@ -250,6 +267,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
+        updated_running_entry = maybe_comment_on_running_progress(issue_id, updated_running_entry, update)
 
         state =
           state
@@ -1335,7 +1353,7 @@ defmodule SymphonyElixir.Orchestrator do
       result = LandingPlanner.reconcile(settings, tracker_module(), github_pr_lookup_module())
       freshness = landing_runtime_freshness(settings, result.queue, state.runtime_freshness)
       stale_recovery_result = recover_stale_runtime_landings(settings, freshness)
-      execution_result = run_landing_execution(settings, result.queue, freshness)
+      execution_result = run_landing_execution(settings, result.queue, freshness, state)
 
       if result.inspected > 0 or result.errors > 0 do
         Logger.info(
@@ -1363,6 +1381,7 @@ defmodule SymphonyElixir.Orchestrator do
       end
 
       state
+      |> record_landing_repair_attempts(execution_result)
       |> dispatch_landing_repair_requests(execution_result)
       |> Map.put(:last_landing_plan_ms, System.monotonic_time(:millisecond))
       |> Map.put(:landing_queue, result.queue)
@@ -1372,10 +1391,10 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp run_landing_execution(settings, queue, freshness) do
+  defp run_landing_execution(settings, queue, freshness, state) do
     case landing_execution_action(settings, queue, freshness) do
       :execute ->
-        landing_worker_module().execute(settings, tracker_module(), queue)
+        landing_worker_module().execute(settings, tracker_module(), with_landing_repair_attempts(queue, state))
 
       :block ->
         block_stale_landing_execution(settings, queue, freshness)
@@ -1384,6 +1403,34 @@ defmodule SymphonyElixir.Orchestrator do
         skip_indeterminate_landing_execution(settings, queue, freshness)
     end
   end
+
+  defp with_landing_repair_attempts(queue, %State{} = state) when is_list(queue) do
+    Enum.map(queue, fn
+      %{} = entry ->
+        issue_id = Map.get(entry, :issue_id)
+        attempts = Map.get(state.landing_repair_attempts, issue_id, 0)
+        Map.put(entry, :landing_repair_attempts, attempts)
+
+      entry ->
+        entry
+    end)
+  end
+
+  defp record_landing_repair_attempts(%State{} = state, %{repair_entries: repair_entries}) when is_list(repair_entries) do
+    attempts =
+      Enum.reduce(repair_entries, state.landing_repair_attempts, fn
+        %RepairEntry{issue_id: issue_id, repair_attempt: repair_attempt}, acc
+        when is_binary(issue_id) and is_integer(repair_attempt) and repair_attempt > 0 ->
+          Map.update(acc, issue_id, repair_attempt, &max(&1, repair_attempt))
+
+        _entry, acc ->
+          acc
+      end)
+
+    %{state | landing_repair_attempts: attempts}
+  end
+
+  defp record_landing_repair_attempts(%State{} = state, _execution_result), do: state
 
   defp landing_runtime_freshness(%{landing: %{execute_enabled: true}}, [_entry | _rest], _cached) do
     runtime_freshness(true)
@@ -1603,8 +1650,20 @@ defmodule SymphonyElixir.Orchestrator do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
     pr = repair_entry_pr(repair_entry)
+    policy = RetryPolicy.policy(:landing_repair, Config.settings!())
 
     cond do
+      landing_repair_exhausted?(state, repair_entry, policy) ->
+        Logger.info("Skipping immediate landing repair dispatch; repair attempts exhausted for #{issue_context(issue)}")
+
+        comment_landing_repair_dispatch_skipped(
+          issue,
+          landing_repair_exhausted_dispatch_reason(state, repair_entry, policy),
+          pr
+        )
+
+        state
+
       not candidate_issue?(issue, active_states, terminal_states) ->
         Logger.info("Skipping immediate landing repair dispatch; issue is not active/routable: #{issue_context(issue)} state=#{inspect(issue.state)}")
         comment_landing_repair_dispatch_skipped(issue, "issue is not active/routable", pr)
@@ -1638,6 +1697,25 @@ defmodule SymphonyElixir.Orchestrator do
 
         do_dispatch_issue(state, issue, nil, nil, put_landing_repair_prompt([], issue, pr))
     end
+  end
+
+  defp landing_repair_exhausted?(%State{} = state, %RepairEntry{} = repair_entry, policy) do
+    attempt = landing_repair_entry_attempt(state, repair_entry)
+    is_integer(attempt) and attempt > 0 and not RetryPolicy.allow_attempt?(attempt, policy)
+  end
+
+  defp landing_repair_exhausted_dispatch_reason(%State{} = state, %RepairEntry{} = repair_entry, policy) do
+    attempt = landing_repair_entry_attempt(state, repair_entry) || 0
+    RetryPolicy.terminal_reason(policy, attempt, repair_entry.repair_reason)
+  end
+
+  defp landing_repair_entry_attempt(%State{} = state, %RepairEntry{issue_id: issue_id, repair_attempt: repair_attempt})
+       when is_integer(repair_attempt) and repair_attempt > 0 do
+    max(repair_attempt, Map.get(state.landing_repair_attempts, issue_id, 0))
+  end
+
+  defp landing_repair_entry_attempt(%State{} = state, %RepairEntry{issue_id: issue_id}) do
+    Map.get(state.landing_repair_attempts, issue_id, 0)
   end
 
   defp landing_repair_issue_tracked?(%State{} = state, issue_id) do
@@ -4349,6 +4427,116 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp comment_on_quarantined_workspace(_issue_id, _running_entry, _quarantine), do: :ok
 
+  defp maybe_comment_on_running_progress(issue_id, running_entry, update)
+       when is_binary(issue_id) and is_map(running_entry) do
+    now_ms = System.monotonic_time(:millisecond)
+    due_ms = Map.get(running_entry, :next_progress_comment_ms)
+
+    cond do
+      !is_integer(due_ms) ->
+        Map.put(running_entry, :next_progress_comment_ms, now_ms + @running_progress_comment_interval_ms)
+
+      now_ms < due_ms ->
+        running_entry
+
+      true ->
+        comment_on_running_progress(issue_id, running_entry, update)
+
+        running_entry
+        |> Map.put(:next_progress_comment_ms, now_ms + @running_progress_comment_interval_ms)
+        |> Map.update(:progress_comment_count, 1, &(&1 + 1))
+    end
+  end
+
+  defp maybe_comment_on_running_progress(_issue_id, running_entry, _update), do: running_entry
+
+  defp comment_on_running_progress(issue_id, running_entry, update) do
+    identifier = Map.get(running_entry, :identifier, issue_id)
+    session_id = running_entry_session_id(running_entry)
+    workspace = Map.get(running_entry, :workspace_path) || "unknown"
+    worker_host = Map.get(running_entry, :worker_host) || "local"
+    activity = running_progress_activity(update)
+    next_minutes = div(@running_progress_comment_interval_ms, 60_000)
+
+    body = """
+    Symphony agent progress update for #{identifier}
+
+    Status: still running; Codex activity is arriving, so this is not currently classified as stalled.
+    Session: #{session_id}
+    Workspace: #{workspace}
+    Worker host: #{worker_host}
+    Last activity: #{activity}
+
+    Next update: another progress comment will be posted in about #{next_minutes}m if the run is still active.
+    """
+
+    case tracker_module().create_comment(issue_id, body) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.debug("Failed to create running-progress comment for issue_id=#{issue_id}: #{inspect(reason)}")
+        :ok
+    end
+  rescue
+    exception ->
+      Logger.debug("Failed to create running-progress comment for issue_id=#{issue_id}: #{Exception.message(exception)}")
+      :ok
+  end
+
+  defp running_progress_activity(update) when is_map(update) do
+    case agent_progress_text(update) do
+      text when is_binary(text) and text != "" ->
+        text
+        |> String.replace(~r/\s+/, " ")
+        |> String.trim()
+        |> truncate_comment_text(300)
+
+      _ ->
+        update
+        |> codex_update_method_or_event()
+        |> truncate_comment_text(160)
+    end
+  end
+
+  defp agent_progress_text(%{event: :notification} = update) do
+    payload = Map.get(update, :payload) || Map.get(update, "payload") || update
+    method = map_value(payload, ["method", :method])
+
+    if method in @agent_progress_methods do
+      agent_progress_delta(payload)
+    end
+  end
+
+  defp agent_progress_text(_update), do: nil
+
+  defp agent_progress_delta(payload) do
+    Enum.find_value(@agent_progress_delta_paths, &map_path(payload, &1))
+  end
+
+  defp codex_update_method_or_event(update) when is_map(update) do
+    payload = Map.get(update, :payload) || Map.get(update, "payload") || update
+
+    cond do
+      is_binary(map_value(payload, ["method", :method])) ->
+        map_value(payload, ["method", :method])
+
+      not is_nil(Map.get(update, :event)) ->
+        inspect(Map.get(update, :event))
+
+      true ->
+        "codex activity"
+    end
+  end
+
+  defp truncate_comment_text(text, max_chars) when is_binary(text) do
+    if String.length(text) <= max_chars do
+      text
+    else
+      String.slice(text, 0, max_chars) <> "... (truncated)"
+    end
+  end
+
   defp choose_issues(issues, state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
@@ -5004,7 +5192,9 @@ defmodule SymphonyElixir.Orchestrator do
       last_codex_timestamp: nil,
       started_at: DateTime.utc_now(),
       last_progress_ms: now_ms,
-      stall_comment_posted?: false
+      stall_comment_posted?: false,
+      next_progress_comment_ms: now_ms + @running_progress_comment_interval_ms,
+      progress_comment_count: 0
     }
   end
 
@@ -5053,7 +5243,9 @@ defmodule SymphonyElixir.Orchestrator do
       auto_approve_landing_after_review: Keyword.get(agent_opts, :auto_approve_landing_after_review, false),
       started_at: DateTime.utc_now(),
       last_progress_ms: now_ms,
-      stall_comment_posted?: false
+      stall_comment_posted?: false,
+      next_progress_comment_ms: now_ms + @running_progress_comment_interval_ms,
+      progress_comment_count: 0
     }
   end
 

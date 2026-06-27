@@ -183,6 +183,7 @@ defmodule SymphonyElixir.TestSupport do
           retry_max_handoff_pr_discovery_attempts: nil,
           retry_max_blocked_review_handoff_attempts: nil,
           retry_max_review_handoff_attempts: nil,
+          retry_max_landing_repair_attempts: nil,
           retry_max_done_sync_attempts: nil,
           retry_base_backoff_ms: 10_000,
           retry_max_backoff_ms: nil,
@@ -265,6 +266,7 @@ defmodule SymphonyElixir.TestSupport do
     retry_max_handoff_pr_discovery_attempts = Keyword.get(config, :retry_max_handoff_pr_discovery_attempts)
     retry_max_blocked_review_handoff_attempts = Keyword.get(config, :retry_max_blocked_review_handoff_attempts)
     retry_max_review_handoff_attempts = Keyword.get(config, :retry_max_review_handoff_attempts)
+    retry_max_landing_repair_attempts = Keyword.get(config, :retry_max_landing_repair_attempts)
     retry_max_done_sync_attempts = Keyword.get(config, :retry_max_done_sync_attempts)
     retry_base_backoff_ms = Keyword.get(config, :retry_base_backoff_ms)
     retry_max_backoff_ms = Keyword.get(config, :retry_max_backoff_ms)
@@ -329,6 +331,7 @@ defmodule SymphonyElixir.TestSupport do
           max_handoff_pr_discovery_attempts: retry_max_handoff_pr_discovery_attempts,
           max_blocked_review_handoff_attempts: retry_max_blocked_review_handoff_attempts,
           max_review_handoff_attempts: retry_max_review_handoff_attempts,
+          max_landing_repair_attempts: retry_max_landing_repair_attempts,
           max_done_sync_attempts: retry_max_done_sync_attempts,
           base_backoff_ms: retry_base_backoff_ms,
           max_backoff_ms: retry_max_backoff_ms,
@@ -364,6 +367,7 @@ defmodule SymphonyElixir.TestSupport do
       "  max_handoff_pr_discovery_attempts: #{yaml_value(retry.max_handoff_pr_discovery_attempts)}",
       "  max_blocked_review_handoff_attempts: #{yaml_value(retry.max_blocked_review_handoff_attempts)}",
       "  max_review_handoff_attempts: #{yaml_value(retry.max_review_handoff_attempts)}",
+      "  max_landing_repair_attempts: #{yaml_value(retry.max_landing_repair_attempts)}",
       "  max_done_sync_attempts: #{yaml_value(retry.max_done_sync_attempts)}",
       "  base_backoff_ms: #{yaml_value(retry.base_backoff_ms)}",
       "  max_backoff_ms: #{yaml_value(retry.max_backoff_ms)}",

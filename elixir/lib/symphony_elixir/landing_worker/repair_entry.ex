@@ -16,7 +16,7 @@ defmodule SymphonyElixir.LandingWorker.RepairEntry do
     :head_sha,
     :repair_reason
   ]
-  defstruct @enforce_keys
+  defstruct @enforce_keys ++ [repair_attempt: nil]
 
   @type t :: %__MODULE__{
           issue_id: String.t(),
@@ -29,11 +29,12 @@ defmodule SymphonyElixir.LandingWorker.RepairEntry do
           mergeability: String.t() | nil,
           head_branch: String.t() | nil,
           head_sha: String.t() | nil,
+          repair_attempt: non_neg_integer() | nil,
           repair_reason: term()
         }
 
-  @spec new!(map(), term()) :: t()
-  def new!(%{} = entry, reason) do
+  @spec new!(map(), term(), non_neg_integer() | nil) :: t()
+  def new!(%{} = entry, reason, repair_attempt \\ nil) do
     %__MODULE__{
       issue_id: Map.fetch!(entry, :issue_id),
       issue_identifier: Map.get(entry, :issue_identifier),
@@ -45,6 +46,7 @@ defmodule SymphonyElixir.LandingWorker.RepairEntry do
       mergeability: Map.get(entry, :mergeability),
       head_branch: Map.get(entry, :head_branch),
       head_sha: Map.get(entry, :head_sha),
+      repair_attempt: repair_attempt,
       repair_reason: reason
     }
   end
