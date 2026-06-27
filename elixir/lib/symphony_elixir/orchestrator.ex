@@ -41,6 +41,7 @@ defmodule SymphonyElixir.Orchestrator do
     "landing-stale-pr",
     "landing-stale-runtime"
   ]
+  @landing_stale_runtime_label "landing-stale-runtime"
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -1333,6 +1334,7 @@ defmodule SymphonyElixir.Orchestrator do
     if landing_plan_due?(state, settings) do
       result = LandingPlanner.reconcile(settings, tracker_module(), github_pr_lookup_module())
       freshness = landing_runtime_freshness(settings, result.queue, state.runtime_freshness)
+      stale_recovery_result = recover_stale_runtime_landings(settings, freshness)
       execution_result = run_landing_execution(settings, result.queue, freshness)
 
       if result.inspected > 0 or result.errors > 0 do
@@ -1349,6 +1351,14 @@ defmodule SymphonyElixir.Orchestrator do
             "attempted=#{execution_result.attempted} merged=#{execution_result.merged} " <>
             "blocked=#{execution_result.blocked} repair_requested=#{execution_result.repair_requested} " <>
             "skipped=#{execution_result.skipped} errors=#{execution_result.errors}"
+        )
+      end
+
+      if stale_recovery_result.attempted > 0 or stale_recovery_result.errors > 0 do
+        Logger.info(
+          "Approved to Land stale runtime recovery completed " <>
+            "attempted=#{stale_recovery_result.attempted} requeued=#{stale_recovery_result.requeued} " <>
+            "skipped=#{stale_recovery_result.skipped} errors=#{stale_recovery_result.errors}"
         )
       end
 
@@ -1379,8 +1389,115 @@ defmodule SymphonyElixir.Orchestrator do
     runtime_freshness(true)
   end
 
+  defp landing_runtime_freshness(%{landing: %{execute_enabled: true}}, [], cached) do
+    if runtime_freshness_status(cached) == "stale" do
+      runtime_freshness(true)
+    else
+      landing_runtime_freshness(%{}, [], cached)
+    end
+  end
+
   defp landing_runtime_freshness(_settings, _queue, nil), do: runtime_freshness(false)
   defp landing_runtime_freshness(_settings, _queue, cached), do: cached
+
+  defp recover_stale_runtime_landings(settings, freshness) do
+    cond do
+      not settings.landing.enabled or not settings.landing.execute_enabled ->
+        stale_runtime_recovery_result()
+
+      runtime_freshness_status(freshness) != "fresh" ->
+        stale_runtime_recovery_result()
+
+      not function_exported?(tracker_module(), :fetch_issues_by_states, 1) ->
+        stale_runtime_recovery_result()
+
+      true ->
+        do_recover_stale_runtime_landings(settings, tracker_module())
+    end
+  end
+
+  defp do_recover_stale_runtime_landings(settings, tracker) do
+    case tracker.fetch_issues_by_states([settings.landing.blocked_state]) do
+      {:ok, issues} when is_list(issues) ->
+        issues
+        |> Enum.filter(&stale_runtime_blocked_issue?(&1, settings))
+        |> Enum.reduce(stale_runtime_recovery_result(), &requeue_stale_runtime_landing(&1, settings, tracker, &2))
+
+      {:error, reason} ->
+        Logger.warning("Skipping Approved to Land stale runtime recovery; failed to fetch blocked issues: #{inspect(reason)}")
+        %{stale_runtime_recovery_result() | errors: 1}
+
+      other ->
+        Logger.warning("Skipping Approved to Land stale runtime recovery; unexpected fetch result: #{inspect(other)}")
+        %{stale_runtime_recovery_result() | errors: 1}
+    end
+  end
+
+  defp stale_runtime_recovery_result, do: %{attempted: 0, requeued: 0, skipped: 0, errors: 0}
+
+  defp stale_runtime_blocked_issue?(%Issue{state: state, labels: labels}, settings) when is_list(labels) do
+    normalize_issue_state(state) == normalize_issue_state(settings.landing.blocked_state) and
+      Enum.any?(labels, &landing_stale_runtime_label?/1)
+  end
+
+  defp stale_runtime_blocked_issue?(_issue, _settings), do: false
+
+  defp landing_stale_runtime_label?(label) when is_binary(label) do
+    String.downcase(String.trim(label)) == @landing_stale_runtime_label
+  end
+
+  defp landing_stale_runtime_label?(_label), do: false
+
+  defp requeue_stale_runtime_landing(%Issue{} = issue, settings, tracker, result) do
+    result = %{result | attempted: result.attempted + 1}
+
+    with :ok <- tracker.update_issue_state(issue.id, settings.landing.approval_state),
+         :ok <- remove_landing_blocking_labels(tracker, issue),
+         :ok <- comment_stale_runtime_requeue(tracker, issue, settings) do
+      %{result | requeued: result.requeued + 1}
+    else
+      {:error, reason} ->
+        Logger.warning("Failed to requeue stale runtime landing for #{issue_context(issue)}: #{inspect(reason)}")
+        %{result | errors: result.errors + 1}
+
+      other ->
+        Logger.warning("Unexpected stale runtime landing recovery result for #{issue_context(issue)}: #{inspect(other)}")
+        %{result | errors: result.errors + 1}
+    end
+  end
+
+  defp remove_landing_blocking_labels(tracker, %Issue{} = issue) do
+    if function_exported?(tracker, :remove_issue_labels, 2) do
+      case tracker.remove_issue_labels(issue.id, @landing_blocking_labels) do
+        :ok -> :ok
+        {:ok, _value} -> :ok
+        {:error, reason} -> {:error, reason}
+        other -> {:error, {:landing_label_cleanup_unexpected, other}}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp comment_stale_runtime_requeue(tracker, %Issue{} = issue, settings) do
+    if function_exported?(tracker, :create_comment, 2) do
+      tracker.create_comment(issue.id, stale_runtime_requeue_comment(issue, settings))
+    else
+      :ok
+    end
+  end
+
+  defp stale_runtime_requeue_comment(%Issue{} = issue, settings) do
+    """
+    Symphony Approved to Land stale runtime recovery
+
+    Issue: #{issue.identifier || issue.id}
+    Action: moved back to #{settings.landing.approval_state}
+
+    The runtime freshness check is now green, so Symphony requeued this item after an earlier `landing-stale-runtime` block.
+    """
+    |> String.trim()
+  end
 
   defp landing_execution_action(%{landing: %{execute_enabled: false}}, _queue, _freshness), do: :execute
   defp landing_execution_action(_settings, [], _freshness), do: :execute
