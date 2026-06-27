@@ -703,29 +703,47 @@ defmodule SymphonyElixir.Workspace do
     {:error, {:workspace_hook_failed, hook_name, status, output}}
   end
 
-  defp sanitize_hook_output_for_log(output, max_bytes \\ 2_048) do
+  defp sanitize_hook_output_for_log(output, max_chars \\ 2_048) do
     binary_output =
       output
       |> IO.iodata_to_binary()
       |> redact_secret_values()
+      |> valid_log_text()
 
-    case byte_size(binary_output) <= max_bytes do
+    case String.length(binary_output) <= max_chars do
       true ->
         binary_output
 
       false ->
-        binary_part(binary_output, 0, max_bytes) <> "... (truncated)"
+        String.slice(binary_output, 0, max_chars) <> "... (truncated)"
     end
   end
 
   defp redact_secret_values(output) when is_binary(output) do
     output
+    |> then(&Regex.replace(~r{\b(https?://)[^\s/@:]+:[^\s/@]+@}i, &1, "\\1[REDACTED]@"))
     |> then(&Regex.replace(~r/\b(authorization:\s*bearer\s+)[^\s"']+/i, &1, "\\1[REDACTED]"))
+    |> then(&Regex.replace(~r/("?(?:api[_-]?key|token|secret|password)"?\s*:\s*")[^"]+"/i, &1, "\\1[REDACTED]\""))
     |> then(&Regex.replace(~r/\b((?:api[_-]?key|token|secret|password)=)[^\s"']+/i, &1, "\\1[REDACTED]"))
     |> then(&Regex.replace(~r/\b(LINEAR_API_KEY=)[^\s"']+/i, &1, "\\1[REDACTED]"))
     |> then(&Regex.replace(~r/\b(ghp_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)/, &1, "[REDACTED]"))
     |> then(&Regex.replace(~r/\b(xox[baprs]-[A-Za-z0-9-]+)/, &1, "[REDACTED]"))
   end
+
+  defp valid_log_text(text) when is_binary(text) do
+    if String.valid?(text) do
+      text
+    else
+      text
+      |> strip_invalid_utf8([])
+      |> Enum.reverse()
+      |> IO.iodata_to_binary()
+    end
+  end
+
+  defp strip_invalid_utf8(<<>>, acc), do: acc
+  defp strip_invalid_utf8(<<codepoint::utf8, rest::binary>>, acc), do: strip_invalid_utf8(rest, [<<codepoint::utf8>> | acc])
+  defp strip_invalid_utf8(<<_byte, rest::binary>>, acc), do: strip_invalid_utf8(rest, acc)
 
   defp sanitize_reason_for_log(reason) do
     reason

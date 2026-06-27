@@ -51,7 +51,7 @@ defmodule SymphonyElixir.AgentRunner do
         dirty_resume? = Keyword.get(workspace_opts, :allow_dirty_existing_workspace, false) and workspace_has_changes?(workspace, worker_host)
 
         try do
-          with :ok <- maybe_run_before_run_hook(workspace, issue, worker_host, dirty_resume?) do
+          with {:ok, opts} <- maybe_run_before_run_hook(workspace, issue, worker_host, dirty_resume?, opts) do
             run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
           end
         after
@@ -63,13 +63,134 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp maybe_run_before_run_hook(workspace, issue, worker_host, true) do
+  defp maybe_run_before_run_hook(workspace, issue, worker_host, true, opts) do
     Logger.info("Skipping before_run hook for dirty workspace resume #{issue_context(issue)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)}")
-    :ok
+    {:ok, opts}
   end
 
-  defp maybe_run_before_run_hook(workspace, issue, worker_host, false) do
-    Workspace.run_before_run_hook(workspace, issue, worker_host)
+  defp maybe_run_before_run_hook(workspace, issue, worker_host, false, opts) do
+    case Workspace.run_before_run_hook(workspace, issue, worker_host) do
+      :ok ->
+        {:ok, opts}
+
+      {:error, reason} = error ->
+        if Keyword.get(opts, :allow_before_run_hook_failure, false) and repairable_before_run_sync_failure?(reason) do
+          Logger.warning(
+            "Continuing agent run after before_run hook failure for #{issue_context(issue)} " <>
+              "workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)} reason=#{inspect(loggable_before_run_failure(reason))}"
+          )
+
+          {:ok, append_before_run_failure_prompt(opts, reason)}
+        else
+          error
+        end
+    end
+  end
+
+  defp append_before_run_failure_prompt(opts, reason) do
+    prompt = before_run_failure_prompt(reason)
+
+    Keyword.update(opts, :extra_prompt, prompt, fn
+      existing when is_binary(existing) and existing != "" -> String.trim_trailing(existing) <> "\n\n" <> prompt
+      _existing -> prompt
+    end)
+  end
+
+  defp before_run_failure_prompt(reason) do
+    """
+    Before-run hook failed before this repair turn, but Symphony is allowing this run to continue.
+
+    Hook failure:
+    #{format_before_run_failure(reason)}
+
+    First inspect the workspace and repair the synchronization blocker. If this was a git rebase or merge conflict, rerun the relevant git fetch/rebase/merge command, resolve the conflicts, continue the operation, run validation, and update the existing PR branch. Do not merge the PR.
+    """
+    |> String.trim()
+  end
+
+  defp repairable_before_run_sync_failure?({:workspace_hook_failed, "before_run", _status, output}) do
+    normalized = output |> to_string() |> valid_prompt_text() |> String.downcase()
+
+    String.contains?(normalized, [
+      "conflict",
+      "automatic merge failed",
+      "could not apply",
+      "fix conflicts and then",
+      "merge conflict",
+      "rebase in progress",
+      "unmerged paths"
+    ])
+  end
+
+  defp repairable_before_run_sync_failure?(_reason), do: false
+
+  defp loggable_before_run_failure({:workspace_hook_failed, "before_run", status, output}) do
+    %{
+      hook: "before_run",
+      status: status,
+      output: output |> to_string() |> redact_secret_values() |> truncate_prompt_text(800)
+    }
+  end
+
+  defp loggable_before_run_failure(reason) do
+    reason
+    |> inspect()
+    |> redact_secret_values()
+    |> truncate_prompt_text(800)
+  end
+
+  defp format_before_run_failure({:workspace_hook_failed, "before_run", status, output}) do
+    """
+    before_run exited with status #{status}.
+
+    Output:
+    #{output |> to_string() |> redact_secret_values() |> truncate_prompt_text()}
+    """
+    |> String.trim()
+  end
+
+  defp format_before_run_failure(reason) do
+    reason
+    |> inspect()
+    |> redact_secret_values()
+    |> truncate_prompt_text()
+  end
+
+  defp truncate_prompt_text(text, max_chars \\ 4_000) when is_binary(text) do
+    text = valid_prompt_text(text)
+
+    if String.length(text) <= max_chars do
+      text
+    else
+      String.slice(text, 0, max_chars) <> "... (truncated)"
+    end
+  end
+
+  defp valid_prompt_text(text) when is_binary(text) do
+    if String.valid?(text) do
+      text
+    else
+      text
+      |> strip_invalid_utf8([])
+      |> Enum.reverse()
+      |> IO.iodata_to_binary()
+    end
+  end
+
+  defp strip_invalid_utf8(<<>>, acc), do: acc
+  defp strip_invalid_utf8(<<codepoint::utf8, rest::binary>>, acc), do: strip_invalid_utf8(rest, [<<codepoint::utf8>> | acc])
+  defp strip_invalid_utf8(<<_byte, rest::binary>>, acc), do: strip_invalid_utf8(rest, acc)
+
+  # Defense-in-depth only: hook output is still treated as sensitive and kept short.
+  defp redact_secret_values(output) when is_binary(output) do
+    output
+    |> then(&Regex.replace(~r{\b(https?://)[^\s/@:]+:[^\s/@]+@}i, &1, "\\1[REDACTED]@"))
+    |> then(&Regex.replace(~r/\b(authorization:\s*bearer\s+)[^\s"']+/i, &1, "\\1[REDACTED]"))
+    |> then(&Regex.replace(~r/("?(?:api[_-]?key|token|secret|password)"?\s*:\s*")[^"]+"/i, &1, "\\1[REDACTED]\""))
+    |> then(&Regex.replace(~r/\b((?:api[_-]?key|token|secret|password)=)[^\s"']+/i, &1, "\\1[REDACTED]"))
+    |> then(&Regex.replace(~r/\b(LINEAR_API_KEY=)[^\s"']+/i, &1, "\\1[REDACTED]"))
+    |> then(&Regex.replace(~r/\b(ghp_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)/, &1, "[REDACTED]"))
+    |> then(&Regex.replace(~r/\b(xox[baprs]-[A-Za-z0-9-]+)/, &1, "[REDACTED]"))
   end
 
   defp codex_message_handler(recipient, issue) do
