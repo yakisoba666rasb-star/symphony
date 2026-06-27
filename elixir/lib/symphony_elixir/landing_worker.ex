@@ -9,7 +9,7 @@ defmodule SymphonyElixir.LandingWorker do
 
   require Logger
 
-  alias SymphonyElixir.{Config, GitHubCommand}
+  alias SymphonyElixir.{Config, GitHubCommand, RetryPolicy}
   alias SymphonyElixir.LandingWorker.RepairEntry
 
   @type command_result ::
@@ -548,23 +548,51 @@ defmodule SymphonyElixir.LandingWorker do
 
   defp maybe_request_repair(result, tracker, entry, settings, reason) do
     repair_state = settings.landing.repair_state
+    policy = RetryPolicy.policy(:landing_repair, settings)
+    next_attempt = landing_repair_next_attempt(entry, result)
 
-    with :ok <- move_issue_state(tracker, entry, repair_state),
-         :ok <- create_comment(tracker, entry, repair_comment(entry, reason, settings)) do
-      %{
-        result
-        | repair_requested: result.repair_requested + 1,
-          repair_entries: [repair_entry(entry, reason) | result.repair_entries]
-      }
+    if RetryPolicy.allow_attempt?(next_attempt, policy) do
+      with :ok <- move_issue_state(tracker, entry, repair_state),
+           :ok <- create_comment(tracker, entry, repair_comment(entry, reason, settings, next_attempt, policy)) do
+        %{
+          result
+          | repair_requested: result.repair_requested + 1,
+            repair_entries: [repair_entry(entry, reason, next_attempt) | result.repair_entries]
+        }
+      else
+        {:error, repair_reason} ->
+          Logger.warning("Failed to request Approved to Land repair for #{entry_context(entry)}: #{inspect(repair_reason)}")
+          %{result | errors: result.errors + 1}
+      end
     else
-      {:error, repair_reason} ->
-        Logger.warning("Failed to request Approved to Land repair for #{entry_context(entry)}: #{inspect(repair_reason)}")
-        %{result | errors: result.errors + 1}
+      terminal_reason = RetryPolicy.terminal_reason(policy, next_attempt, reason)
+
+      case create_comment(tracker, entry, landing_repair_exhausted_comment(entry, terminal_reason, settings, policy)) do
+        :ok ->
+          result
+
+        {:error, repair_reason} ->
+          Logger.warning("Failed to comment on exhausted Approved to Land repair for #{entry_context(entry)}: #{inspect(repair_reason)}")
+          %{result | errors: result.errors + 1}
+      end
     end
   end
 
-  defp repair_entry(entry, reason) do
-    RepairEntry.new!(entry, reason)
+  defp landing_repair_next_attempt(entry, result) do
+    landing_repair_prior_attempts(entry) + result.repair_requested + 1
+  end
+
+  defp landing_repair_prior_attempts(entry) do
+    entry
+    |> Map.get(:landing_repair_attempts, Map.get(entry, :landing_repair_attempt, 0))
+    |> non_neg_integer()
+  end
+
+  defp non_neg_integer(value) when is_integer(value) and value >= 0, do: value
+  defp non_neg_integer(_value), do: 0
+
+  defp repair_entry(entry, reason, next_attempt) do
+    RepairEntry.new!(entry, reason, next_attempt)
   end
 
   defp block_runtime_stale_entry(entry, tracker, settings, freshness) do
@@ -792,13 +820,14 @@ defmodule SymphonyElixir.LandingWorker do
     |> String.trim()
   end
 
-  defp repair_comment(entry, reason, settings) do
+  defp repair_comment(entry, reason, settings, next_attempt, policy) do
     """
     Symphony Approved to Land repair requested
 
     Issue: #{issue_label(entry)}
     PR: #{Map.get(entry, :pr_url, "unknown")}
     Reason: #{reason}
+    Attempt: #{landing_repair_attempt_label(next_attempt, policy)}
 
     The issue was moved from #{settings.landing.blocked_state} to #{settings.landing.repair_state} so the normal implementation agent can repair the PR branch. Resolve the blocker, update the existing PR when possible, and return the issue to #{settings.tracker.review_state}. A human should move it back to #{settings.landing.approval_state} after re-review.
 
@@ -806,6 +835,26 @@ defmodule SymphonyElixir.LandingWorker do
     """
     |> String.trim()
   end
+
+  defp landing_repair_exhausted_comment(entry, terminal_reason, settings, policy) do
+    """
+    Symphony Approved to Land repair exhausted
+
+    Issue: #{issue_label(entry)}
+    PR: #{Map.get(entry, :pr_url, "unknown")}
+    Reason: #{terminal_reason}
+    Limit: #{landing_repair_limit_label(policy)}
+
+    Automated landing repair has reached its configured limit and Symphony will leave this issue in #{settings.landing.blocked_state}. A human needs to inspect the PR, resolve the blocker, and decide whether to requeue it.
+    """
+    |> String.trim()
+  end
+
+  defp landing_repair_attempt_label(next_attempt, %{max_attempts: 0}), do: "#{next_attempt} (unbounded)"
+  defp landing_repair_attempt_label(next_attempt, %{max_attempts: max_attempts}), do: "#{next_attempt}/#{max_attempts}"
+
+  defp landing_repair_limit_label(%{max_attempts: 0}), do: "unbounded"
+  defp landing_repair_limit_label(%{max_attempts: max_attempts}), do: to_string(max_attempts)
 
   defp runtime_stale_comment(entry, settings, freshness, reason, label_result) do
     """

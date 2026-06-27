@@ -501,6 +501,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_handoff_pr_discovery_attempts, :integer)
       field(:max_blocked_review_handoff_attempts, :integer)
       field(:max_review_handoff_attempts, :integer)
+      field(:max_landing_repair_attempts, :integer)
       field(:max_done_sync_attempts, :integer)
       field(:base_backoff_ms, :integer, default: 10_000)
       field(:max_backoff_ms, :integer)
@@ -518,6 +519,7 @@ defmodule SymphonyElixir.Config.Schema do
           :max_handoff_pr_discovery_attempts,
           :max_blocked_review_handoff_attempts,
           :max_review_handoff_attempts,
+          :max_landing_repair_attempts,
           :max_done_sync_attempts,
           :base_backoff_ms,
           :max_backoff_ms,
@@ -530,6 +532,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_handoff_pr_discovery_attempts, greater_than_or_equal_to: 0)
       |> validate_number(:max_blocked_review_handoff_attempts, greater_than_or_equal_to: 0)
       |> validate_number(:max_review_handoff_attempts, greater_than_or_equal_to: 0)
+      |> validate_number(:max_landing_repair_attempts, greater_than_or_equal_to: 0)
       |> validate_number(:max_done_sync_attempts, greater_than_or_equal_to: 0)
       |> validate_number(:base_backoff_ms, greater_than: 0)
       |> validate_number(:max_backoff_ms, greater_than: 0)

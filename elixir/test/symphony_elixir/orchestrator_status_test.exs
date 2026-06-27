@@ -2249,6 +2249,32 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute MapSet.member?(state.completed, issue_id)
   end
 
+  test "Approved to Land repair dispatch stops when landing repair attempts are exhausted" do
+    repair_attempt = 3
+    max_attempts = 2
+    exhausted_issue_id = "issue-landing-repair-exhausted"
+
+    %{issue_id: issue_id} =
+      setup_landing_repair_dispatch_test!(
+        retry_max_landing_repair_attempts: max_attempts,
+        repair_entries: [landing_repair_entry(exhausted_issue_id, "LAB-535", repair_attempt)],
+        issue_id: exhausted_issue_id
+      )
+
+    state = Orchestrator.plan_approved_landings_for_test(%Orchestrator.State{})
+
+    assert_receive {:landing_worker_execute, true, 1}
+    assert_receive {:landing_repair_issue_refresh, [^issue_id]}
+    refute_receive {:agent_runner_called, %{id: ^issue_id}, _opts}, 100
+    assert state.running == %{}
+    assert state.landing_repair_attempts[issue_id] == repair_attempt
+    assert_receive {:landing_comment, ^issue_id, dry_run_body}
+    assert dry_run_body =~ "dry-run plan"
+    assert_receive {:landing_comment, ^issue_id, body}
+    assert body =~ "repair dispatch skipped"
+    assert body =~ "landing repair retry limit reached (2) after attempt 3"
+  end
+
   test "Approved to Land repair dispatch skips when worker capacity is exhausted" do
     %{issue_id: issue_id} = setup_landing_repair_dispatch_test!()
 
@@ -6360,6 +6386,99 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     Process.sleep(100)
     refute_receive {:tracker_comment_called, ^issue_id, _comment}, 200
     assert Process.alive?(worker_pid)
+
+    send(worker_pid, :done)
+  end
+
+  test "codex progress posts throttled Linear heartbeat comments for long running agents" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      stall_threshold_ms: 60_000
+    )
+
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    issue_id = "issue-progress-heartbeat"
+    issue = %Issue{id: issue_id, identifier: "MT-PROGRESS-HEARTBEAT", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :ProgressHeartbeatOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    initial_state = :sys.get_state(pid, 15_000)
+    now_ms = System.monotonic_time(:millisecond)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: "MT-PROGRESS-HEARTBEAT",
+      issue: issue,
+      worker_host: "worker-a",
+      workspace_path: "/tmp/mt-progress-heartbeat",
+      session_id: "thread-progress-heartbeat",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now(),
+      last_progress_ms: now_ms,
+      stall_comment_posted?: false,
+      next_progress_comment_ms: now_ms - 1,
+      progress_comment_count: 0
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    update = %{
+      event: :notification,
+      timestamp: DateTime.utc_now(),
+      payload: %{
+        "method" => "codex/event/agent_message_delta",
+        "params" => %{
+          "msg" => %{
+            "payload" => %{"delta" => "Running full validation before opening the PR."}
+          }
+        }
+      }
+    }
+
+    send(pid, {:codex_worker_update, issue_id, update})
+
+    state =
+      wait_for_orchestrator_state(pid, fn state ->
+        match?(%{progress_comment_count: 1}, state.running[issue_id])
+      end)
+
+    assert_receive {:tracker_comment_called, ^issue_id, comment}, 500
+    assert comment =~ "Symphony agent progress update for MT-PROGRESS-HEARTBEAT"
+    assert comment =~ "Status: still running"
+    assert comment =~ "Session: thread-progress-heartbeat"
+    assert comment =~ "Workspace: /tmp/mt-progress-heartbeat"
+    assert comment =~ "Worker host: worker-a"
+    assert comment =~ "Running full validation before opening the PR."
+    assert state.running[issue_id].next_progress_comment_ms > now_ms
+
+    send(pid, {:codex_worker_update, issue_id, update})
+    Process.sleep(100)
+    refute_receive {:tracker_comment_called, ^issue_id, _comment}, 200
 
     send(worker_pid, :done)
   end
@@ -11097,6 +11216,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       landing_repair_state: "In Progress",
       poll_interval_ms: 50,
       landing_interval_ms: 1_000,
+      retry_max_landing_repair_attempts: Keyword.get(opts, :retry_max_landing_repair_attempts),
       repository_default: "octo/repo"
     )
 
@@ -11199,6 +11319,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   defp landing_repair_entry(issue_id, issue_identifier \\ "LAB-491") do
     landing_repair_entry_attrs(issue_id, issue_identifier)
     |> RepairEntry.new!("PR mergeability is UNSTABLE")
+  end
+
+  defp landing_repair_entry(issue_id, issue_identifier, repair_attempt) do
+    landing_repair_entry_attrs(issue_id, issue_identifier)
+    |> RepairEntry.new!("PR mergeability is UNSTABLE", repair_attempt)
   end
 
   defp landing_repair_entry_attrs(issue_id, issue_identifier) do
