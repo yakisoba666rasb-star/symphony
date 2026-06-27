@@ -44,7 +44,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           :ok
       end
 
-      {:ok, Application.get_env(:symphony_elixir, :landing_planner_issues, [])}
+      case Application.get_env(:symphony_elixir, :landing_planner_issues_by_state) do
+        issues_by_state when is_map(issues_by_state) ->
+          {:ok, Enum.flat_map(states, &Map.get(issues_by_state, &1, []))}
+
+        _ ->
+          {:ok, Application.get_env(:symphony_elixir, :landing_planner_issues, [])}
+      end
     end
 
     def fetch_issue_states_by_ids(issue_ids) do
@@ -102,7 +108,17 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       :ok
     end
 
-    def remove_issue_labels(_issue_id, _labels), do: :ok
+    def remove_issue_labels(issue_id, labels) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:landing_labels_removed, issue_id, labels})
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
   end
 
   defmodule FakeLandingTrackerWithoutRefresh do
@@ -1734,6 +1750,90 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute_receive {:landing_labels_added, "issue-landing-unknown-runtime", _labels}, 100
     refute_receive {:landing_worker_execute, _enabled, _count}, 100
     assert %{status: :unknown} = state.runtime_freshness
+  end
+
+  test "Approved to Land requeues stale runtime blocked issues after freshness recovers" do
+    previous_env =
+      for key <- [
+            :github_pr_lookup,
+            :tracker_module,
+            :landing_worker,
+            :landing_planner_issues,
+            :landing_planner_issues_by_state,
+            :runtime_freshness_check,
+            :tracker_comment_recipient
+          ],
+          do: {key, Application.get_env(:symphony_elixir, key)}
+
+    on_exit(fn ->
+      Enum.each(previous_env, fn
+        {key, nil} -> Application.delete_env(:symphony_elixir, key)
+        {key, value} -> Application.put_env(:symphony_elixir, key, value)
+      end)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      landing_enabled: true,
+      landing_execute_enabled: true,
+      landing_blocked_state: "Merge Blocked",
+      poll_interval_ms: 50,
+      landing_interval_ms: 1_000,
+      repository_default: "octo/repo"
+    )
+
+    stale_blocked_issue = %Issue{
+      id: "issue-stale-runtime-blocked",
+      identifier: "LAB-STALE-RECOVERED",
+      title: "Blocked while runtime was stale",
+      state: "Merge Blocked",
+      branch_name: "lab-stale-recovered",
+      labels: ["landing-blocked", "landing-stale-runtime"]
+    }
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeLandingPrLookup)
+    Application.put_env(:symphony_elixir, :tracker_module, FakeLandingTracker)
+    Application.put_env(:symphony_elixir, :landing_worker, FakeLandingWorker)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
+    Application.put_env(:symphony_elixir, :landing_planner_issues_by_state, %{
+      "Approved to Land" => [],
+      "Merge Blocked" => [stale_blocked_issue]
+    })
+
+    Application.put_env(:symphony_elixir, :runtime_freshness_check, fn fetch? ->
+      send(self(), {:runtime_freshness_checked, fetch?})
+
+      %{
+        status: :fresh,
+        checked_at: DateTime.utc_now(),
+        repo_path: "/repo",
+        current_sha: "2222222222222222222222222222222222222222",
+        upstream_ref: "origin/main",
+        upstream_sha: "2222222222222222222222222222222222222222",
+        message: nil
+      }
+    end)
+
+    state =
+      Orchestrator.plan_approved_landings_for_test(%Orchestrator.State{
+        runtime_freshness: %{status: :stale, message: "runtime HEAD does not contain origin/main"}
+      })
+
+    assert_receive {:landing_fetch_states, ["Approved to Land"]}
+    assert_receive {:runtime_freshness_checked, true}
+    assert_receive {:landing_fetch_states, ["Merge Blocked"]}
+    assert_receive {:landing_state_update, "issue-stale-runtime-blocked", "Approved to Land"}
+
+    assert_receive {:landing_labels_removed, "issue-stale-runtime-blocked", labels}
+    assert "landing-blocked" in labels
+    assert "landing-stale-runtime" in labels
+
+    assert_receive {:landing_comment, "issue-stale-runtime-blocked", body}
+    assert body =~ "Symphony Approved to Land stale runtime recovery"
+    assert body =~ "moved back to Approved to Land"
+
+    assert_receive {:landing_worker_execute, true, 0}
+    assert %{status: :fresh} = state.runtime_freshness
   end
 
   test "Approved to Land planning does not fetch runtime freshness for an empty queue" do
