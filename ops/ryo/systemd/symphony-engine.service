@@ -10,8 +10,9 @@ Group=ryo
 WorkingDirectory=/home/ryo/src/symphony/elixir
 EnvironmentFile=/home/ryo/.config/symphony-ryo/symphony.env
 # Keep this guard in sync with systemd/symphony-engine.service.d/override.conf.
-# Runtime restarts require clean local main, while deploy-main.sh enforces origin/main parity.
-ExecStartPre=/usr/bin/env SYMPHONY_DEPLOY_CHECK_REMOTE_REF=0 /home/ryo/src/symphony/ops/ryo/check-deploy-checkout.sh /home/ryo/src/symphony
+# Runtime restarts fast-forward to origin/main before landing can execute.
+ExecStartPre=/home/ryo/src/symphony/ops/ryo/sync-deploy-checkout.sh /home/ryo/src/symphony
+ExecStartPre=/home/ryo/src/symphony/ops/ryo/check-deploy-checkout.sh /home/ryo/src/symphony
 ExecStartPre=/home/ryo/src/symphony/ops/ryo/preflight.sh /home/ryo/src/symphony/ops/ryo/WORKFLOW.md
 ExecStart=/home/ryo/.local/bin/mise exec -- /home/ryo/src/symphony/elixir/bin/symphony --port 4000 --i-understand-that-this-will-be-running-without-the-usual-guardrails /home/ryo/src/symphony/ops/ryo/WORKFLOW.md
 Restart=always

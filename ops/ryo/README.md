@@ -60,16 +60,12 @@ is not installed, `/var/log/symphony-ryo/engine.log` and
 `preflight.sh` validates that `/var/log/symphony-ryo` exists and is writable by
 the `ryo` runtime user before it validates the workflow configuration.
 
-`check-deploy-checkout.sh` is the non-mutating guard used by systemd before the
-engine starts. During service startup it requires `/home/ryo/src/symphony` to be
-the repository root, on `main`, and clean. The systemd unit intentionally runs
-it with `SYMPHONY_DEPLOY_CHECK_REMOTE_REF=0` so a host reboot or crash restart
-does not fail only because another worktree has fetched a newer `origin/main`.
-
-The deployment script below runs the same guard with the default remote-ref
-check enabled, after fetching and fast-forwarding `main`. That keeps explicit
-deployments tied to `origin/main` without making service self-recovery depend on
-network or remote-tracking-ref freshness.
+`sync-deploy-checkout.sh` is the startup updater used by systemd before the
+engine starts. It refuses dirty checkouts, fetches `origin`, switches to `main`,
+and fast-forwards to `origin/main`. `check-deploy-checkout.sh` then verifies the
+repository root, branch, cleanliness, and remote-ref parity. If the checkout
+cannot be fast-forwarded, the service fails before the runtime can process the
+Approved to Land queue with stale code.
 
 ## Deploy Updates
 
@@ -81,9 +77,10 @@ Use `deploy-main.sh` for normal runtime updates:
 
 The script refuses to update a dirty deploy checkout. If `/home/ryo/src/symphony`
 contains local edits, move them to a worktree, commit them, or stash them before
-deployment. After the checkout is clean, the script fetches `origin`, fast-forward
-pulls `main`, validates the checkout guard, builds the escript, runs preflight,
-restarts `symphony-engine.service`, and waits for `/api/v1/state`.
+deployment. After the checkout is clean, the script uses
+`sync-deploy-checkout.sh` to fetch `origin` and fast-forward `main`, validates
+the checkout guard, builds the escript, runs preflight, restarts
+`symphony-engine.service`, and waits for `/api/v1/state`.
 
 Do PR work and conflict resolution in a separate worktree, not in
 `/home/ryo/src/symphony`:
