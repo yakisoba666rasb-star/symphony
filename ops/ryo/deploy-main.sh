@@ -38,9 +38,8 @@ if [[ -n "$status" ]]; then
   exit 1
 fi
 
-git -C "$deploy_root" fetch --prune "$remote"
-git -C "$deploy_root" switch "$branch"
-git -C "$deploy_root" pull --ff-only "$remote" "$branch"
+SYMPHONY_DEPLOY_BRANCH="$branch" SYMPHONY_DEPLOY_REMOTE="$remote" \
+  "$deploy_root/ops/ryo/sync-deploy-checkout.sh" "$deploy_root"
 
 "$deploy_root/ops/ryo/check-deploy-checkout.sh" "$deploy_root"
 
