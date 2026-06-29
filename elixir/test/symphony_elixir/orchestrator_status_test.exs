@@ -1605,6 +1605,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "Approved to Land execution blocks instead of merging when runtime is stale" do
+    stop_default_orchestrator_for_direct_landing_repair_test!()
+
     previous_env =
       for key <- [
             :github_pr_lookup,
@@ -1672,7 +1674,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_receive {:landing_labels_added, "issue-landing-stale-runtime", labels}
     assert "landing-blocked" in labels
     assert "landing-stale-runtime" in labels
-    assert_receive {:landing_comment, "issue-landing-stale-runtime", stale_body}
+
+    stale_body =
+      receive_landing_comment_matching!(
+        "issue-landing-stale-runtime",
+        &String.contains?(&1, "Symphony Approved to Land execution blocked")
+      )
+
     assert stale_body =~ "Symphony Approved to Land execution blocked"
     assert stale_body =~ "Runtime HEAD: 1111111111111111111111111111111111111111"
     assert stale_body =~ "origin/main 2222222222222222222222222222222222222222"
@@ -11186,6 +11194,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     do_receive_post_merge_fetch_states(predicate, deadline_ms, [])
   end
 
+  defp receive_landing_comment_matching!(issue_id, predicate, timeout_ms \\ 500)
+       when is_binary(issue_id) and is_function(predicate, 1) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_receive_landing_comment_matching!(issue_id, predicate, deadline_ms)
+  end
+
   defp flush_agent_runner_calls(issue_id) do
     receive do
       {:agent_runner_called, %{id: ^issue_id}, _opts} -> flush_agent_runner_calls(issue_id)
@@ -11355,6 +11369,22 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     after
       remaining_ms ->
         flunk("timed out waiting for post-merge fetch states; saw #{inspect(Enum.reverse(seen_state_names))}")
+    end
+  end
+
+  defp do_receive_landing_comment_matching!(issue_id, predicate, deadline_ms) do
+    remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:landing_comment, ^issue_id, body} ->
+        if predicate.(body) do
+          body
+        else
+          do_receive_landing_comment_matching!(issue_id, predicate, deadline_ms)
+        end
+    after
+      remaining_ms ->
+        flunk("timed out waiting for matching landing comment on #{issue_id}")
     end
   end
 
